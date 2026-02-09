@@ -176,7 +176,7 @@ You should see this structure inside:
 ### Step 1.2: Open in Enfusion Workbench
 
 1. Launch **Arma Reforger Tools** from Steam
-2. In the Workbench launcher, click **File** > **Open Project...**
+2. In the Workbench launcher, click **Add Project** > **Add Existing Project**
 3. Navigate to `{DEFAULT_ADDON_DIR}\\{self.map_name}\\addon.gproj`
 4. Click **Open**
 5. The project should appear in the Projects list with the name **"{self.map_name}"**
