@@ -151,11 +151,21 @@ def parallel_zoom(
     # Overlap for cubic spline needs ~order+1 pixels
     overlap = order + 2
 
+    # Pre-compute the exact expected output height so that rounding errors
+    # across chunks don't accumulate into extra/missing rows.
+    target_rows = int(round(rows * zoom_y))
+
     chunk_starts = np.linspace(0, rows, workers + 1, dtype=int)
 
-    def _process_chunk(idx: int) -> tuple[int, int, np.ndarray]:
+    # Pre-compute each chunk's target output rows from the known total.
+    # This avoids the rounding drift that caused non-square heightmaps
+    # (e.g. 2054×2049 instead of 2049×2049).
+    out_starts = [int(round(chunk_starts[i] * zoom_y)) for i in range(workers + 1)]
+
+    def _process_chunk(idx: int) -> tuple[int, np.ndarray]:
         start = chunk_starts[idx]
         end = chunk_starts[idx + 1]
+        expected_out_rows = out_starts[idx + 1] - out_starts[idx]
 
         padded_start = max(0, start - overlap)
         padded_end = min(rows, end + overlap)
@@ -164,8 +174,6 @@ def parallel_zoom(
         zoomed = zoom(chunk, (zoom_y, zoom_x), order=order)
 
         # Calculate where the original chunk maps to in the zoomed output
-        # The zoomed output rows correspond to the padded input rows
-        chunk_rows = end - start
         total_padded = padded_end - padded_start
         zoomed_total = zoomed.shape[0]
 
@@ -173,7 +181,10 @@ def parallel_zoom(
         frac_start = (start - padded_start) / total_padded
         frac_end = (end - padded_start) / total_padded
         trim_start = int(round(frac_start * zoomed_total))
-        trim_end = int(round(frac_end * zoomed_total))
+        trim_end = trim_start + expected_out_rows
+
+        # Clamp to actual array bounds
+        trim_end = min(trim_end, zoomed_total)
 
         return idx, zoomed[trim_start:trim_end]
 
@@ -185,7 +196,17 @@ def parallel_zoom(
             idx, chunk_result = future.result()
             chunks_out[idx] = chunk_result
 
-    return np.concatenate(chunks_out, axis=0)
+    result = np.concatenate(chunks_out, axis=0)
+
+    # Final safety trim/pad to guarantee exact target dimensions
+    if result.shape[0] > target_rows:
+        result = result[:target_rows]
+    elif result.shape[0] < target_rows:
+        # Extremely unlikely after the pre-computed splits, but pad if needed
+        pad_rows = target_rows - result.shape[0]
+        result = np.pad(result, ((0, pad_rows), (0, 0)), mode="edge")
+
+    return result
 
 
 # ---------------------------------------------------------------------------

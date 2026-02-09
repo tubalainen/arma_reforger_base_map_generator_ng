@@ -575,7 +575,12 @@ def generate_surface_masks(
     # Where total > 1.0, normalize proportionally
     oversaturated = total_non_grass > 1.0
     if np.any(oversaturated):
-        scale = np.where(oversaturated, 1.0 / total_non_grass, 1.0)
+        # Use np.maximum to avoid divide-by-zero for pixels where
+        # total_non_grass is 0 (they aren't oversaturated, so the
+        # scale value is discarded, but np.where evaluates both
+        # branches and the division would trigger a RuntimeWarning).
+        safe_total = np.maximum(total_non_grass, 1e-10)
+        scale = np.where(oversaturated, 1.0 / safe_total, 1.0)
         mask_stack *= scale[..., np.newaxis]
         total_non_grass = mask_stack.sum(axis=-1)
 
