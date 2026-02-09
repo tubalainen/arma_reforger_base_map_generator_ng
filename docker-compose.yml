@@ -20,14 +20,18 @@ services:
       - FORWARDED_ALLOW_IPS=127.0.0.1
     restart: unless-stopped
     # Resource limits
+    # Large maps (20+ km) with high-res elevation (1m LiDAR) need extra resources.
+    # The pipeline uses ProcessPoolExecutor for CPU-bound heightmap/surface work
+    # and concurrent tile downloads — more CPUs = faster generation.
+    # Peak memory for 20x20 km at 1m: ~1.5-2 GB (float32 arrays + merge buffers).
     deploy:
       resources:
         limits:
-          cpus: '2'
-          memory: 4G
+          cpus: '4'
+          memory: 6G
         reservations:
-          cpus: '0.5'
-          memory: 1G
+          cpus: '1'
+          memory: 2G
     # Security options
     security_opt:
       - no-new-privileges:true

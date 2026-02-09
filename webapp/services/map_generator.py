@@ -16,11 +16,14 @@ Each step is implemented as an independent function for testability.
 The orchestrator (run_generation) coordinates them and tracks progress.
 """
 
+import asyncio
 import json
 import logging
+import os
 import secrets
 import shutil
 import threading
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -29,6 +32,13 @@ logger = logging.getLogger(__name__)
 
 # Job ID length in bytes (16 bytes = 128 bits of entropy, URL-safe base64 encoded)
 JOB_ID_BYTES = 16
+
+# ProcessPoolExecutor for CPU-bound steps (heightmap + surface masks).
+# Reused across requests to avoid process startup overhead.
+# Workers default to CPU count (capped at 4 to avoid memory pressure).
+_CPU_WORKERS = min(4, os.cpu_count() or 2)
+_cpu_executor = ProcessPoolExecutor(max_workers=_CPU_WORKERS)
+logger.info(f"CPU executor initialized with {_CPU_WORKERS} workers")
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +530,9 @@ async def run_generation(job: MapGenerationJob):
         )
 
         # Step 4: Generate heightmap (40% -> 60%)
+        # Runs in a separate process via ProcessPoolExecutor to utilize
+        # multiple CPU cores (scipy/numpy operations release the GIL
+        # partially, but a separate process avoids GIL entirely).
         job.current_step = "Generating heightmap..."
         job.progress = 40
         logger.info(f"[{job.job_id}] Step 4: Heightmap generation")
@@ -528,13 +541,16 @@ async def run_generation(job: MapGenerationJob):
         target_size = job.options.get("heightmap_size", 2048)
         target_resolution = job.options.get("grid_resolution", 2.0)
 
-        heightmap_result = step_generate_heightmap(
-            dem_bytes=elevation_result["data"],
-            osm_data=osm_data,
-            target_size=target_size,
-            target_resolution=target_resolution,
-            output_dir=output_dir,
-            job=job,
+        loop = asyncio.get_event_loop()
+        heightmap_result = await loop.run_in_executor(
+            _cpu_executor,
+            step_generate_heightmap,
+            elevation_result["data"],
+            osm_data,
+            target_size,
+            target_resolution,
+            output_dir,
+            None,  # job=None — can't pickle across process boundary
         )
 
         job.progress = 60
@@ -567,15 +583,17 @@ async def run_generation(job: MapGenerationJob):
         hm_dims_parts = hm_dims_str.split("x")
         heightmap_dims = (int(hm_dims_parts[0]), int(hm_dims_parts[1]))
 
-        surface_result = step_generate_surface_masks(
-            elevation_array=heightmap_result["_elevation_array"],
-            osm_data=osm_data,
-            bbox=bbox,
-            target_resolution=target_resolution,
-            output_dir=output_dir,
-            primary_country=primary_country,
-            heightmap_dimensions=heightmap_dims,
-            job=job,
+        surface_result = await loop.run_in_executor(
+            _cpu_executor,
+            step_generate_surface_masks,
+            heightmap_result["_elevation_array"],
+            osm_data,
+            bbox,
+            target_resolution,
+            output_dir,
+            primary_country,
+            heightmap_dims,
+            None,  # job=None — can't pickle across process boundary
         )
 
         job.progress = 75
@@ -813,7 +831,6 @@ async def run_generation(job: MapGenerationJob):
 
         # Schedule cleanup now that generation is complete
         # This gives users the full retention time from completion, not from job creation
-        import asyncio
         from main import schedule_cleanup, FILE_RETENTION_MINUTES
         asyncio.create_task(schedule_cleanup(job.job_id, FILE_RETENTION_MINUTES))
 

@@ -144,6 +144,7 @@ async def fetch_stac_elevation(
             # 2. Download COG assets to temporary files on disk
             #    This avoids holding all tiles in memory simultaneously,
             #    which would cause OOM for large areas (63 tiles × ~10 MB each).
+            #    Downloads run concurrently (up to 4 at a time) for speed.
             import rasterio
             import rasterio.warp
             from rasterio.merge import merge as rasterio_merge
@@ -151,82 +152,117 @@ async def fetch_stac_elevation(
 
             tile_paths: list[Path] = []
             download_errors = 0
+            _auth_abort = False  # Set True on 401/403 to stop all downloads
 
-            for tile_idx, feat in enumerate(features):
+            # Semaphore limits concurrent downloads to avoid overwhelming
+            # Lantmäteriet's download server while still being much faster
+            # than sequential (4 concurrent vs 1 sequential).
+            sem = asyncio.Semaphore(4)
+
+            async def _download_tile(
+                tile_idx: int,
+                feat: dict,
+            ) -> Optional[Path]:
+                """Download a single STAC tile. Returns tile path or None."""
+                nonlocal download_errors, _auth_abort
+
+                if _auth_abort:
+                    return None
+
                 assets = feat.get("assets", {})
                 data_asset = assets.get("data")
                 if data_asset is None:
-                    continue
-
-                # Throttle: small delay between tile downloads to be
-                # gentle on Lantmäteriet's download server.
-                if tile_idx > 0:
-                    await asyncio.sleep(0.5)
+                    return None
 
                 asset_url = data_asset["href"]
                 asset_size = data_asset.get("file:size", "unknown")
                 tile_id = feat.get("id", f"tile_{tile_idx}")
-                logger.info(
-                    f"Downloading STAC tile: {tile_id} "
-                    f"({asset_size} bytes) from {asset_url}"
-                )
 
-                # Download with Basic Auth — dl1.lantmateriet.se requires it
-                data_resp = await client.get(
-                    asset_url,
-                    headers=download_headers,
-                    follow_redirects=True,
-                )
-
-                if data_resp.status_code != 200:
-                    if data_resp.status_code == 403:
-                        logger.error(
-                            f"STAC Höjd tile download returned HTTP 403 Forbidden. "
-                            f"Your Lantmäteriet credentials are recognized but your "
-                            f"account is NOT authorized for Höjddata downloads. "
-                            f"You may need to subscribe to the 'Höjddata' product at "
-                            f"https://apimanager.lantmateriet.se/"
-                        )
-                        # All tiles will fail with the same error — abort early
+                async with sem:
+                    if _auth_abort:
                         return None
-                    elif data_resp.status_code == 401:
-                        logger.error(
-                            f"STAC Höjd tile download returned HTTP 401 Unauthorized. "
-                            f"Check LANTMATERIET_USERNAME and LANTMATERIET_PASSWORD in .env"
-                        )
-                        return None
-                    logger.warning(
-                        f"Failed to download tile {tile_id}: "
-                        f"HTTP {data_resp.status_code}"
-                    )
-                    download_errors += 1
-                    continue
 
-                # Validate TIFF magic bytes
-                content = data_resp.content
-                if len(content) < 4 or content[:4] not in (b"II*\x00", b"MM\x00*"):
-                    logger.warning(
-                        f"STAC asset is not valid TIFF data "
-                        f"(first 20 bytes: {content[:20]!r}), skipping"
-                    )
-                    download_errors += 1
-                    continue
+                    # Small throttle per-connection to be polite
+                    await asyncio.sleep(0.15)
 
-                # Write tile to a temporary file on disk instead of
-                # keeping it in a rasterio.MemoryFile.
-                tile_path = Path(tmp_dir) / f"{tile_id}.tif"
-                tile_path.write_bytes(content)
-                tile_paths.append(tile_path)
-
-                # Quick validation — open and close immediately
-                with rasterio.open(tile_path) as ds:
                     logger.info(
-                        f"  Tile OK: {ds.width}x{ds.height} px, "
-                        f"CRS={ds.crs}, {len(content)} bytes"
+                        f"Downloading STAC tile: {tile_id} "
+                        f"({asset_size} bytes) from {asset_url}"
                     )
 
-                # Release the download content from memory
-                del content
+                    data_resp = await client.get(
+                        asset_url,
+                        headers=download_headers,
+                        follow_redirects=True,
+                    )
+
+                    if data_resp.status_code != 200:
+                        if data_resp.status_code == 403:
+                            logger.error(
+                                f"STAC Höjd tile download returned HTTP 403 Forbidden. "
+                                f"Your Lantmäteriet credentials are recognized but your "
+                                f"account is NOT authorized for Höjddata downloads. "
+                                f"You may need to subscribe to the 'Höjddata' product at "
+                                f"https://apimanager.lantmateriet.se/"
+                            )
+                            _auth_abort = True
+                            return None
+                        elif data_resp.status_code == 401:
+                            logger.error(
+                                f"STAC Höjd tile download returned HTTP 401 Unauthorized. "
+                                f"Check LANTMATERIET_USERNAME and LANTMATERIET_PASSWORD in .env"
+                            )
+                            _auth_abort = True
+                            return None
+                        logger.warning(
+                            f"Failed to download tile {tile_id}: "
+                            f"HTTP {data_resp.status_code}"
+                        )
+                        download_errors += 1
+                        return None
+
+                    # Validate TIFF magic bytes
+                    content = data_resp.content
+                    if len(content) < 4 or content[:4] not in (b"II*\x00", b"MM\x00*"):
+                        logger.warning(
+                            f"STAC asset is not valid TIFF data "
+                            f"(first 20 bytes: {content[:20]!r}), skipping"
+                        )
+                        download_errors += 1
+                        return None
+
+                    # Write tile to a temporary file on disk instead of
+                    # keeping it in a rasterio.MemoryFile.
+                    tile_path = Path(tmp_dir) / f"{tile_id}.tif"
+                    tile_path.write_bytes(content)
+
+                    # Quick validation — open and close immediately
+                    with rasterio.open(tile_path) as ds:
+                        logger.info(
+                            f"  Tile OK: {ds.width}x{ds.height} px, "
+                            f"CRS={ds.crs}, {len(content)} bytes"
+                        )
+
+                    # Release the download content from memory
+                    del content
+                    return tile_path
+
+            # Launch all tile downloads concurrently (semaphore limits to 4)
+            tasks = [
+                _download_tile(idx, feat)
+                for idx, feat in enumerate(features)
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for r in results:
+                if isinstance(r, Exception):
+                    logger.warning(f"Tile download raised exception: {r}")
+                    download_errors += 1
+                elif isinstance(r, Path):
+                    tile_paths.append(r)
+
+            if _auth_abort:
+                return None
 
             if not tile_paths:
                 if download_errors > 0:

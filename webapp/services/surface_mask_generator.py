@@ -18,6 +18,7 @@ Key improvements over original:
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -60,15 +61,15 @@ def soft_edge_mask(binary_mask: np.ndarray, transition_px: int = 8) -> np.ndarra
         Float array [0.0, 1.0] with soft edges.
     """
     if transition_px <= 0:
-        return binary_mask.astype(np.float64)
+        return binary_mask.astype(np.float32)
 
     bool_mask = binary_mask.astype(bool)
 
     if not np.any(bool_mask):
-        return np.zeros_like(binary_mask, dtype=np.float64)
+        return np.zeros_like(binary_mask, dtype=np.float32)
 
     if np.all(bool_mask):
-        return np.ones_like(binary_mask, dtype=np.float64)
+        return np.ones_like(binary_mask, dtype=np.float32)
 
     # Distance from nearest False pixel (grows inward from boundary)
     inner_dist = distance_transform_edt(bool_mask)
@@ -95,7 +96,7 @@ def slope_ramp_mask(
         Float array [0.0, 1.0].
     """
     if full_deg <= start_deg:
-        return (slope_deg >= start_deg).astype(np.float64)
+        return (slope_deg >= start_deg).astype(np.float32)
 
     return np.clip((slope_deg - start_deg) / (full_deg - start_deg), 0.0, 1.0)
 
@@ -487,38 +488,52 @@ def generate_surface_masks(
         job.add_log("Computing soft-edge surface transitions...")
         job.progress = 68
 
-    logger.debug("Computing soft-edge masks...")
+    logger.debug("Computing soft-edge masks (parallel)...")
 
-    # Rock: smooth ramp based on slope (25deg -> 40deg) + above treeline
-    rock_float = slope_ramp_mask(slope, start_deg=25.0, full_deg=40.0)
-    # Above treeline contribution
+    # Precompute treeline mask (needed by rock and forest)
     treeline_mask = np.clip((elevation - treeline) / 200.0, 0.0, 1.0)
-    rock_float = np.maximum(rock_float, treeline_mask)
-    # Smooth rock edges
-    rock_float = ndimage.gaussian_filter(rock_float, sigma=sigma)
 
-    # Forest floor: soft edges from binary forest polygons
-    forest_float = soft_edge_mask(forest_binary, transition_px=forest_transition_px)
-    # Reduce forest above treeline
-    forest_float *= (1.0 - treeline_mask)
+    # --- Define per-surface compute functions for parallel execution ---
+    # scipy.ndimage operations (distance_transform_edt, gaussian_filter)
+    # release the GIL, so threads achieve true parallelism for these.
 
-    # Asphalt: soft edges from road binary + urban areas
-    asphalt_soft = soft_edge_mask(asphalt_binary, transition_px=2)
-    urban_soft = soft_edge_mask(urban_combined, transition_px=3) * 0.5  # Urban is weaker asphalt
-    asphalt_float = np.maximum(asphalt_soft, urban_soft)
+    def _compute_rock():
+        rock = slope_ramp_mask(slope, start_deg=25.0, full_deg=40.0)
+        rock = np.maximum(rock, treeline_mask)
+        return ndimage.gaussian_filter(rock, sigma=sigma)
 
-    # Sand/dirt: shoreline buffer + farmland + gravel roads
-    if np.any(water_binary):
-        # Shore zone: dilate water and take the non-water ring
-        water_dilated = ndimage.binary_dilation(water_binary, iterations=sand_transition_px)
-        shore_zone = water_dilated & ~water_binary
-        sand_shore = soft_edge_mask(shore_zone, transition_px=sand_transition_px)
-    else:
-        sand_shore = np.zeros((h, w), dtype=np.float64)
+    def _compute_forest():
+        forest = soft_edge_mask(forest_binary, transition_px=forest_transition_px)
+        forest *= (1.0 - treeline_mask)
+        return forest
 
-    farmland_soft = soft_edge_mask(farmland_binary, transition_px=5) * 0.6
-    gravel_soft = soft_edge_mask(gravel_binary, transition_px=2) * 0.8
-    sand_dirt_float = np.maximum(sand_shore, np.maximum(farmland_soft, gravel_soft))
+    def _compute_asphalt():
+        asphalt_soft = soft_edge_mask(asphalt_binary, transition_px=2)
+        urban_soft = soft_edge_mask(urban_combined, transition_px=3) * 0.5
+        return np.maximum(asphalt_soft, urban_soft)
+
+    def _compute_sand_dirt():
+        if np.any(water_binary):
+            water_dilated = ndimage.binary_dilation(water_binary, iterations=sand_transition_px)
+            shore_zone = water_dilated & ~water_binary
+            sand_shore = soft_edge_mask(shore_zone, transition_px=sand_transition_px)
+        else:
+            sand_shore = np.zeros((h, w), dtype=np.float32)
+        farmland_soft = soft_edge_mask(farmland_binary, transition_px=5) * 0.6
+        gravel_soft = soft_edge_mask(gravel_binary, transition_px=2) * 0.8
+        return np.maximum(sand_shore, np.maximum(farmland_soft, gravel_soft))
+
+    # Run all 4 mask computations in parallel threads
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        future_rock = pool.submit(_compute_rock)
+        future_forest = pool.submit(_compute_forest)
+        future_asphalt = pool.submit(_compute_asphalt)
+        future_sand = pool.submit(_compute_sand_dirt)
+
+        rock_float = future_rock.result()
+        forest_float = future_forest.result()
+        asphalt_float = future_asphalt.result()
+        sand_dirt_float = future_sand.result()
 
     # =========================================================================
     # Step 4: Normalize all masks to sum to 1.0 at every pixel

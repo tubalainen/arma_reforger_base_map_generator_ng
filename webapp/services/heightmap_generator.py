@@ -82,7 +82,7 @@ def geotiff_to_array(geotiff_bytes: bytes) -> tuple[np.ndarray, dict]:
     try:
         with MemoryFile(geotiff_bytes) as memfile:
             with memfile.open() as dataset:
-                elevation = dataset.read(1).astype(np.float64)
+                elevation = dataset.read(1).astype(np.float32)
                 metadata = {
                     "crs": str(dataset.crs),
                     "transform": dataset.transform,
@@ -197,7 +197,7 @@ def generate_heightmap_from_array(
     max_elev = float(np.max(valid_data))
     elev_range = max(max_elev - min_elev, 0.01)
 
-    normalized = np.zeros_like(elevation, dtype=np.float64)
+    normalized = np.zeros_like(elevation, dtype=np.float32)
     normalized[valid_mask] = (elevation[valid_mask] - min_elev) / elev_range * 65535.0
     normalized[~valid_mask] = 0
     heightmap = np.clip(normalized, 0, 65535).astype(np.uint16)
@@ -246,7 +246,7 @@ def flatten_roads_in_heightmap(
     road_smooth = ndimage.gaussian_filter(elevation, sigma=smooth_radius)
 
     # Blend: road areas get smoothed elevation, transition zone blends
-    blend_mask = ndimage.gaussian_filter(dilated.astype(np.float64), sigma=smooth_radius)
+    blend_mask = ndimage.gaussian_filter(dilated.astype(np.float32), sigma=smooth_radius)
     blend_mask = np.clip(blend_mask, 0, 1)
 
     result = elevation * (1 - blend_mask) + road_smooth * blend_mask
@@ -287,7 +287,7 @@ def flatten_water_in_heightmap(
 
         if transition_zone.any():
             blend = ndimage.gaussian_filter(
-                water_mask.astype(np.float64), sigma=transition_px,
+                water_mask.astype(np.float32), sigma=transition_px,
             )
             blend = np.clip(blend, 0, 1)
             water_elev = ndimage.gaussian_filter(result, sigma=transition_px)
@@ -315,7 +315,7 @@ def save_heightmap_png(heightmap: np.ndarray, output_path: str) -> str:
 def save_heightmap_preview(heightmap: np.ndarray, output_path: str) -> str:
     """Save an 8-bit grayscale preview of the heightmap."""
     try:
-        preview = (heightmap.astype(np.float64) / 256).astype(np.uint8)
+        preview = (heightmap.astype(np.float32) / 256).astype(np.uint8)
         img = Image.fromarray(preview, mode="L")
         img.save(output_path)
         logger.info(f"Saved heightmap preview: {output_path}")
@@ -341,7 +341,7 @@ def save_heightmap_asc(
     The ASC contains real elevation values (not 16-bit normalised).
     """
     nrows, ncols = heightmap.shape
-    real_elevation = heightmap.astype(np.float64) * height_scale + height_offset
+    real_elevation = heightmap.astype(np.float32) * height_scale + height_offset
 
     with open(output_path, "w") as f:
         f.write(f"ncols         {ncols}\n")
@@ -350,9 +350,9 @@ def save_heightmap_asc(
         f.write(f"yllcorner     {yllcorner}\n")
         f.write(f"cellsize      {cellsize}\n")
         f.write(f"NODATA_value  {nodata_value}\n")
-        for row in range(nrows):
-            line = " ".join(f"{real_elevation[row, col]:.3f}" for col in range(ncols))
-            f.write(line + "\n")
+        # Vectorized export: numpy formats the entire grid in C, ~10-50× faster
+        # than the Python row loop it replaces.
+        np.savetxt(f, real_elevation, fmt="%.3f", delimiter=" ")
 
     logger.info(f"Saved heightmap ASC: {output_path} ({ncols}x{nrows})")
     return output_path
