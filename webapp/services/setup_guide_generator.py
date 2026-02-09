@@ -118,7 +118,6 @@ class SetupGuideGenerator:
         min_elev = self.elev.get("min_elevation_m", 0)
         max_elev = self.elev.get("max_elevation_m", 0)
         height_scale = self.elev.get("height_scale", 0.03125)
-        height_offset = self.elev.get("height_offset", 0)
         mask_count = self.surf.get("count", 5)
         road_count = self.roads.get("total_segments", 0)
         countries = ", ".join(self.input_data.get("countries", ["Unknown"]))
@@ -135,8 +134,7 @@ class SetupGuideGenerator:
 | **Heightmap** | {dims} pixels |
 | **Grid Cell Size** | {cell_size}m |
 | **Height Range** | {min_elev:.1f}m to {max_elev:.1f}m |
-| **Height Scale** | {height_scale:.8f} |
-| **Height Offset** | {height_offset:.1f} |
+| **Height Scale** | {height_scale:.6g} |
 | **Surface Masks** | {mask_count} included |
 | **Recommended Default** | {self.recommended_default} ({self.default_material}) |
 | **Block Violations** | {block_violations}/{total_blocks} blocks |
@@ -185,15 +183,11 @@ You should see this structure inside:
 
 1. In the **Resource Browser** (bottom panel), navigate to `Worlds/`
 2. Double-click **`{self.map_name}.ent`** to open the world
-3. You should see a world with pre-configured:
-   - Terrain entity at origin (0, 0, 0)
-   - Lighting, fog, post-processing, environment probe
-   - Camera positioned at terrain centre
-   - Game Master mode for testing
+3. The World Editor should open without errors
 
-> **Verify**: The World Editor should open without errors. You should see an empty terrain
-> with a sky and lighting. If you see error messages, check that ArmaReforger is listed
-> as a dependency in the Projects panel."""
+> **Note**: The world does not contain a terrain yet — you will create it in the next phase.
+> You should see an empty world with sky and lighting. If you see error messages, check
+> that ArmaReforger is listed as a dependency in the Projects panel."""
 
     def _phase_terrain_creation(self) -> str:
         dims = self.hm.get("dimensions", "2049x2049")
@@ -212,51 +206,50 @@ You should see this structure inside:
 1. In the World Editor, select the **GenericTerrainEntity** in the hierarchy
    (it should already be at position 0, 0, 0)
 2. Right-click the terrain entity > **Create new terrain...**
-3. Enter these **exact** values:
+3. In the **New Terrain** dialog, enter these **exact** values:
 
 | Parameter | Value |
 |-----------|-------|
-| **Terrain Grid Size X** | **{face_x}** |
-| **Terrain Grid Size Z** | **{face_z}** |
-| **Grid Cell Size** | **{cell_size}** |
+| **Name** | **{self.map_name}** |
+| **Terrain grid size** | **{face_x}** = **{face_z}** |
+| **Blocks per tile** | **4** (default) |
+| **Grid cell size (meters)** | **{cell_size}** |
+| **Height scale (meters)** | **{height_scale:.6g}** |
+| **"Zero" height to entity coord** | **10%** (default) |
+| **Surface layer weight bits** | **8 bits (5 surfaces)** (default) |
 
-4. Click **Create**
-5. Wait for the terrain to generate (may take a few seconds)
-
-> **Important**: The Height Scale ({height_scale:.8f}) and Height Offset ({self.elev.get('height_offset', 0):.1f})
-> are already configured on the terrain entity in the generated layer file.
+4. Verify the summary at the bottom of the dialog shows the expected terrain size
+5. Click **Create**
+6. Wait for the terrain to generate (may take a few seconds)
 
 ### Step 2.2: Import Heightmap
 
-1. With the terrain entity selected, open the **Terrain Creation Tool** panel
+1. With the terrain entity selected, select the **Terrain Tool** or press _(Ctrl+T)_ to open the **Terrain Tool** panel
 2. Go to the **Manage** tab
 3. Click **Import Height Map...**
 4. Navigate to: `{self.map_name}/Sourcefiles/heightmap.asc`
 5. Settings:
    - **Invert X Axis**: No
    - **Invert Z Axis**: Yes
-   - **Resampling heights**: **No** (ASC contains real elevation data)
 6. Click **Import**
 
-> **CRITICAL**: After import, you **MUST** save and reload:
+> **CRITICAL**: After import, you **MUST** save and reopen the world:
 > 1. **File > Save World** (Ctrl+S)
-> 2. **File > Reload World**
-> Wait for the reload to complete before continuing!
+> 2. Wait for the save to complete (watch the progress bar in the upper right corner)
+> 3. Close and reopen the world (double-click the .ent file again in the Resource Browser)
 
 ### Step 2.3: Verify Terrain Shape
 
-After reload, you should see your terrain with real-world elevation:
+After reopening, you should see your terrain with real-world elevation:
 - Mountains/hills at the correct positions
 - Valleys and flat areas
-- The camera should show the terrain from above
 
 > **Tip**: Use the **heightmap_preview.png** in Sourcefiles/ as a visual reference
-> to verify the terrain shape matches expectations.
+> to verify the terrain shape matches expectations. You may need to navigate the
+> camera to see the terrain — try pressing **F** to focus on the selected entity.
 
-### Normal Map Dialog
-
-On first terrain edit after import, a **"Set normal map options"** dialog will appear.
-Click **OK** to accept the defaults. This is expected and only happens once."""
+> **Note**: If a **"Set normal map options"** dialog appears, click **OK** to accept
+> the defaults."""
 
     def _phase_surface_painting(self) -> str:
         lines = [f"""## Phase 3: Surface Painting (15 minutes)
@@ -266,7 +259,7 @@ We'll import pre-generated surface masks to paint it with realistic materials.
 
 ### Step 3.1: Open Paint Tool
 
-1. With the terrain entity selected, open the **Terrain Creation Tool** panel
+1. With the terrain entity selected, open the **Terrain Tool** _(Ctrl+T)_
 2. Switch to the **Paint** tab
 3. You'll see a surface layer list on the right side
 
@@ -326,13 +319,14 @@ Import masks in this specific order (most specific surfaces first):
 2. Select **Priority Surface Mask Import...**
 3. Navigate to: `{self.map_name}/Sourcefiles/surface_{surface_name}.png`
 4. Click **Open** — the mask will be applied
-5. **File > Save World** (Ctrl+S)
-6. **File > Reload World**
-7. Verify: {verification}""")
+5. Verify: {verification}""")
 
         # Block saturation check
         block_violations = self.surf.get("block_saturation", {}).get("violations", 0)
         total_blocks = self.surf.get("block_saturation", {}).get("total_blocks", 0)
+
+        lines.append("""
+After importing all masks, **File > Save World** (Ctrl+S).""")
 
         lines.append(f"""
 ### Step 3.5: Verify Block Surface Limits
@@ -342,7 +336,7 @@ Your terrain has **{block_violations}** block saturation violations out of {tota
 {"All blocks are within the 5-surface limit. No action needed." if block_violations == 0 else f"There are {block_violations} blocks exceeding the 5-surface limit. Use the **Info & Diags** tab to identify and fix them."}
 
 To check manually:
-1. Switch to the **Info & Diags** tab in the Terrain Creation Tool
+1. Switch to the **Info & Diags** tab in the Terrain Tool
 2. Press **Ctrl+X** in the viewport to visualise surface layers
 3. The **3x3 grid indicator** shows: Green = free slot, Yellow = selected, Red = limit reached
 4. Use **Merge** to combine surfaces in saturated blocks""")
@@ -354,13 +348,13 @@ To check manually:
             return """## Phase 4: Satellite Map (Skipped)
 
 No satellite imagery was available for this region. You can add satellite imagery
-manually later via Terrain Creation Tool > Manage tab > Import Satellite Map."""
+manually later via Terrain Tool (Ctrl+T) > Manage tab > Import Satellite Map."""
 
         return f"""## Phase 4: Satellite Map (5 minutes)
 
 ### Step 4.1: Import Satellite Image
 
-1. With the terrain entity selected, open the **Terrain Creation Tool** panel
+1. With the terrain entity selected, open the **Terrain Tool** _(Ctrl+T)_
 2. Go to the **Manage** tab
 3. Click **Import Satellite Map...**
 4. Navigate to: `{self.map_name}/Sourcefiles/satellite_map.png`
@@ -428,10 +422,12 @@ Your terrain has **{forests}** forest areas identified from OpenStreetMap data.
 
 To add forests:
 1. Create a **closed Spline** shape matching the forest boundary
-2. Add a **Forest Generator** entity as a child
+2. Enable **Avoid Roads** and **Avoid Lakes** options
 3. Use prefabs from `Prefabs/WEGenerators/Forest/` (prefixed `FG_`)
-4. Enable **Avoid Roads** and **Avoid Lakes** options
-5. Reference: `Reference/osm_forests.geojson` and `Reference/features.json`
+4. Drag the prefab onto the spline you created and wait (it generates a forest)
+
+> **Optional reference**: `Reference/osm_forests.geojson` and `Reference/features.json`
+> contain forest boundary data in Enfusion local coordinates for positioning guidance.
 
 ### Step 6.2: Water Bodies
 
@@ -495,10 +491,8 @@ To add lakes:
   Coverage quality varies by region.{border_note}
 
 ### Enfusion Workbench Behaviour
-- **Normal map dialog**: On first terrain edit after heightmap import, a dialog will appear
-  asking about normal map options. Click **OK** for defaults — this is expected.
-- **Save & Reload**: The Workbench requires saving and reloading after heightmap and surface
-  mask imports. This guide tells you exactly when to do this.
+- **Save after imports**: Always save your world (Ctrl+S) after importing heightmaps and
+  surface masks. After the heightmap import, close and reopen the world to see the changes.
 - **Performance**: Large terrains (4096+ faces) may take longer to load and edit.
   Consider reducing detail settings in the Workbench if performance is poor.
 
@@ -561,8 +555,7 @@ Terrain Grid Size X:    {face_x}
 Terrain Grid Size Z:    {face_x}
 Grid Cell Size:         {self.hm.get('grid_cell_size_m', 2.0)}m
 Terrain Size:           {self.hm.get('terrain_size_m', 'unknown')}
-Height Scale:           {self.elev.get('height_scale', 0.03125):.8f}
-Height Offset:          {self.elev.get('height_offset', 0):.1f}
+Height Scale:           {self.elev.get('height_scale', 0.03125):.6g}
 Min Elevation:          {self.elev.get('min_elevation_m', 0):.1f}m
 Max Elevation:          {self.elev.get('max_elevation_m', 0):.1f}m
 Elevation Range:        {self.elev.get('max_elevation_m', 0) - self.elev.get('min_elevation_m', 0):.1f}m
@@ -573,7 +566,6 @@ Heightmap Format:       ESRI ASCII Grid (.asc) — recommended
 
 Invert X Axis:          No
 Invert Z Axis:          Yes
-Resampling Heights:     No (ASC contains real elevation data)
 
 Default Surface:        {self.recommended_default} ({self.default_material})
 Surface Masks:          {self.surf.get('count', 5)} masks
@@ -592,13 +584,13 @@ Countries:              {', '.join(self.input_data.get('countries', ['Unknown'])
 - Try removing and re-adding the project
 
 ### Terrain is flat after heightmap import
-- Did you **Save and Reload** after import? This is required.
+- Did you **Save** and reopen the world after import? This is required.
 - Check that you imported `heightmap.asc` (not the preview PNG)
-- Verify **Resampling heights** is **unchecked** when importing ASC
+- Verify the **Height scale** value in the New Terrain dialog was entered correctly
 
 ### Surface masks look wrong
 - Did you import in the correct order? (rock -> forest -> asphalt -> sand/dirt)
-- Did you **Save and Reload** after EACH import?
+- Did you **Save** after importing all masks?
 - Check the **Info & Diags** tab for block saturation issues
 - Try re-importing: right-click surface > Priority Surface Mask Import
 
@@ -637,4 +629,4 @@ Once your basic terrain is set up, consider:
 
 ---
 
-*Generated by [Arma Reforger Base Map Generator](https://github.com/your-repo)*"""
+*Generated by [Arma Reforger Base Map Generator](https://github.com/tubalainen/arma_reforger_base_map_generator_ng)*"""
