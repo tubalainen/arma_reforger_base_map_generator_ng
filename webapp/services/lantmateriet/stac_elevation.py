@@ -72,6 +72,7 @@ async def fetch_stac_elevation(
     crs: str = "EPSG:3006",
     target_width: int | None = None,
     target_height: int | None = None,
+    job=None,
 ) -> Optional[bytes]:
     """
     Fetch elevation data from Lantmäteriet STAC Höjd API.
@@ -125,6 +126,8 @@ async def fetch_stac_elevation(
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:
             # 1. Search for STAC items covering the bbox
+            if job:
+                job.add_log("Searching Lantmäteriet STAC API for elevation tiles...")
             logger.info(
                 f"STAC Höjd: searching for elevation items "
                 f"(bbox WGS84: [{lon_min:.4f}, {lat_min:.4f}, {lon_max:.4f}, {lat_max:.4f}])"
@@ -140,6 +143,8 @@ async def fetch_stac_elevation(
                 return None
 
             logger.info(f"STAC Höjd returned {len(features)} item(s)")
+            if job:
+                job.add_log(f"Found {len(features)} elevation tiles to download")
 
             # 2. Download COG assets to temporary files on disk
             #    This avoids holding all tiles in memory simultaneously,
@@ -153,6 +158,8 @@ async def fetch_stac_elevation(
             tile_paths: list[Path] = []
             download_errors = 0
             _auth_abort = False  # Set True on 401/403 to stop all downloads
+            _tiles_completed = 0  # Counter for activity log progress
+            _total_tiles = len(features)
 
             # Semaphore limits concurrent downloads to avoid overwhelming
             # Lantmäteriet's download server while still being much faster
@@ -245,6 +252,15 @@ async def fetch_stac_elevation(
 
                     # Release the download content from memory
                     del content
+
+                    # Update activity log with download progress
+                    nonlocal _tiles_completed
+                    _tiles_completed += 1
+                    if job:
+                        job.add_log(
+                            f"Downloading elevation tile {_tiles_completed}/{_total_tiles}: {tile_id}"
+                        )
+
                     return tile_path
 
             # Launch all tile downloads concurrently (semaphore limits to 4)
@@ -278,6 +294,8 @@ async def fetch_stac_elevation(
                 f"Downloaded {len(tile_paths)} tiles to disk "
                 f"({download_errors} failed)"
             )
+            if job:
+                job.add_log(f"Downloaded {len(tile_paths)} tiles, merging...")
 
             # 3. Merge all tiles from disk-backed datasets
             #    Open datasets from files (disk-backed, not in-memory).
@@ -327,6 +345,8 @@ async def fetch_stac_elevation(
                 out_w, out_h = target_width, target_height
 
             if needs_reproject:
+                if job:
+                    job.add_log(f"Reprojecting merged elevation to {crs}...")
                 from rasterio.enums import Resampling
 
                 target_transform = from_bounds(
@@ -369,6 +389,11 @@ async def fetch_stac_elevation(
                 f"STAC Höjd: merged {len(tile_paths)} tile(s) "
                 f"into {out_w}x{out_h} px GeoTIFF ({len(merged_bytes)} bytes)"
             )
+            if job:
+                job.add_log(
+                    f"Elevation data ready: {out_w}×{out_h} pixels ({len(merged_bytes) / 1024 / 1024:.1f} MB)",
+                    "success"
+                )
             return merged_bytes
 
     except httpx.HTTPStatusError as e:

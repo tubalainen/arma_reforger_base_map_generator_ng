@@ -125,7 +125,7 @@ def _human_readable_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f} TB"
 
 
-def organize_export_structure(output_dir: Path, map_name: str):
+def organize_export_structure(output_dir: Path, map_name: str, job=None):
     """
     Organize flat output files into the Enfusion project folder structure.
 
@@ -148,6 +148,11 @@ def organize_export_structure(output_dir: Path, map_name: str):
     reference_dir = output_dir / "Reference"
     sourcefiles_dir.mkdir(exist_ok=True)
     reference_dir.mkdir(exist_ok=True)
+
+    # Count total files to organize
+    n_files = sum(1 for f in output_dir.iterdir() if f.is_file())
+    if job:
+        job.add_log(f"Organizing {n_files} files into Enfusion project structure...")
 
     # Files to move to Sourcefiles/
     sourcefiles_patterns = [

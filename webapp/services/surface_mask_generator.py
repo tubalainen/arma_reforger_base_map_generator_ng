@@ -416,6 +416,8 @@ def generate_surface_masks(
     # =========================================================================
     # Step 1: Compute DEM-derived features
     # =========================================================================
+    if job:
+        job.add_log("Computing slope and aspect from elevation...")
     logger.debug("Computing slope mask from DEM...")
     slope = generate_slope_mask(elevation, cell_size_m)
 
@@ -428,8 +430,18 @@ def generate_surface_masks(
     # =========================================================================
     # Step 2: Generate raw binary masks from data sources
     # =========================================================================
+    # Count features for logging
+    n_forest = len((osm_data.get("forests") or {}).get("features", []))
+    n_roads = len((osm_data.get("roads") or {}).get("features", []))
+    n_water = len((osm_data.get("water") or {}).get("features", []))
+    n_buildings = len((osm_data.get("buildings") or {}).get("features", []))
+    n_land_use = len((osm_data.get("land_use") or {}).get("features", []))
+
     if job:
-        job.add_log("Rasterizing geographic features...")
+        job.add_log(
+            f"Rasterizing geographic features ({n_roads} roads, {n_water} water, "
+            f"{n_forest} forests, {n_buildings} buildings, {n_land_use} land use)..."
+        )
         job.progress = 62
 
     # Forest polygons
@@ -486,7 +498,7 @@ def generate_surface_masks(
     # Step 3: Compute soft-edge float masks [0.0, 1.0]
     # =========================================================================
     if job:
-        job.add_log("Computing soft-edge surface transitions...")
+        job.add_log("Computing soft-edge surface transitions (parallel)...")
         job.progress = 68
 
     logger.debug("Computing soft-edge masks (parallel)...")
@@ -645,6 +657,8 @@ def generate_surface_masks(
 
     for name, array in mask_arrays.items():
         _save_mask(name, array)
+    if job:
+        job.add_log(f"Saved {len(mask_arrays)} surface mask files")
 
     # =========================================================================
     # Step 8: Compute coverage statistics

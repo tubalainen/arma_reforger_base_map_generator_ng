@@ -66,7 +66,7 @@ def _endpoint_label(url: str) -> str:
         return url
 
 
-async def _run_overpass_query(query: str, max_retries: int = 2) -> Optional[dict]:
+async def _run_overpass_query(query: str, max_retries: int = 2, job=None) -> Optional[dict]:
     """
     Execute an Overpass API query against a pool of public mirrors.
 
@@ -136,9 +136,13 @@ async def _run_overpass_query(query: str, max_retries: int = 2) -> Optional[dict
                             continue
                     elif resp.status_code == 429:
                         logger.warning(f"Overpass [{label}] rate limited (429), trying next...")
+                        if job:
+                            job.add_log(f"Overpass mirror [{label}] rate limited, trying next...", "warning")
                         continue
                     elif resp.status_code == 504:
                         logger.warning(f"Overpass [{label}] timeout (504), trying next...")
+                        if job:
+                            job.add_log(f"Overpass mirror [{label}] timed out, trying next...", "warning")
                         continue
                     else:
                         logger.error(f"Overpass [{label}] error {resp.status_code}: {resp.text[:300]}")
@@ -175,7 +179,7 @@ async def fetch_roads(bbox: dict, job = None) -> Optional[dict]:
     """
 
     logger.info(f"Fetching roads from Overpass API (bbox: {bbox_str})...")
-    result = await _run_overpass_query(query)
+    result = await _run_overpass_query(query, job=job)
 
     if result and "elements" in result:
         roads = _process_road_elements(result["elements"])
@@ -263,7 +267,7 @@ async def fetch_water(bbox: dict, job = None) -> Optional[dict]:
     """
 
     logger.info(f"Fetching water features from Overpass API (bbox: {bbox_str})...")
-    result = await _run_overpass_query(query)
+    result = await _run_overpass_query(query, job=job)
 
     if result and "elements" in result:
         features = _process_water_elements(result["elements"])
@@ -372,7 +376,7 @@ async def fetch_forests(bbox: dict, job = None) -> Optional[dict]:
     """
 
     logger.info(f"Fetching forests from Overpass API (bbox: {bbox_str})...")
-    result = await _run_overpass_query(query)
+    result = await _run_overpass_query(query, job=job)
 
     if result and "elements" in result:
         features = _process_area_elements(result["elements"], "forest")
@@ -411,7 +415,7 @@ async def fetch_buildings(bbox: dict, job = None) -> Optional[dict]:
     """
 
     logger.info(f"Fetching buildings from Overpass API (bbox: {bbox_str})...")
-    result = await _run_overpass_query(query)
+    result = await _run_overpass_query(query, job=job)
 
     if result and "elements" in result:
         features = _process_building_elements(result["elements"])
@@ -510,7 +514,7 @@ async def fetch_land_use(bbox: dict, job = None) -> Optional[dict]:
     """
 
     logger.info(f"Fetching land use from Overpass API (bbox: {bbox_str})...")
-    result = await _run_overpass_query(query)
+    result = await _run_overpass_query(query, job=job)
 
     if result and "elements" in result:
         features = _process_area_elements(result["elements"], "land_use")

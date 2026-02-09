@@ -231,6 +231,7 @@ async def fetch_satellite_imagery(
     width: int,
     height: int,
     country_codes: list[str] | None = None,
+    job=None,
 ) -> tuple[bytes | None, str]:
     """
     Fetch satellite imagery with country-based source priority.
@@ -255,6 +256,8 @@ async def fetch_satellite_imagery(
             )
 
             logger.info("Attempting Lantmäteriet Historical Orthophotos (2005 color)...")
+            if job:
+                job.add_log("Trying Lantmäteriet historical orthophotos...")
             lm_img = await fetch_historical_orthophoto(bbox_wgs84, width, height)
             if lm_img:
                 logger.info(
@@ -264,9 +267,15 @@ async def fetch_satellite_imagery(
             logger.warning(
                 "Lantmäteriet orthophoto unavailable, falling back to Sentinel-2"
             )
+            if job:
+                job.add_log("Lantmäteriet orthophotos not available, falling back to Sentinel-2...", "warning")
         except Exception as e:
             logger.error(f"Error fetching Lantmäteriet orthophoto: {e}")
             logger.warning("Falling back to Sentinel-2 Cloudless")
+            if job:
+                job.add_log("Lantmäteriet orthophoto error, falling back to Sentinel-2...", "warning")
 
+    if job:
+        job.add_log(f"Downloading Sentinel-2 Cloudless imagery ({width}×{height})...")
     data = await fetch_sentinel2_cloudless(bbox_wgs84, width, height)
     return data, "Sentinel-2 Cloudless (EOX)"

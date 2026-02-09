@@ -306,7 +306,7 @@ async def step_fetch_satellite_imagery(
     bbox_tuple = (bbox["west"], bbox["south"], bbox["east"], bbox["north"])
 
     satellite_data, source_name = await fetch_satellite_imagery(
-        bbox_tuple, width, height, country_codes=country_codes
+        bbox_tuple, width, height, country_codes=country_codes, job=job
     )
 
     if satellite_data:
@@ -746,7 +746,7 @@ async def run_generation(job: MapGenerationJob):
             road_data=road_result,
             transformer=transformer,
         )
-        enfusion_files = enfusion_gen.generate_all(output_dir)
+        enfusion_files = enfusion_gen.generate_all(output_dir, job=job)
 
         job.progress = 92
         job.add_log(
@@ -780,7 +780,7 @@ async def run_generation(job: MapGenerationJob):
         job.add_log("Organizing files into Enfusion project structure...")
 
         from services.export_service import organize_export_structure
-        organize_export_structure(output_dir, sanitized_name)
+        organize_export_structure(output_dir, sanitized_name, job=job)
 
         job.progress = 95
         job.add_log("Creating ZIP archive...")

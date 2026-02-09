@@ -172,7 +172,7 @@ class EnfusionProjectGenerator:
         self.center_lat = (bbox.get("south", 0) + bbox.get("north", 0)) / 2
         self.center_lon = (bbox.get("west", 0) + bbox.get("east", 0)) / 2
 
-    def generate_all(self, output_dir: Path) -> dict:
+    def generate_all(self, output_dir: Path, job=None) -> dict:
         """
         Generate all project files in the output directory.
 
@@ -203,6 +203,9 @@ class EnfusionProjectGenerator:
         missions_dir = output_dir / "Missions"
         worlds_dir.mkdir(parents=True, exist_ok=True)
         missions_dir.mkdir(parents=True, exist_ok=True)
+
+        if job:
+            job.add_log("Generating addon project file...")
 
         files = {}
 
@@ -240,6 +243,9 @@ class EnfusionProjectGenerator:
             self._generate_gamemode_layer()
         )
 
+        if job:
+            road_count = len(self.road_data.get("roads", [])) if self.road_data else 0
+            job.add_log(f"Generating world file with {road_count} road entities...")
         files["roads.layer"] = self._write_file(
             worlds_dir / f"{self.map_name}_roads.layer",
             self._generate_roads_layer()
@@ -267,6 +273,8 @@ class EnfusionProjectGenerator:
         )
 
         logger.info(f"Generated {len(files)} Enfusion project files in {output_dir}")
+        if job:
+            job.add_log(f"Generated {len(files)} Enfusion project files", "success")
         return files
 
     def _write_file(self, path: Path, content: str) -> str:

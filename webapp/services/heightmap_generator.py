@@ -412,9 +412,14 @@ def generate_heightmap(
     # 1. Parse GeoTIFF
     logger.info("Parsing DEM data...")
     if job:
-        job.add_log("Parsing elevation data...")
+        job.add_log(f"Validating elevation data ({len(dem_bytes) / 1024 / 1024:.1f} MB)...")
         job.progress = 42
     elevation, metadata = geotiff_to_array(dem_bytes)
+    if job:
+        job.add_log(
+            f"Elevation parsed: {elevation.shape[1]}×{elevation.shape[0]} pixels, "
+            f"range {np.nanmin(elevation):.1f}m – {np.nanmax(elevation):.1f}m"
+        )
 
     # 2. Resample
     logger.info(f"Resampling to {target_size}x{target_size}...")
@@ -445,6 +450,7 @@ def generate_heightmap(
     if water_features and water_features.get("features"):
         logger.info("Leveling water bodies...")
         if job:
+            job.add_log(f"Leveling {len(water_features['features'])} water bodies...")
             job.progress = 53
         bbox = metadata.get("bounds")
         if bbox:
@@ -461,6 +467,7 @@ def generate_heightmap(
     # 5. Light smoothing pass
     logger.info("Applying final smoothing...")
     if job:
+        job.add_log("Applying final terrain smoothing...")
         job.progress = 55
     elevation = parallel_gaussian_filter(elevation, sigma=0.5)
 

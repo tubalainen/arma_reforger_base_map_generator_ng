@@ -71,6 +71,7 @@ async def _wcs_request_with_retry(
     endpoint: str,
     params: dict | list,
     max_retries: int = MAX_WCS_RETRIES,
+    job=None,
 ) -> httpx.Response:
     """
     Execute a WCS request with retry logic for transient errors.
@@ -111,6 +112,11 @@ async def _wcs_request_with_retry(
                 if attempt < max_retries - 1:
                     wait_time = WCS_RETRY_WAIT_S * (2 ** attempt)  # Exponential backoff
                     logger.info(f"Retrying in {wait_time}s...")
+                    if job:
+                        job.add_log(
+                            f"Elevation server returned {resp.status_code}, retrying in {wait_time:.0f}s ({attempt + 1}/{max_retries})...",
+                            "warning"
+                        )
                     await asyncio.sleep(wait_time)
                     continue
 
@@ -367,6 +373,7 @@ async def fetch_elevation_wcs_2_0_chunked(
     max_area_m: int = 10000,
     resolution_m: float = 2.0,
     max_request_px: int = 5000,
+    job=None,
 ) -> bytes:
     """
     Fetch elevation via WCS 2.0.1 with automatic area chunking.
@@ -413,6 +420,8 @@ async def fetch_elevation_wcs_2_0_chunked(
         f"Area {x_span:.0f}×{y_span:.0f} m exceeds {max_area_m} m limit — "
         f"splitting into {len(x_chunks)}×{len(y_chunks)} = {n_tiles} tile(s)"
     )
+    if job:
+        job.add_log(f"Splitting elevation area into {len(x_chunks)}×{len(y_chunks)} = {n_tiles} tiles for download...")
 
     # Fetch each tile ---------------------------------------------------------
     import rasterio
@@ -441,6 +450,8 @@ async def fetch_elevation_wcs_2_0_chunked(
                     f"E({cx_lo:.0f},{cx_hi:.0f}) N({cy_lo:.0f},{cy_hi:.0f}) "
                     f"→ {chunk_w}×{chunk_h} px"
                 )
+                if job:
+                    job.add_log(f"Downloading elevation tile {tile_counter}/{n_tiles}...")
 
                 tiff_bytes = await fetch_elevation_wcs_2_0(
                     endpoint, coverage_id, chunk_bbox, crs,
@@ -456,6 +467,8 @@ async def fetch_elevation_wcs_2_0_chunked(
                 tile_datasets.append((memfile, ds))
 
         # Merge all tiles into a single raster --------------------------------
+        if job:
+            job.add_log(f"Merging {n_tiles} elevation tiles...")
         datasets = [ds for _, ds in tile_datasets]
         merged_array, merged_transform = rasterio_merge(datasets)
 
@@ -660,6 +673,7 @@ async def fetch_elevation_for_country(
     bbox_wgs84: tuple[float, float, float, float],
     target_width: int,
     target_height: int,
+    job=None,
 ) -> Optional[bytes]:
     """
     Fetch elevation GeoTIFF for a given country and bounding box.
@@ -728,6 +742,7 @@ async def fetch_elevation_for_country(
                 crs=native_crs,
                 target_width=target_width,
                 target_height=target_height,
+                job=job,
             )
 
         # WCS-based APIs
@@ -776,6 +791,7 @@ async def fetch_elevation_for_country(
                         max_area_m=config.max_area_m,
                         resolution_m=config.resolution_m,
                         max_request_px=config.max_request_size,
+                        job=job,
                     )
 
             return await fetch_elevation_wcs_2_0(
@@ -860,7 +876,7 @@ async def fetch_elevation(
             else:
                 job.add_log(f"Attempting to fetch elevation data from {config.name} ({native_res}m resolution)...")
             job.progress = 12
-        data = await fetch_elevation_for_country(country_code, bbox_tuple, target_w, target_h)
+        data = await fetch_elevation_for_country(country_code, bbox_tuple, target_w, target_h, job=job)
         if data:
             result["data"] = data
             result["source"] = f"{config.name} ({native_res} m)"
