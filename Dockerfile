@@ -45,6 +45,17 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
+# Enable multi-threaded processing for CPU-bound operations:
+# - GDAL_NUM_THREADS: rasterio.warp.reproject uses GDAL's internal thread pool
+# - OMP_NUM_THREADS: OpenBLAS linear algebra (numpy matrix ops)
+# - OPENBLAS_NUM_THREADS: Same, OpenBLAS-specific override
+# Note: scipy.ndimage operations (gaussian_filter, zoom, etc.) do NOT use
+# BLAS threading — they are parallelized via chunked ThreadPoolExecutor in
+# services/utils/parallel.py instead.
+ENV GDAL_NUM_THREADS=ALL_CPUS
+ENV OMP_NUM_THREADS=4
+ENV OPENBLAS_NUM_THREADS=4
+
 # Copy application code
 COPY --chown=appuser:appgroup webapp/ .
 

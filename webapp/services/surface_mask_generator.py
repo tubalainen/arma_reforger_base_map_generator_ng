@@ -25,7 +25,6 @@ from typing import Optional
 import numpy as np
 from PIL import Image
 from scipy import ndimage
-from scipy.ndimage import distance_transform_edt
 
 from config import TREELINE_ELEVATION
 from config.enfusion import (
@@ -36,6 +35,7 @@ from config.enfusion import (
     SURFACE_IMPORT_ORDER,
 )
 from services.heightmap_generator import rasterize_features_to_mask
+from services.utils.parallel import parallel_gaussian_filter, parallel_edt
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,8 @@ def soft_edge_mask(binary_mask: np.ndarray, transition_px: int = 8) -> np.ndarra
         return np.ones_like(binary_mask, dtype=np.float32)
 
     # Distance from nearest False pixel (grows inward from boundary)
-    inner_dist = distance_transform_edt(bool_mask)
+    # Uses multi-threaded EDT via `edt` package when available
+    inner_dist = parallel_edt(bool_mask)
 
     # Normalize: ramp from 0 at boundary to 1.0 at transition_px depth
     soft = np.clip(inner_dist / transition_px, 0.0, 1.0)
@@ -390,10 +391,10 @@ def generate_surface_masks(
             logger.info(
                 f"Resizing elevation for mask generation: {w}x{h} -> {target_w}x{target_h}"
             )
-            from scipy.ndimage import zoom
+            from services.utils.parallel import parallel_zoom
             zoom_y = target_h / h
             zoom_x = target_w / w
-            elevation = zoom(elevation, (zoom_y, zoom_x), order=3)
+            elevation = parallel_zoom(elevation, (zoom_y, zoom_x), order=3)
             h, w = elevation.shape
 
     logger.info(f"Generating surface masks for {w}x{h} terrain (cell size: {cell_size_m}m)")

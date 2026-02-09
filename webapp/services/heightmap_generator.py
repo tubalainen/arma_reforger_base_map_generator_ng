@@ -26,6 +26,7 @@ from scipy.interpolate import NearestNDInterpolator
 # Rasterization utilities live in the shared utils module.
 # Re-exported here for backward compatibility (surface_mask_generator imports from here).
 from services.utils.rasterize import rasterize_features_to_mask  # noqa: F401
+from services.utils.parallel import parallel_gaussian_filter, parallel_zoom
 from config.enfusion import snap_to_enfusion_size, VALID_ENFUSION_VERTEX_COUNTS
 
 logger = logging.getLogger(__name__)
@@ -140,12 +141,10 @@ def resample_dem(
     Returns:
         (resampled_elevation, updated_metadata)
     """
-    from scipy.ndimage import zoom
-
     if target_size:
         zoom_y = target_size / elevation.shape[0]
         zoom_x = target_size / elevation.shape[1]
-        elevation = zoom(elevation, (zoom_y, zoom_x), order=3)
+        elevation = parallel_zoom(elevation, (zoom_y, zoom_x), order=3)
         metadata["width"] = target_size
         metadata["height"] = target_size
     else:
@@ -158,7 +157,7 @@ def resample_dem(
         if current_res_m > 0 and target_resolution_m > 0:
             zoom_factor = current_res_m / target_resolution_m
             if abs(zoom_factor - 1.0) > 0.01:
-                elevation = zoom(elevation, zoom_factor, order=3)
+                elevation = parallel_zoom(elevation, zoom_factor, order=3)
                 metadata["width"] = elevation.shape[1]
                 metadata["height"] = elevation.shape[0]
                 metadata["resolution"] = (target_resolution_m, target_resolution_m)
@@ -242,11 +241,11 @@ def flatten_roads_in_heightmap(
     struct = ndimage.generate_binary_structure(2, 1)
     dilated = ndimage.binary_dilation(road_mask, struct, iterations=road_width_px)
 
-    # Smooth road elevation
-    road_smooth = ndimage.gaussian_filter(elevation, sigma=smooth_radius)
+    # Smooth road elevation (multi-threaded)
+    road_smooth = parallel_gaussian_filter(elevation, sigma=smooth_radius)
 
     # Blend: road areas get smoothed elevation, transition zone blends
-    blend_mask = ndimage.gaussian_filter(dilated.astype(np.float32), sigma=smooth_radius)
+    blend_mask = parallel_gaussian_filter(dilated.astype(np.float32), sigma=smooth_radius)
     blend_mask = np.clip(blend_mask, 0, 1)
 
     result = elevation * (1 - blend_mask) + road_smooth * blend_mask
@@ -286,11 +285,11 @@ def flatten_water_in_heightmap(
         transition_zone = dilated & ~water_mask.astype(bool)
 
         if transition_zone.any():
-            blend = ndimage.gaussian_filter(
+            blend = parallel_gaussian_filter(
                 water_mask.astype(np.float32), sigma=transition_px,
             )
             blend = np.clip(blend, 0, 1)
-            water_elev = ndimage.gaussian_filter(result, sigma=transition_px)
+            water_elev = parallel_gaussian_filter(result, sigma=transition_px)
             result = np.where(
                 transition_zone,
                 elevation * (1 - blend) + water_elev * blend,
@@ -463,7 +462,7 @@ def generate_heightmap(
     logger.info("Applying final smoothing...")
     if job:
         job.progress = 55
-    elevation = ndimage.gaussian_filter(elevation, sigma=0.5)
+    elevation = parallel_gaussian_filter(elevation, sigma=0.5)
 
     # 6. Normalise to 16-bit
     if job:

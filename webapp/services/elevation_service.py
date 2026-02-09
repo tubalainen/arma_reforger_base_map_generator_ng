@@ -475,6 +475,7 @@ async def fetch_elevation_wcs_2_0_chunked(
                 dst_transform=target_transform,
                 dst_crs=crs,
                 resampling=Resampling.bilinear,
+                num_threads=os.cpu_count() or 2,
             )
             merged_array = resampled
             merged_transform = target_transform

@@ -336,6 +336,7 @@ async def fetch_stac_elevation(
                     (merged_array.shape[0], out_h, out_w),
                     dtype=merged_array.dtype,
                 )
+                import os
                 rasterio.warp.reproject(
                     merged_array,
                     resampled,
@@ -344,6 +345,7 @@ async def fetch_stac_elevation(
                     dst_transform=target_transform,
                     dst_crs=crs,
                     resampling=Resampling.bilinear,
+                    num_threads=os.cpu_count() or 2,
                 )
                 # Free the merged array before writing output
                 del merged_array

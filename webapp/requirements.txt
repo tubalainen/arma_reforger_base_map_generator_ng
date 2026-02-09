@@ -10,6 +10,7 @@ httpx==0.28.1
 numpy==2.2.1
 scipy==1.15.0
 Pillow==11.1.0
+edt==2.4.1  # Multi-threaded Euclidean distance transform
 
 # GIS libraries
 rasterio==1.4.3

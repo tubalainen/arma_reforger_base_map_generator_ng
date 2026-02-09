@@ -25,6 +25,7 @@ from middleware.session import SessionMiddleware
 from middleware.security import SecurityHeadersMiddleware
 from middleware.rate_limit import RateLimitMiddleware
 from services.validators import validate_job_id, validate_image_type, validate_polygon
+from services.utils.parallel import configure_gdal_threading
 
 # Configure logging
 logging.basicConfig(
@@ -32,6 +33,9 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("main")
+
+# Enable multi-threaded GDAL for rasterio.warp.reproject operations
+configure_gdal_threading()
 
 # ===========================================================================
 # Application version (for cache busting)
