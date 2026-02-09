@@ -157,7 +157,7 @@ document.getElementById('btn-toggle-console').addEventListener('click', function
 document.getElementById('heightmap-size').addEventListener('change', updateTerrainSizeDisplay);
 document.getElementById('grid-resolution').addEventListener('change', updateTerrainSizeDisplay);
 
-const MAX_MAP_EXTENT_KM = 20; // must match MAX_MAP_EXTENT_M in config/terrain.py
+const MAX_MAP_EXTENT_KM = 32; // must match MAX_MAP_EXTENT_M in config/terrain.py
 
 function onPolygonSelected(coords) {
     document.getElementById('selection-info').classList.remove('d-none');
