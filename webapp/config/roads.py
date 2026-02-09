@@ -41,6 +41,13 @@ ROAD_DEFAULT_SURFACE: dict[str, dict[str, str]] = {
 
 # Single source of truth for road type configuration.
 # Each highway type has default width, surface, and Enfusion prefab.
+#
+# Prefab names follow the pattern: RG_Road_{Surface}_{Width}m
+# Located at: {58D0FB3206B6F859}Prefabs/WEGenerators/Roads/
+# NOTE: These prefab names are best-effort guesses based on the naming
+# convention. If a prefab doesn't exist in your Arma Reforger version,
+# check the Resource Browser (search "RG_") for available road prefabs
+# and update the names here.
 OSM_ROAD_TAGS: dict[str, dict] = {
     "motorway":      {"width": 14,  "surface": "asphalt", "enfusion_prefab": "RG_Road_Asphalt_14m"},
     "motorway_link": {"width": 8,   "surface": "asphalt", "enfusion_prefab": "RG_Road_Asphalt_8m"},

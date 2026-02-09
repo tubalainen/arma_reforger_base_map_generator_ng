@@ -474,6 +474,22 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
 
         If road_data and transformer are available, generates actual road entities.
         Otherwise generates an empty layer with a comment.
+
+        Entity format (matching Enfusion World Editor conventions):
+          SplineShapeEntity Road_N {
+           coords X 0 Z
+           Points {
+            ShapePoint sp_0 { Position 0 0 0 }
+            ShapePoint sp_1 { Position relX 0 relZ }
+            ...
+           }
+           {
+            RoadGeneratorEntity : "{GUID}Prefabs/..." { AdjustHeightMap 1 }
+           }
+          }
+
+        Road entities are clipped to terrain bounds — roads with origin
+        outside the terrain or fewer than 2 points within bounds are skipped.
         """
         if not self.road_data or not self.transformer:
             return '// Road layer — no road data available or coordinate transformer not configured.\n// Use Reference/roads_enfusion.geojson to manually place roads.\n'
@@ -484,6 +500,7 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
 
         entities = []
         skipped = 0
+        clipped = 0
 
         for i, road in enumerate(roads):
             points = road.get("spline_points", [])
@@ -494,16 +511,43 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             # Transform points to local coordinates
             local_points = self.transformer.transform_points(points)
 
+            # Clip: keep only points within terrain bounds (with small margin)
+            margin = 1.0  # 1m margin to avoid edge issues
+            in_bounds = [
+                pt for pt in local_points
+                if -margin <= pt["x"] <= self.terrain_width + margin
+                and -margin <= pt["z"] <= self.terrain_depth + margin
+            ]
+
+            if len(in_bounds) < 2:
+                clipped += 1
+                continue
+
+            # Use clipped points
+            local_points = in_bounds
+
             # First point is the entity origin
             origin = local_points[0]
+
+            # Skip if origin is outside terrain bounds
+            if (origin["x"] < -margin or origin["x"] > self.terrain_width + margin
+                    or origin["z"] < -margin or origin["z"] > self.terrain_depth + margin):
+                clipped += 1
+                continue
+
             prefab = road.get("enfusion_prefab", "RG_Road_Asphalt_4m")
 
-            # Build spline point definitions (relative to entity origin)
+            # Build ShapePoint definitions (relative to entity origin)
+            # Wrapped in a Points {} block per Enfusion format
             point_defs = []
             for j, pt in enumerate(local_points):
                 rel_x = pt["x"] - origin["x"]
                 rel_z = pt["z"] - origin["z"]
-                point_defs.append(f'  ShapePoint sp_{j} {{\n   Position {rel_x:.3f} 0 {rel_z:.3f}\n  }}')
+                point_defs.append(
+                    f'   ShapePoint sp_{j} {{\n'
+                    f'    Position {rel_x:.3f} 0 {rel_z:.3f}\n'
+                    f'   }}'
+                )
 
             road_name = road.get("name", "").replace('"', "'")
             if road_name:
@@ -511,19 +555,25 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             else:
                 comment = ""
 
-            entity = f'''SplineShapeEntity Road_{i} {{{comment}
- coords {origin["x"]:.3f} 0 {origin["z"]:.3f}
- {{
-  RoadGeneratorEntity : "{{58D0FB3206B6F859}}{ROAD_PREFAB_BASE}/{prefab}.et" {{
-   AdjustHeightMap 1
-  }}
- }}
-{chr(10).join(point_defs)}
-}}'''
+            entity = (
+                f'SplineShapeEntity Road_{i} {{{comment}\n'
+                f' coords {origin["x"]:.3f} 0 {origin["z"]:.3f}\n'
+                f' Points {{\n'
+                + "\n".join(point_defs) + "\n"
+                f' }}\n'
+                f' {{\n'
+                f'  RoadGeneratorEntity : "{{58D0FB3206B6F859}}{ROAD_PREFAB_BASE}/{prefab}.et" {{\n'
+                f'   AdjustHeightMap 1\n'
+                f'  }}\n'
+                f' }}\n'
+                f'}}'
+            )
             entities.append(entity)
 
         if skipped > 0:
             logger.info(f"Skipped {skipped} road segments with < 2 points")
+        if clipped > 0:
+            logger.info(f"Clipped {clipped} road segments outside terrain bounds")
 
         logger.info(f"Generated {len(entities)} road entities for roads layer")
         return "\n".join(entities) + "\n"
