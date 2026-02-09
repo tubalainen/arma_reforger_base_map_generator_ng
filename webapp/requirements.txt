@@ -1,0 +1,26 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.18
+
+# HTTP client
+httpx==0.28.1
+
+# Scientific / numeric
+numpy==2.2.1
+scipy==1.15.0
+Pillow==11.1.0
+
+# GIS libraries
+rasterio==1.4.3
+shapely==2.0.6
+pyproj==3.7.0
+geojson==3.2.0
+
+# GDAL - must match system libgdal version from Debian repos.
+# The Dockerfile installs libgdal-dev from Debian Bookworm (3.6.2)
+GDAL==3.6.2
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.24.0

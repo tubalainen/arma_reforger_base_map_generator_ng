@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment variables
+.env
+
+# Generated output
+output/
+data/
+# But keep the static data files used by the application
+!webapp/data/
+!webapp/data/*.json
+
+# Planning / internal docs (not for public repo)
+CLAUDE.md
+PLAN.md
+RESTRUCTURE_PLAN.md
+SECURITY_AND_SESSIONS.md
+new-generation.md
+lantmateriet.md
+
+# OS
+.DS_Store
+Thumbs.db

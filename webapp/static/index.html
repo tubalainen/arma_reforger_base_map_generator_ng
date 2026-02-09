@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Arma Reforger Base Map Generator</title>
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"
+          integrity="sha512-gc3xjCmIy673V6MyOAZhIW93xhM9ei1I+gLbmFjUHIjocENRsLX/QUE1htk5q1XV2D/iie/VQ8DXI6Vu8bexvQ==" crossorigin="anonymous" />
+
+    <!-- Bootstrap 5 -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
+          integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet"
+          crossorigin="anonymous">
+
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Top navbar -->
+        <nav class="navbar navbar-dark px-3">
+            <span class="navbar-brand mb-0 h1">
+                <i class="bi bi-globe-americas"></i> Arma Reforger Base Map Generator
+            </span>
+            <span class="navbar-text small">
+                Open GIS Data &rarr; Enfusion World Editor
+            </span>
+        </nav>
+
+        <div class="main-layout">
+            <!-- Left sidebar -->
+            <div class="sidebar" id="sidebar">
+                <!-- Area selection info -->
+                <div class="sidebar-section">
+                    <h6><i class="bi bi-vector-pen"></i> Area Selection</h6>
+                    <p class="small mb-2">
+                        Use the polygon tool on the map to draw the area you want to generate.
+                    </p>
+                    <div id="selection-info" class="d-none">
+                        <table class="table table-sm table-dark mb-1">
+                            <tr>
+                                <td>Countries</td>
+                                <td id="info-countries">-</td>
+                            </tr>
+                            <tr>
+                                <td>Bbox</td>
+                                <td id="info-bbox" class="small">-</td>
+                            </tr>
+                            <tr>
+                                <td>Approx. size</td>
+                                <td id="info-size">-</td>
+                            </tr>
+                        </table>
+                    </div>
+                    <div id="no-selection" class="text-center py-3">
+                        <i class="bi bi-hand-index-thumb"></i>
+                        <p class="small mt-1">Click the polygon tool to start</p>
+                    </div>
+                </div>
+
+                <!-- Generation options -->
+                <div class="sidebar-section">
+                    <h6><i class="bi bi-gear"></i> Generation Options</h6>
+
+                    <label class="form-label small">Map Name</label>
+                    <input type="text" class="form-control form-control-sm mb-2" id="map-name"
+                           placeholder="e.g. MyTerrain (optional)"
+                           maxlength="32"
+                           pattern="[A-Za-z0-9_]+"
+                           title="Letters, numbers and underscores only">
+                    <div class="form-text small mb-2" style="margin-top:-0.25rem; color:#8b949e;">
+                        Used for Enfusion project folder name. Auto-generated if blank.
+                    </div>
+
+                    <label class="form-label small">Heightmap Size (vertices)</label>
+                    <select class="form-select form-select-sm mb-2" id="heightmap-size">
+                        <option value="1025">1025 x 1025 (small test, 1024 faces)</option>
+                        <option value="2049" selected>2049 x 2049 (standard, 2048 faces)</option>
+                        <option value="4097">4097 x 4097 (high detail, 4096 faces)</option>
+                    </select>
+
+                    <label class="form-label small">Grid Cell Size</label>
+                    <select class="form-select form-select-sm mb-2" id="grid-resolution">
+                        <option value="1">1m (very high detail)</option>
+                        <option value="2" selected>2m (standard)</option>
+                        <option value="4">4m (large terrain)</option>
+                        <option value="8">8m (very large terrain)</option>
+                    </select>
+
+                    <label class="form-label small">Terrain Size</label>
+                    <div class="small mb-3" id="terrain-size-display">
+                        2048 faces at 2m = <strong>4096m x 4096m</strong> terrain
+                    </div>
+
+                    <label class="form-label small">Features to Generate</label>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="opt-roads" checked>
+                        <label class="form-check-label small" for="opt-roads">Roads (asphalt, gravel, dirt)</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="opt-water" checked>
+                        <label class="form-check-label small" for="opt-water">Water (lakes, rivers, coast)</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="opt-forests" checked>
+                        <label class="form-check-label small" for="opt-forests">Forests & vegetation</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="opt-buildings" checked>
+                        <label class="form-check-label small" for="opt-buildings">Buildings</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="opt-surface-masks" checked>
+                        <label class="form-check-label small" for="opt-surface-masks">Surface masks</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="opt-road-flatten" checked>
+                        <label class="form-check-label small" for="opt-road-flatten">Flatten terrain along roads</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="opt-water-level" checked>
+                        <label class="form-check-label small" for="opt-water-level">Level water bodies</label>
+                    </div>
+                </div>
+
+                <!-- Generate button -->
+                <div class="sidebar-section">
+                    <button class="btn btn-success w-100" id="btn-generate" disabled>
+                        <i class="bi bi-play-fill"></i> Generate Base Map
+                    </button>
+                    <button class="btn btn-outline-secondary w-100 mt-2" id="btn-clear">
+                        <i class="bi bi-trash"></i> Clear Selection
+                    </button>
+                </div>
+
+                <!-- Data sources info -->
+                <div class="sidebar-section">
+                    <h6><i class="bi bi-database"></i> Data Sources</h6>
+                    <div id="data-sources-info" class="small">
+                        <div><i class="bi bi-check-circle"></i> OpenStreetMap (Overpass API)</div>
+                        <div><i class="bi bi-check-circle"></i> Copernicus DEM 30m</div>
+                        <div><i class="bi bi-check-circle"></i> Sentinel-2 Cloudless</div>
+                        <div id="country-sources"></div>
+                    </div>
+                </div>
+
+                <!-- Version info -->
+                <div class="sidebar-section version-info">
+                    <div class="text-center small">
+                        <div class="mb-1">
+                            <i class="bi bi-tag"></i> Version <span id="app-version">1.0.0</span>
+                        </div>
+                        <div>
+                            <a href="https://github.com/tubalainen/arma_reforger_base_map_generator/releases"
+                               target="_blank"
+                               rel="noopener noreferrer">
+                                <i class="bi bi-github"></i> View Releases
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Map container -->
+            <div class="map-container">
+                <div id="map"></div>
+
+                <!-- Progress overlay -->
+                <div id="progress-overlay" class="d-none">
+                    <div class="progress-card">
+                        <h5><i class="bi bi-gear-wide-connected spinning"></i> Generating Base Map</h5>
+                        <div class="progress mb-2">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated"
+                                 role="progressbar" id="progress-bar">0%</div>
+                        </div>
+                        <p class="small mb-1" id="progress-step">Initializing...</p>
+                        <div id="progress-steps" class="small"></div>
+
+                        <!-- Console log section -->
+                        <div class="console-section mt-3">
+                            <div class="d-flex align-items-center justify-content-between mb-2">
+                                <h6 class="mb-0"><i class="bi bi-terminal"></i> Activity Log</h6>
+                                <button class="btn btn-sm btn-outline-secondary console-toggle" id="btn-toggle-console">
+                                    <i class="bi bi-chevron-down"></i>
+                                </button>
+                            </div>
+                            <div id="console-log" class="console-log"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Results panel -->
+                <div id="results-panel" class="d-none">
+                    <div class="results-card">
+                        <div class="d-flex align-items-center mb-2">
+                            <button class="btn btn-sm btn-outline-light me-2" id="btn-close-results">
+                                <i class="bi bi-x"></i>
+                            </button>
+                            <h5 class="mb-0"><i class="bi bi-check-circle"></i> Generation Complete</h5>
+                        </div>
+
+                        <div class="row g-2 mb-3">
+                            <div class="col-6">
+                                <div class="preview-box">
+                                    <label class="small">Heightmap Preview</label>
+                                    <img id="preview-heightmap" class="img-fluid" alt="Heightmap preview">
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="preview-box">
+                                    <label class="small">Surface Preview</label>
+                                    <img id="preview-surface" class="img-fluid" alt="Surface preview">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div id="result-stats" class="small mb-3"></div>
+
+                        <div id="result-files" class="small mb-3"></div>
+
+                        <div class="alert alert-warning small mb-3" role="alert">
+                            <i class="bi bi-clock-history"></i>
+                            <strong>Note:</strong> Generated files will be automatically deleted 10 minutes after generation to save server space. Please download your map package promptly.
+                        </div>
+
+                        <button class="btn btn-primary w-100" id="btn-download">
+                            <i class="bi bi-download"></i> Download Map Package (.zip)
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"
+            integrity="sha512-ozq8xQKq6urvuU6jNgkfqAmT7jKN2XumbrX1JiB3TnF7tI48DPI4Gy1GXKD/V3EExgAs1V+pRO7vwtS1LHg0Gw==" crossorigin="anonymous"></script>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+            integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>

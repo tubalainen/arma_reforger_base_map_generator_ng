@@ -1,0 +1,8 @@
+"""Arma Reforger terrain defaults."""
+
+MAX_TERRAIN_SIZE = 16384           # max grid dimension (pixels)
+DEFAULT_GRID_CELL_SIZE = 2         # metres per pixel
+DEFAULT_HEIGHT_SCALE = 0.03125     # maps 0-65535 to ~0-2048 m
+ENFUSION_HEIGHT_SCALE_DEFAULT = DEFAULT_HEIGHT_SCALE
+ENFUSION_MAX_SURFACES_PER_BLOCK = 5
+DEFAULT_TARGET_CRS = "EPSG:4326"
