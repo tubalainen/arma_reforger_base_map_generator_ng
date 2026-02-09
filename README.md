@@ -145,8 +145,8 @@ For more information, see the [Docker Desktop WSL2 backend documentation](https:
 ### 1. Clone & Configure
 
 ```bash
-git clone https://github.com/tubalainen/arma_reforger_map_generation_ng.git
-cd arma_reforger_map_generation_ng
+git clone https://github.com/tubalainen/arma_reforger_base_map_generator_ng.git
+cd arma_reforger_base_map_generator_ng
 
 # Copy the example environment file
 cp .env.example .env
@@ -166,7 +166,7 @@ The application is published as a Docker image on GitHub Container Registry. Sim
 docker compose up -d
 ```
 
-Docker will automatically pull the latest image from `ghcr.io/tubalainen/arma_reforger_map_generation_ng:latest` and start the container. Then open **[http://localhost:8080](http://localhost:8080)** in your browser.
+Docker will automatically pull the latest image from `ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest` and start the container. Then open **[http://localhost:8080](http://localhost:8080)** in your browser.
 
 > **Building locally:** If you prefer to build from source instead of pulling the pre-built image, edit `docker-compose.yml`: comment out the `image:` line and uncomment the `build:` section, then run `docker compose up --build -d`.
 
@@ -382,10 +382,10 @@ The application is published to GitHub Container Registry and automatically buil
 
 ```bash
 # Pull the latest image
-docker pull ghcr.io/tubalainen/arma_reforger_map_generation_ng:latest
+docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest
 
 # Or use a specific version tag
-docker pull ghcr.io/tubalainen/arma_reforger_map_generation_ng:v1.0.0
+docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:v1.0.0
 ```
 
 The `docker-compose.yml` is pre-configured to use the GHCR.io image. See the [Quick Start Guide](#quick-start-guide) for setup instructions.
