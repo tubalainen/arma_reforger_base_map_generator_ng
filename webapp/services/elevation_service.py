@@ -827,6 +827,7 @@ async def fetch_elevation(
     country_code: str,
     job = None,
     target_resolution_m: float = 30,
+    max_pixels: int | None = None,
 ) -> dict:
     """
     Main entry point: fetch elevation data using the best available source.
@@ -839,6 +840,9 @@ async def fetch_elevation(
         country_code: ISO 2-letter country code
         job: Optional MapGenerationJob for logging
         target_resolution_m: Desired resolution (informational)
+        max_pixels: Optional cap on output raster width/height. When set,
+            the fetched elevation is limited to at most this many pixels per
+            axis, avoiding huge intermediate arrays for small heightmaps.
 
     Returns:
         Dict with data (GeoTIFF bytes), source, resolution_m, crs.
@@ -860,6 +864,11 @@ async def fetch_elevation(
     if config:
         native_res = config.resolution_m
         max_size = config.max_request_size
+        # Apply caller-supplied pixel cap (e.g. 2× heightmap size) to
+        # avoid fetching far more pixels than needed and consuming huge
+        # amounts of memory during the tile merge step.
+        if max_pixels is not None:
+            max_size = min(max_size, max_pixels)
         target_w = min(max_size, max(64, int(width_m / native_res)))
         target_h = min(max_size, max(64, int(height_m / native_res)))
 

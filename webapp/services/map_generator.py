@@ -170,11 +170,16 @@ async def step_detect_countries(polygon_coords: list) -> dict:
     return await detect_countries(polygon_coords)
 
 
-async def step_fetch_elevation(bbox: dict, primary_country: str, job: Optional[MapGenerationJob] = None) -> dict:
+async def step_fetch_elevation(
+    bbox: dict,
+    primary_country: str,
+    job: Optional[MapGenerationJob] = None,
+    max_pixels: int | None = None,
+) -> dict:
     """Step 2: Download elevation data from the best available source."""
     from services.elevation_service import fetch_elevation
 
-    result = await fetch_elevation(bbox, primary_country, job)
+    result = await fetch_elevation(bbox, primary_country, job, max_pixels=max_pixels)
     if not result["data"]:
         raise RuntimeError("Failed to fetch elevation data from any source")
     return result
@@ -486,7 +491,16 @@ async def run_generation(job: MapGenerationJob):
         logger.info(f"[{job.job_id}] Step 2: Elevation acquisition")
         job.add_log(f"Downloading elevation data ({primary_country})...")
 
-        elevation_result = await step_fetch_elevation(bbox, primary_country, job)
+        # Pass the heightmap size to the elevation fetcher so it can limit
+        # the output resolution.  Fetching at the native sensor resolution
+        # (1 m → 15 000 px per axis for a 15 km area) then down-sampling to
+        # the actual heightmap size (e.g. 2049) wastes ~1 GB of RAM during
+        # the merge step.  We cap elevation to 2× the heightmap vertices so
+        # there is still quality headroom for the later bicubic resample.
+        target_size = job.options.get("heightmap_size", 2048)
+        elevation_result = await step_fetch_elevation(
+            bbox, primary_country, job, max_pixels=target_size * 2,
+        )
 
         job.progress = 25
         job.steps_completed.append({
@@ -526,7 +540,7 @@ async def run_generation(job: MapGenerationJob):
         logger.info(f"[{job.job_id}] Step 4: Heightmap generation")
         job.add_log("Generating heightmap from elevation data...")
 
-        target_size = job.options.get("heightmap_size", 2048)
+        # target_size already set in step 2 (from job.options["heightmap_size"])
         target_resolution = job.options.get("grid_resolution", 2.0)
 
         heightmap_result = step_generate_heightmap(
@@ -537,6 +551,11 @@ async def run_generation(job: MapGenerationJob):
             output_dir=output_dir,
             job=job,
         )
+
+        # Free raw GeoTIFF bytes from elevation_result — no longer needed.
+        # For Sweden STAC this can be ~192 MB. The heightmap pipeline has
+        # already extracted the numpy array, so we only keep the metadata.
+        elevation_result["data"] = None
 
         job.progress = 60
         job.steps_completed.append({

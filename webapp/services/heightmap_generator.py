@@ -415,6 +415,18 @@ def generate_heightmap(
         job.add_log(f"Validating elevation data ({len(dem_bytes) / 1024 / 1024:.1f} MB)...")
         job.progress = 42
     elevation, metadata = geotiff_to_array(dem_bytes)
+
+    # Free the raw GeoTIFF bytes now that we have the numpy array.
+    # For large Sweden STAC tiles this can be ~192 MB.
+    del dem_bytes
+    import gc
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass  # Not on glibc (e.g. musl/macOS) — skip
+
     if job:
         job.add_log(
             f"Elevation parsed: {elevation.shape[1]}×{elevation.shape[0]} pixels, "

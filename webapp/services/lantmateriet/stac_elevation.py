@@ -373,6 +373,20 @@ async def fetch_stac_elevation(
                 merged_transform = target_transform
                 profile.update(crs=crs)
 
+            # Release memory from the large merge/reproject buffers.
+            # Python's glibc allocator often holds freed memory as resident
+            # (RSS) instead of returning it to the OS, which can cause OOM
+            # kills when subsequent pipeline steps allocate large arrays.
+            # gc.collect() releases Python objects, and malloc_trim() tells
+            # glibc to return unused heap pages to the OS.
+            import gc
+            gc.collect()
+            try:
+                import ctypes
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception:
+                pass  # Not on glibc (e.g. musl/macOS) — skip
+
             # 5. Write merged GeoTIFF to bytes
             profile.update(
                 width=out_w,
