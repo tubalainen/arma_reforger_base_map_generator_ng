@@ -1,5 +1,6 @@
 """Arma Reforger terrain defaults."""
 
+MAX_MAP_EXTENT_M = 20_000          # max map extent per axis (metres) – 20 km
 MAX_TERRAIN_SIZE = 16384           # max grid dimension (pixels)
 DEFAULT_GRID_CELL_SIZE = 2         # metres per pixel
 DEFAULT_HEIGHT_SCALE = 0.03125     # maps 0-65535 to ~0-2048 m

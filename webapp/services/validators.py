@@ -5,8 +5,11 @@ Validates and sanitizes user input to prevent path traversal,
 injection attacks, and other security issues.
 """
 
+import math
 import re
 from fastapi import HTTPException
+
+from config.terrain import MAX_MAP_EXTENT_M
 
 # Job IDs are URL-safe base64, 16-32 characters
 JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
@@ -124,16 +127,26 @@ def validate_polygon(polygon: list[list[float]]) -> list[list[float]]:
                 detail=f"Latitude out of range at position {i}: {lat}",
             )
 
-    # Validate bounding box size
+    # Validate bounding box size (metric — 20 km max per axis)
     lngs = [c[0] for c in polygon]
     lats = [c[1] for c in polygon]
     lng_range = max(lngs) - min(lngs)
     lat_range = max(lats) - min(lats)
 
-    if lng_range > 2.0 or lat_range > 2.0:
+    lat_mid = (max(lats) + min(lats)) / 2
+    m_per_deg_lat = 111_320
+    m_per_deg_lng = 111_320 * math.cos(math.radians(lat_mid))
+    width_m = lng_range * m_per_deg_lng
+    height_m = lat_range * m_per_deg_lat
+    max_km = MAX_MAP_EXTENT_M / 1000
+
+    if width_m > MAX_MAP_EXTENT_M or height_m > MAX_MAP_EXTENT_M:
         raise HTTPException(
             status_code=400,
-            detail="Selected area is too large. Please select an area smaller than ~200km x 200km.",
+            detail=(
+                f"Selected area is too large (~{width_m/1000:.1f} x {height_m/1000:.1f} km). "
+                f"Maximum allowed size is {max_km:.0f} x {max_km:.0f} km."
+            ),
         )
 
     if lng_range < 0.001 or lat_range < 0.001:

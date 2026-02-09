@@ -420,9 +420,16 @@ async def fetch_elevation_wcs_2_0_chunked(
     from rasterio.merge import merge as rasterio_merge
 
     tile_datasets = []
+    tile_counter = 0
     try:
         for yi, (cy_lo, cy_hi) in enumerate(y_chunks):
             for xi, (cx_lo, cx_hi) in enumerate(x_chunks):
+                # Throttle: small delay between chunk requests to avoid
+                # overwhelming country elevation APIs.
+                if tile_counter > 0:
+                    await asyncio.sleep(0.3)
+                tile_counter += 1
+
                 chunk_bbox = (cx_lo, cy_lo, cx_hi, cy_hi)
 
                 # Per-chunk pixel dimensions (proportional, clamped to server max)

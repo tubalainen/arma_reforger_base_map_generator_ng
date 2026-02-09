@@ -157,10 +157,11 @@ document.getElementById('btn-toggle-console').addEventListener('click', function
 document.getElementById('heightmap-size').addEventListener('change', updateTerrainSizeDisplay);
 document.getElementById('grid-resolution').addEventListener('change', updateTerrainSizeDisplay);
 
+const MAX_MAP_EXTENT_KM = 20; // must match MAX_MAP_EXTENT_M in config/terrain.py
+
 function onPolygonSelected(coords) {
     document.getElementById('selection-info').classList.remove('d-none');
     document.getElementById('no-selection').classList.add('d-none');
-    document.getElementById('btn-generate').disabled = false;
 
     // Compute bounding box
     const lngs = coords.map(c => c[0]);
@@ -180,6 +181,19 @@ function onPolygonSelected(coords) {
     const lngKm = dLng * 111 * Math.cos((north + south) / 2 * Math.PI / 180);
     document.getElementById('info-size').textContent =
         `~${lngKm.toFixed(1)} x ${latKm.toFixed(1)} km`;
+
+    // Check area limit
+    const warning = document.getElementById('area-warning');
+    const warningText = document.getElementById('area-warning-text');
+    if (lngKm > MAX_MAP_EXTENT_KM || latKm > MAX_MAP_EXTENT_KM) {
+        warningText.textContent =
+            `Area too large (${lngKm.toFixed(1)} x ${latKm.toFixed(1)} km). Max ${MAX_MAP_EXTENT_KM} x ${MAX_MAP_EXTENT_KM} km.`;
+        warning.classList.remove('d-none');
+        document.getElementById('btn-generate').disabled = true;
+    } else {
+        warning.classList.add('d-none');
+        document.getElementById('btn-generate').disabled = false;
+    }
 
     // Detect countries (quick bbox check)
     detectCountries(coords);

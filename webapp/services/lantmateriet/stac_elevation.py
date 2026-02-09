@@ -23,6 +23,7 @@ Workflow:
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 from typing import Optional
@@ -133,11 +134,16 @@ async def fetch_stac_elevation(
             tile_datasets = []
             download_errors = 0
             try:
-                for feat in features:
+                for tile_idx, feat in enumerate(features):
                     assets = feat.get("assets", {})
                     data_asset = assets.get("data")
                     if data_asset is None:
                         continue
+
+                    # Throttle: small delay between tile downloads to be
+                    # gentle on Lantmäteriet's download server.
+                    if tile_idx > 0:
+                        await asyncio.sleep(0.5)
 
                     asset_url = data_asset["href"]
                     asset_size = data_asset.get("file:size", "unknown")
