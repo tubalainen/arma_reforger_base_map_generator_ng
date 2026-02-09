@@ -67,8 +67,19 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         now = datetime.utcnow()
         path = request.url.path
 
-        # Skip rate limiting for health checks
-        if path == "/api/health":
+        # Skip rate limiting for read-only / high-frequency endpoints:
+        # - /api/health: internal health check
+        # - /status/: frontend polls every 1.5s during generation (~40 req/min)
+        # - /static/: CSS, JS, images — no abuse vector
+        # - /favicon.ico: browser auto-request
+        # Without these exemptions, normal status polling during a generation
+        # exhausts the 60 req/min limit and returns 429 to the frontend.
+        if (
+            path == "/api/health"
+            or path.startswith("/status/")
+            or path.startswith("/static/")
+            or path == "/favicon.ico"
+        ):
             return await call_next(request)
 
         # Clean old timestamps and check general rate limit
