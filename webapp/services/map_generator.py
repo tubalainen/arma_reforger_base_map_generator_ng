@@ -391,9 +391,9 @@ def build_metadata(
             "block_saturation": surface_result.get("block_saturation", {}),
         },
         "roads": {
-            "total_segments": road_result["stats"]["total"],
-            "by_surface": road_result["stats"]["by_surface"],
-            "by_type": road_result["stats"]["by_type"],
+            "total_segments": road_result.get("stats", {}).get("total", 0),
+            "by_surface": road_result.get("stats", {}).get("by_surface", {}),
+            "by_type": road_result.get("stats", {}).get("by_type", {}),
         },
         "features": features["summary"],
         "enfusion_import": {
@@ -670,18 +670,21 @@ async def run_generation(job: MapGenerationJob):
         )
 
         job.progress = 82
+        road_stats = road_result.get("stats", {})
+        road_total = road_stats.get("total", 0)
+        road_by_surface = road_stats.get("by_surface", {})
         job.steps_completed.append({
             "step": "road_processing",
-            "road_count": road_result["stats"]["total"],
-            "by_surface": road_result["stats"]["by_surface"],
+            "road_count": road_total,
+            "by_surface": road_by_surface,
         })
-        surface_breakdown = ", ".join([f"{k}: {v}" for k, v in road_result["stats"]["by_surface"].items()])
+        surface_breakdown = ", ".join([f"{k}: {v}" for k, v in road_by_surface.items()])
         logger.info(
-            f"[{job.job_id}] Roads: {road_result['stats']['total']} segments "
+            f"[{job.job_id}] Roads: {road_total} segments "
             f"({surface_breakdown})"
         )
         job.add_log(
-            f"Processed {road_result['stats']['total']} road segments. By surface: {surface_breakdown}",
+            f"Processed {road_total} road segments. By surface: {surface_breakdown}",
             "success"
         )
 

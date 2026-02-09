@@ -175,7 +175,7 @@ def process_roads(
         Dict with processed road data including spline points and prefab mapping
     """
     if not road_features or not road_features.get("features"):
-        return {"roads": [], "stats": {}}
+        return {"roads": [], "stats": {"total": 0, "by_surface": {}, "by_type": {}}}
 
     if job:
         job.add_log(f"Processing {len(road_features['features'])} road segments...")
