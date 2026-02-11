@@ -443,8 +443,10 @@ def step_process_roads(
         with open(output_dir / "roads_enfusion_local.geojson", "w") as f:
             json.dump(road_geojson_local, f)
 
-    # Export CSV (with local coords if transformer available)
-    road_csv = export_roads_spline_csv(road_result, transformer=transformer)
+    # Export CSV (with local coords + elevation if transformer available)
+    road_csv = export_roads_spline_csv(
+        road_result, transformer=transformer, elevation_array=elevation_array,
+    )
     with open(output_dir / "roads_splines.csv", "w") as f:
         f.write(road_csv)
 

@@ -372,7 +372,7 @@ The satellite image should align with your terrain features:
 - Water bodies should align with terrain low points
 - Forest areas should match the forest floor surface mask
 
-> **Source**: Sentinel-2 Cloudless imagery ({self.satellite.get('dimensions', 'unknown')} pixels)"""
+> **Source**: {self.satellite.get('source', 'Sentinel-2 Cloudless')} imagery ({self.satellite.get('dimensions', 'unknown')} pixels)"""
 
     def _phase_roads(self) -> str:
         road_count = self.roads.get("total_segments", 0)
@@ -529,7 +529,7 @@ To add lakes:
 | `Sourcefiles/heightmap.asc` | Primary heightmap (ESRI ASCII Grid) — **use this** |
 | `Sourcefiles/heightmap.png` | Alternative heightmap (16-bit PNG) |
 | `Sourcefiles/heightmap_preview.png` | Visual preview of elevation |
-| `Sourcefiles/satellite_map.png` | Sentinel-2 satellite imagery |
+| `Sourcefiles/satellite_map.png` | {self.satellite.get('source', 'Sentinel-2')} satellite imagery |
 | `Sourcefiles/surface_grass.png` | Surface mask: grass/meadow |
 | `Sourcefiles/surface_forest_floor.png` | Surface mask: deciduous forest floor |
 | `Sourcefiles/surface_pine_floor.png` | Surface mask: coniferous forest floor |
