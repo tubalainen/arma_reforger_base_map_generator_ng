@@ -4,6 +4,8 @@
 
 Instead of manually sourcing elevation data, painting surface masks by hand, placing roads one-by-one, and sculpting terrain around features, simply draw a polygon on the interactive map and get Enfusion-ready heightmaps, surface masks, and vector data in minutes.
 
+<img width="1706" height="1392" alt="image" src="https://github.com/user-attachments/assets/a79a29da-a05d-4d55-baf2-ddbde1b73142" />
+
 ## Features
 
 ### Elevation Data with Intelligent Fallback
