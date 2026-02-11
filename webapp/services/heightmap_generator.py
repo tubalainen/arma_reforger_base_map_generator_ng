@@ -110,21 +110,45 @@ def geotiff_to_array(geotiff_bytes: bytes) -> tuple[np.ndarray, dict]:
         logger.error(f"Data size: {len(geotiff_bytes)} bytes, first 100 bytes: {geotiff_bytes[:100].hex()}")
         raise
 
-    # Interpolate nodata values using nearest-neighbour
-    if metadata["nodata"] is not None:
-        nodata_mask = (elevation == metadata["nodata"]) | np.isnan(elevation)
-        if np.any(nodata_mask):
-            valid = ~nodata_mask
-            if np.any(valid):
-                rows, cols = np.where(valid)
-                values = elevation[valid]
-                interp = NearestNDInterpolator(list(zip(rows, cols)), values)
-                nodata_rows, nodata_cols = np.where(nodata_mask)
-                if len(nodata_rows) > 0:
-                    elevation[nodata_mask] = interp(nodata_rows, nodata_cols)
-                    logger.info(f"Interpolated {len(nodata_rows)} nodata pixels")
+    # Interpolate nodata values using nearest-neighbour.
+    # Always check for NaN even when the GeoTIFF has no explicit nodata value
+    # (e.g. some STAC providers don't set nodata in the profile but still
+    # produce NaN for void/sea areas after reprojection).
+    nodata_val = metadata["nodata"]
+    if nodata_val is not None:
+        nodata_mask = (elevation == nodata_val) | np.isnan(elevation)
+    else:
+        nodata_mask = np.isnan(elevation)
 
-    # Safety check: detect silently truncated responses where the WCS
+    if np.any(nodata_mask):
+        valid = ~nodata_mask
+        if np.any(valid):
+            rows, cols = np.where(valid)
+            values = elevation[valid]
+            interp = NearestNDInterpolator(list(zip(rows, cols)), values)
+            nodata_rows, nodata_cols = np.where(nodata_mask)
+            if len(nodata_rows) > 0:
+                elevation[nodata_mask] = interp(nodata_rows, nodata_cols)
+                logger.info(f"Interpolated {len(nodata_rows)} nodata pixels")
+
+    # Safety check 1: detect implausible elevation ranges.
+    # Real-world elevation spans from ~-430 m (Dead Sea) to ~8849 m (Everest).
+    # For a typical Arma map selection (< 30 km), a range > 5000 m is almost
+    # certainly corrupt — e.g. leaked nodata sentinel values (-9999) or
+    # sea-floor bathymetry from coastal STAC tiles.
+    elev_min = float(np.nanmin(elevation))
+    elev_max = float(np.nanmax(elevation))
+    elev_range = elev_max - elev_min
+    if elev_range > 5000:
+        msg = (
+            f"DEM has implausible elevation range: {elev_min:.1f}m to "
+            f"{elev_max:.1f}m (range: {elev_range:.0f}m). "
+            f"This likely indicates corrupt nodata/sea values in the source data."
+        )
+        logger.error(msg)
+        raise ElevationTruncatedError(msg)
+
+    # Safety check 2: detect silently truncated responses where the WCS
     # server returned the correct image dimensions but only filled a
     # small corner with real data (rest is near-zero).  This happens
     # with some national WCS endpoints (e.g. Poland's geoportal) when

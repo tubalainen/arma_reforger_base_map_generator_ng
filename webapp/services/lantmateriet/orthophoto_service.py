@@ -99,6 +99,30 @@ async def fetch_historical_orthophoto(
                             f"Received {len(resp.content)} bytes of Lantmäteriet "
                             f"orthophoto ({width}x{height} px)"
                         )
+                        # Validate the image has actual visual content.
+                        # Some areas (e.g. Gotland) aren't covered by the
+                        # 2005 historical layer, so the WMS returns a valid
+                        # but entirely black/empty PNG.
+                        try:
+                            from PIL import Image
+                            import io
+                            img = Image.open(io.BytesIO(resp.content))
+                            if img.mode in ("RGB", "RGBA"):
+                                extrema = img.getextrema()
+                                # For RGB: extrema = ((r_min, r_max), (g_min, g_max), (b_min, b_max), ...)
+                                channel_ranges = [ch[1] - ch[0] for ch in extrema[:3]]
+                                max_range = max(channel_ranges)
+                                if max_range < 10:
+                                    logger.warning(
+                                        f"Lantmäteriet orthophoto appears blank/uniform "
+                                        f"(max channel range: {max_range}). "
+                                        f"Area likely not covered by this layer."
+                                    )
+                                    return None
+                        except Exception as val_err:
+                            logger.warning(
+                                f"Failed to validate orthophoto content: {val_err}"
+                            )
                         return resp.content
                     else:
                         logger.error(
