@@ -190,7 +190,7 @@ async def step_fetch_osm(
     output_dir: Path,
     job: Optional[MapGenerationJob] = None,
 ) -> dict:
-    """Step 3: Fetch OSM features and save raw GeoJSON."""
+    """Step 3 (fallback): Fetch all features from OSM and save raw GeoJSON."""
     from services.osm_service import fetch_all_features
 
     osm_data = await fetch_all_features(bbox, job)
@@ -200,6 +200,160 @@ async def step_fetch_osm(
             json.dump(data, f)
 
     return osm_data
+
+
+def _empty_fc() -> dict:
+    """Return an empty GeoJSON FeatureCollection."""
+    return {"type": "FeatureCollection", "features": []}
+
+
+def _merge_feature_collections(fc1: dict, fc2: dict) -> dict:
+    """Merge two GeoJSON FeatureCollections by concatenating features."""
+    features = fc1.get("features", []) + fc2.get("features", [])
+    return {"type": "FeatureCollection", "features": features}
+
+
+def _safe_result(result, name: str, job=None) -> dict:
+    """Convert a fetch result to a safe FeatureCollection."""
+    if isinstance(result, Exception):
+        logger.error(f"Failed to fetch {name}: {result}")
+        if job:
+            job.add_log(f"Warning: Failed to fetch {name}: {result}", "warning")
+        return _empty_fc()
+    return result or _empty_fc()
+
+
+async def step_fetch_features(
+    bbox: dict,
+    primary_country: str,
+    output_dir: Path,
+    job: Optional[MapGenerationJob] = None,
+) -> dict:
+    """
+    Step 3: Fetch geographic features from the best available source.
+
+    For Sweden (SE) with credentials: Lantmäteriet APIs (primary) + OSM (roads/buildings).
+    For all other countries: OSM Overpass (all features).
+
+    Returns the standard osm_data dict with keys:
+        roads, water, forests, buildings, land_use
+    """
+    from config.lantmateriet import LANTMATERIET_CONFIG
+
+    use_lantmateriet = (
+        primary_country == "SE"
+        and LANTMATERIET_CONFIG.has_credentials()
+    )
+
+    if use_lantmateriet:
+        return await _fetch_features_sweden(bbox, output_dir, job)
+    else:
+        return await step_fetch_osm(bbox, output_dir, job)
+
+
+async def _fetch_features_sweden(
+    bbox: dict,
+    output_dir: Path,
+    job: Optional[MapGenerationJob] = None,
+) -> dict:
+    """
+    Fetch features for Sweden using Lantmäteriet as primary + OSM for roads/buildings.
+
+    Data source strategy:
+    - Roads:     OSM (always — Lantmäteriet has no road data in these APIs)
+    - Buildings: OSM (always — Marktäcke only has area-level urban, not individual footprints)
+    - Water:     Lantmäteriet Hydrografi (primary) + Marktäcke water (supplement)
+                 → OSM fallback if both fail
+    - Forests:   Lantmäteriet Marktäcke (primary) → OSM fallback if fails
+    - Land use:  Lantmäteriet Marktäcke (primary) → OSM fallback if fails
+    """
+    from services.lantmateriet.hydrografi_service import fetch_lantmateriet_water
+    from services.lantmateriet.marktacke_service import fetch_lantmateriet_land_cover
+    from services.osm_service import (
+        fetch_roads,
+        fetch_water,
+        fetch_forests,
+        fetch_buildings,
+        fetch_land_use,
+    )
+
+    bbox_tuple = (bbox["west"], bbox["south"], bbox["east"], bbox["north"])
+
+    if job:
+        job.add_log(
+            "Sweden detected — using Lantmäteriet official data for water and "
+            "land cover (OSM for roads and buildings)..."
+        )
+        job.progress = 27
+
+    # Launch all fetches concurrently:
+    # Lantmäteriet: water (Hydrografi) + land cover (Marktäcke)
+    # OSM: roads + buildings (always needed)
+    lm_water_task = fetch_lantmateriet_water(bbox_tuple, job)
+    lm_land_cover_task = fetch_lantmateriet_land_cover(bbox_tuple, job)
+    osm_roads_task = fetch_roads(bbox, job)
+    osm_buildings_task = fetch_buildings(bbox, job)
+
+    lm_water, lm_land_cover, osm_roads, osm_buildings = await asyncio.gather(
+        lm_water_task,
+        lm_land_cover_task,
+        osm_roads_task,
+        osm_buildings_task,
+        return_exceptions=True,
+    )
+
+    result = {}
+
+    # --- Roads: always OSM ---
+    result["roads"] = _safe_result(osm_roads, "roads", job)
+
+    # --- Buildings: always OSM ---
+    result["buildings"] = _safe_result(osm_buildings, "buildings", job)
+
+    # --- Water: Lantmäteriet Hydrografi primary, OSM fallback ---
+    if isinstance(lm_water, Exception) or lm_water is None:
+        if job:
+            reason = str(lm_water) if isinstance(lm_water, Exception) else "no data"
+            job.add_log(
+                f"Lantmäteriet water unavailable ({reason}), "
+                f"falling back to OpenStreetMap...",
+                "warning",
+            )
+        osm_water = await fetch_water(bbox, job)
+        result["water"] = _safe_result(osm_water, "water", job)
+    else:
+        result["water"] = lm_water
+
+    # --- Forests + Land use: Lantmäteriet Marktäcke primary, OSM fallback ---
+    if isinstance(lm_land_cover, Exception) or lm_land_cover is None:
+        if job:
+            reason = str(lm_land_cover) if isinstance(lm_land_cover, Exception) else "no data"
+            job.add_log(
+                f"Lantmäteriet land cover unavailable ({reason}), "
+                f"falling back to OpenStreetMap...",
+                "warning",
+            )
+        osm_forests = await fetch_forests(bbox, job)
+        osm_land_use = await fetch_land_use(bbox, job)
+        result["forests"] = _safe_result(osm_forests, "forests", job)
+        result["land_use"] = _safe_result(osm_land_use, "land_use", job)
+    else:
+        result["forests"] = lm_land_cover.get("forests", _empty_fc())
+        result["land_use"] = lm_land_cover.get("land_use", _empty_fc())
+
+        # Merge Marktäcke supplementary water (Hav, Sjö, etc.) into water
+        marktacke_water = lm_land_cover.get("water", {})
+        if marktacke_water.get("features"):
+            result["water"] = _merge_feature_collections(
+                result["water"], marktacke_water
+            )
+
+    # Save GeoJSON files (same naming as OSM path for downstream compatibility)
+    for name, data in result.items():
+        with open(output_dir / f"osm_{name}.geojson", "w") as f:
+            json.dump(data, f)
+
+    return result
 
 
 def step_generate_heightmap(
@@ -590,23 +744,28 @@ async def run_generation(job: MapGenerationJob):
             "success"
         )
 
-        # Step 3: Fetch OSM features (25% -> 40%)
+        # Step 3: Fetch geographic features (25% -> 40%)
+        # For Sweden: Lantmäteriet APIs (primary) + OSM (roads/buildings)
+        # For others: OSM Overpass (all features)
         job.current_step = "Downloading map features (roads, water, forests, buildings)..."
         job.progress = 25
-        logger.info(f"[{job.job_id}] Step 3: OSM feature extraction")
-        job.add_log("Fetching map features (roads, water, forests, buildings) from OpenStreetMap...")
+        logger.info(f"[{job.job_id}] Step 3: Geographic feature extraction")
+        job.add_log("Fetching map features (roads, water, forests, buildings)...")
 
-        osm_data = await step_fetch_osm(bbox, output_dir, job=job)
+        osm_data = await step_fetch_features(
+            bbox, primary_country, output_dir, job=job
+        )
 
         job.progress = 40
         feature_counts = {k: len(v.get("features", [])) for k, v in osm_data.items()}
         job.steps_completed.append({"step": "osm_features", "feature_counts": feature_counts})
-        logger.info(f"[{job.job_id}] OSM features: {feature_counts}")
+        logger.info(f"[{job.job_id}] Geographic features: {feature_counts}")
         job.add_log(
-            f"Fetched OSM features: {feature_counts.get('roads', 0)} roads, "
-            f"{feature_counts.get('water', 0)} water features, "
+            f"Features: {feature_counts.get('roads', 0)} roads, "
+            f"{feature_counts.get('water', 0)} water, "
             f"{feature_counts.get('forests', 0)} forests, "
-            f"{feature_counts.get('buildings', 0)} buildings",
+            f"{feature_counts.get('buildings', 0)} buildings, "
+            f"{feature_counts.get('land_use', 0)} land use",
             "success"
         )
 
