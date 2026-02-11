@@ -306,6 +306,11 @@ async def fetch_stac_elevation(
                 src_crs = str(datasets[0].crs)
                 logger.info(f"Source tile CRS: {src_crs}")
 
+                # Read nodata value from the tiles — needed for merge and
+                # reproject to correctly handle sea/void pixels.
+                nodata_val = datasets[0].nodata
+                logger.info(f"Source tile nodata value: {nodata_val}")
+
                 if len(datasets) == 1:
                     merged_array = datasets[0].read()
                     merged_transform = datasets[0].transform
@@ -313,7 +318,11 @@ async def fetch_stac_elevation(
                 else:
                     # rasterio_merge reads from disk-backed datasets,
                     # only the output merged array lives in memory.
-                    merged_array, merged_transform = rasterio_merge(datasets)
+                    # Pass nodata so the merge fills gaps correctly
+                    # instead of using 0 (which is valid sea-level elevation).
+                    merged_array, merged_transform = rasterio_merge(
+                        datasets, nodata=nodata_val
+                    )
                     profile = datasets[0].profile.copy()
                     profile.update(
                         width=merged_array.shape[2],
@@ -352,8 +361,13 @@ async def fetch_stac_elevation(
                 target_transform = from_bounds(
                     x_min, y_min, x_max, y_max, out_w, out_h
                 )
-                resampled = np.empty(
+                # Initialize with nodata value instead of np.empty() —
+                # np.empty() leaves garbage in pixels that reproject
+                # doesn't fill (sea areas, outside tile coverage).
+                fill_val = nodata_val if nodata_val is not None else 0
+                resampled = np.full(
                     (merged_array.shape[0], out_h, out_w),
+                    fill_value=fill_val,
                     dtype=merged_array.dtype,
                 )
                 import os
@@ -365,13 +379,15 @@ async def fetch_stac_elevation(
                     dst_transform=target_transform,
                     dst_crs=crs,
                     resampling=Resampling.bilinear,
+                    src_nodata=nodata_val,
+                    dst_nodata=nodata_val,
                     num_threads=os.cpu_count() or 2,
                 )
                 # Free the merged array before writing output
                 del merged_array
                 merged_array = resampled
                 merged_transform = target_transform
-                profile.update(crs=crs)
+                profile.update(crs=crs, nodata=nodata_val)
 
             # Release memory from the large merge/reproject buffers.
             # Python's glibc allocator often holds freed memory as resident
@@ -388,11 +404,14 @@ async def fetch_stac_elevation(
                 pass  # Not on glibc (e.g. musl/macOS) — skip
 
             # 5. Write merged GeoTIFF to bytes
+            #    Ensure nodata is preserved so downstream geotiff_to_array()
+            #    can identify and interpolate sea/void pixels.
             profile.update(
                 width=out_w,
                 height=out_h,
                 transform=merged_transform,
                 count=merged_array.shape[0],
+                nodata=nodata_val,
             )
             output = io.BytesIO()
             with rasterio.open(output, "w", **profile) as dst:

@@ -260,15 +260,35 @@ async def fetch_satellite_imagery(
                 job.add_log("Trying Lantmäteriet historical orthophotos...")
             lm_img = await fetch_historical_orthophoto(bbox_wgs84, width, height)
             if lm_img:
-                logger.info(
-                    f"Using Lantmäteriet orthophoto: {len(lm_img)} bytes"
+                # Validate the image has actual content — some WMS layers
+                # return valid PNGs that are entirely black/empty for areas
+                # without coverage. A real color aerial photo at these
+                # dimensions compresses to at least ~0.1 bytes/pixel.
+                min_expected_bytes = int(width * height * 0.1)
+                if len(lm_img) < min_expected_bytes:
+                    logger.warning(
+                        f"Lantmäteriet orthophoto suspiciously small: "
+                        f"{len(lm_img)} bytes for {width}x{height} "
+                        f"(expected >{min_expected_bytes}). "
+                        f"Likely empty/black image, falling back to Sentinel-2."
+                    )
+                    if job:
+                        job.add_log(
+                            "Lantmäteriet orthophoto appears empty for this area, "
+                            "falling back to Sentinel-2...",
+                            "warning"
+                        )
+                else:
+                    logger.info(
+                        f"Using Lantmäteriet orthophoto: {len(lm_img)} bytes"
+                    )
+                    return lm_img, "Lantmäteriet Historical Orthophotos (2005)"
+            else:
+                logger.warning(
+                    "Lantmäteriet orthophoto unavailable, falling back to Sentinel-2"
                 )
-                return lm_img, "Lantmäteriet Historical Orthophotos (2005)"
-            logger.warning(
-                "Lantmäteriet orthophoto unavailable, falling back to Sentinel-2"
-            )
-            if job:
-                job.add_log("Lantmäteriet orthophotos not available, falling back to Sentinel-2...", "warning")
+                if job:
+                    job.add_log("Lantmäteriet orthophotos not available, falling back to Sentinel-2...", "warning")
         except Exception as e:
             logger.error(f"Error fetching Lantmäteriet orthophoto: {e}")
             logger.warning("Falling back to Sentinel-2 Cloudless")
