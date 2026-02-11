@@ -619,14 +619,58 @@ async def run_generation(job: MapGenerationJob):
         # target_size already set in step 2 (from job.options["heightmap_size"])
         target_resolution = job.options.get("grid_resolution", 2.0)
 
-        heightmap_result = step_generate_heightmap(
-            dem_bytes=elevation_result["data"],
-            osm_data=osm_data,
-            target_size=target_size,
-            target_resolution=target_resolution,
-            output_dir=output_dir,
-            job=job,
-        )
+        from services.heightmap_generator import ElevationTruncatedError
+
+        try:
+            heightmap_result = step_generate_heightmap(
+                dem_bytes=elevation_result["data"],
+                osm_data=osm_data,
+                target_size=target_size,
+                target_resolution=target_resolution,
+                output_dir=output_dir,
+                job=job,
+            )
+        except ElevationTruncatedError as e:
+            # The national WCS source returned truncated data.
+            # Fall back to OpenTopography Copernicus DEM 30m.
+            original_source = elevation_result.get("source", "unknown")
+            logger.warning(
+                f"[{job.job_id}] Elevation data from {original_source} was truncated, "
+                f"falling back to OpenTopography 30m: {e}"
+            )
+            job.add_log(
+                f"Elevation data from {original_source} was truncated. "
+                f"Falling back to OpenTopography Copernicus DEM 30m...",
+                "warning"
+            )
+            job.progress = 42
+
+            from services.elevation_service import fetch_elevation_opentopography
+            fallback_data = await fetch_elevation_opentopography(bbox, "COP30")
+            if not fallback_data:
+                raise RuntimeError(
+                    f"Elevation data from {original_source} was truncated, "
+                    f"and OpenTopography fallback also failed."
+                )
+
+            elevation_result["data"] = fallback_data
+            elevation_result["source"] = "Copernicus DEM GLO-30 (OpenTopography, fallback)"
+            elevation_result["resolution_m"] = 30
+            elevation_result["crs"] = "EPSG:4326"
+            job.add_log("Downloaded fallback elevation from OpenTopography (30m)", "success")
+
+            heightmap_result = step_generate_heightmap(
+                dem_bytes=fallback_data,
+                osm_data=osm_data,
+                target_size=target_size,
+                target_resolution=target_resolution,
+                output_dir=output_dir,
+                job=job,
+            )
+            job.add_log(
+                f"Heightmap generated using OpenTopography 30m fallback",
+                "warning"
+            )
 
         # Free raw GeoTIFF bytes from elevation_result — no longer needed.
         # For Sweden STAC this can be ~192 MB. The heightmap pipeline has
