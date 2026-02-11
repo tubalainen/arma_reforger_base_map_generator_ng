@@ -207,6 +207,24 @@ def snap_to_enfusion_size(requested_size: int) -> int:
     return min(VALID_ENFUSION_VERTEX_COUNTS, key=lambda x: abs(x - requested_size))
 
 
+def snap_to_enfusion_dimensions(size_x: int, size_z: int) -> tuple[int, int]:
+    """
+    Snap X and Z vertex counts independently to valid Enfusion sizes.
+
+    Enfusion supports non-square terrain — ``TerrainGridSizeX`` and
+    ``TerrainGridSizeZ`` can differ, but each must be a power-of-2 face
+    count (i.e. vertex count = 2^n + 1).
+
+    Args:
+        size_x: Requested vertex count along the X (width) axis.
+        size_z: Requested vertex count along the Z (depth) axis.
+
+    Returns:
+        Tuple of (snapped_x, snapped_z) valid Enfusion vertex counts.
+    """
+    return (snap_to_enfusion_size(size_x), snap_to_enfusion_size(size_z))
+
+
 def compute_height_scale(min_elevation: float, max_elevation: float) -> float:
     """
     Compute the Enfusion height scale for a given elevation range.

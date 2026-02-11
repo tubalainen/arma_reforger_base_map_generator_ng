@@ -112,6 +112,21 @@ def geotiff_to_array(geotiff_bytes: bytes) -> tuple[np.ndarray, dict]:
                     elevation[nodata_mask] = interp(nodata_rows, nodata_cols)
                     logger.info(f"Interpolated {len(nodata_rows)} nodata pixels")
 
+    # Safety check: detect silently truncated responses where the WCS
+    # server returned the correct image dimensions but only filled a
+    # small corner with real data (rest is near-zero).  This happens
+    # with some national WCS endpoints (e.g. Poland's geoportal) when
+    # the requested area exceeds an undocumented size limit.
+    total_pixels = elevation.size
+    near_zero_count = np.sum(np.abs(elevation) < 0.01)
+    near_zero_pct = near_zero_count / total_pixels * 100
+    if near_zero_pct > 50:
+        logger.warning(
+            f"DEM may be truncated: {near_zero_pct:.1f}% of pixels are near-zero "
+            f"({near_zero_count}/{total_pixels}). The elevation API may have "
+            f"silently returned incomplete data."
+        )
+
     logger.info(
         f"DEM: {elevation.shape}, "
         f"range: {np.nanmin(elevation):.1f} - {np.nanmax(elevation):.1f} m"
@@ -127,7 +142,7 @@ def resample_dem(
     elevation: np.ndarray,
     metadata: dict,
     target_resolution_m: float,
-    target_size: Optional[int] = None,
+    target_size: Optional[int | tuple[int, int]] = None,
 ) -> tuple[np.ndarray, dict]:
     """
     Resample DEM to target resolution or exact pixel dimensions.
@@ -136,17 +151,23 @@ def resample_dem(
         elevation: Input elevation array
         metadata: DEM metadata with resolution info
         target_resolution_m: Target resolution in metres
-        target_size: If set, resize to this square dimension
+        target_size: If set, resize to these dimensions.
+            - int: square (size x size)
+            - tuple (size_x, size_z): non-square (width x height)
 
     Returns:
         (resampled_elevation, updated_metadata)
     """
     if target_size:
-        zoom_y = target_size / elevation.shape[0]
-        zoom_x = target_size / elevation.shape[1]
+        if isinstance(target_size, tuple):
+            size_x, size_z = target_size
+        else:
+            size_x = size_z = target_size
+        zoom_y = size_z / elevation.shape[0]
+        zoom_x = size_x / elevation.shape[1]
         elevation = parallel_zoom(elevation, (zoom_y, zoom_x), order=3)
-        metadata["width"] = target_size
-        metadata["height"] = target_size
+        metadata["width"] = size_x
+        metadata["height"] = size_z
     else:
         current_res = metadata.get("resolution", (30, 30))
         if isinstance(current_res, tuple):
@@ -372,7 +393,7 @@ def generate_heightmap(
     dem_bytes: bytes,
     road_features: Optional[dict] = None,
     water_features: Optional[dict] = None,
-    target_size: int = 4096,
+    target_size: int | tuple[int, int] = 4096,
     target_resolution_m: float = 2.0,
     output_dir: Optional[Path] = None,
     job = None,
@@ -384,7 +405,9 @@ def generate_heightmap(
         dem_bytes: Raw GeoTIFF DEM data
         road_features: GeoJSON roads for flattening
         water_features: GeoJSON water bodies for leveling
-        target_size: Output heightmap dimension (pixels)
+        target_size: Output heightmap dimensions (pixels).
+            - int: square heightmap (size x size)
+            - tuple (size_x, size_z): non-square heightmap (width x height)
         target_resolution_m: Target resolution in metres
         output_dir: Directory for output files
         job: Optional MapGenerationJob for logging
@@ -395,18 +418,25 @@ def generate_heightmap(
     if output_dir is None:
         output_dir = Path(tempfile.mkdtemp())
 
-    # 0. Snap target_size to nearest valid Enfusion vertex count
+    # 0. Normalize target_size to (size_x, size_z) tuple and snap each axis
+    if isinstance(target_size, int):
+        target_size = (target_size, target_size)
+
     original_size = target_size
-    target_size = snap_to_enfusion_size(target_size)
+    size_x = snap_to_enfusion_size(target_size[0])
+    size_z = snap_to_enfusion_size(target_size[1])
+    target_size = (size_x, size_z)
+
     if target_size != original_size:
         logger.info(
-            f"Snapped heightmap size from {original_size} to {target_size} "
-            f"(Enfusion requires power-of-2 faces: {target_size - 1} faces = {target_size} vertices)"
+            f"Snapped heightmap size from {original_size[0]}x{original_size[1]} "
+            f"to {size_x}x{size_z} "
+            f"(Enfusion requires power-of-2 faces per axis)"
         )
         if job:
             job.add_log(
-                f"Adjusted heightmap size: {original_size} → {target_size} "
-                f"(Enfusion requires {target_size - 1} faces = {target_size} vertices)"
+                f"Adjusted heightmap size: {original_size[0]}x{original_size[1]} → "
+                f"{size_x}x{size_z} (Enfusion requires power-of-2 faces per axis)"
             )
 
     # 1. Parse GeoTIFF
@@ -434,9 +464,9 @@ def generate_heightmap(
         )
 
     # 2. Resample
-    logger.info(f"Resampling to {target_size}x{target_size}...")
+    logger.info(f"Resampling to {size_x}x{size_z}...")
     if job:
-        job.add_log(f"Resampling elevation data to {target_size}x{target_size} pixels...")
+        job.add_log(f"Resampling elevation data to {size_x}x{size_z} pixels...")
         job.progress = 45
     elevation, metadata = resample_dem(elevation, metadata, target_resolution_m, target_size)
 
