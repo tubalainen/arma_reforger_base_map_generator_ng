@@ -306,16 +306,21 @@ def export_roads_geojson(processed_roads: dict) -> dict:
     }
 
 
-def export_roads_spline_csv(processed_roads: dict, transformer=None) -> str:
+def export_roads_spline_csv(processed_roads: dict, transformer=None,
+                            elevation_array=None) -> str:
     """
     Export road spline data as CSV for potential scripted import.
 
     If a CoordinateTransformer is provided, coordinates are output in
-    Enfusion local metres. Otherwise, WGS84 coordinates are used.
+    Enfusion local metres.  If *elevation_array* is also provided,
+    elevation values are sampled from the DEM so spline points follow
+    the terrain surface (matching the Enfusion layer file behaviour).
 
     Args:
         processed_roads: Processed road data dict.
         transformer: Optional CoordinateTransformer for local coordinates.
+        elevation_array: Optional DEM array (metres, north-up).  Used with
+            *transformer* to sample terrain elevation at each spline point.
 
     Returns:
         CSV string with road spline data.
@@ -323,12 +328,16 @@ def export_roads_spline_csv(processed_roads: dict, transformer=None) -> str:
     if transformer:
         lines = ["road_id,prefab,name,surface,width_m,point_index,local_x,local_z,elevation"]
         for i, road in enumerate(processed_roads.get("roads", [])):
-            for j, point in enumerate(road["spline_points"]):
-                local_x, local_z = transformer.wgs84_to_local(point["x"], point["y"])
+            # Use transform_points to get local coords with elevation
+            local_pts = transformer.transform_points(
+                road["spline_points"],
+                elevation_array=elevation_array,
+            )
+            for j, lp in enumerate(local_pts):
                 lines.append(
                     f"{road['osm_id']},{road['enfusion_prefab']},"
                     f"\"{road['name']}\",{road['surface']},{road['width_m']},"
-                    f"{j},{local_x:.3f},{local_z:.3f},{point['z']:.2f}"
+                    f"{j},{lp['x']:.3f},{lp['z']:.3f},{lp['y']:.2f}"
                 )
     else:
         lines = ["road_id,prefab,name,surface,width_m,point_index,longitude,latitude,elevation"]

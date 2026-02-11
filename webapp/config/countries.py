@@ -46,7 +46,7 @@ COUNTRY_CRS: dict[str, str] = {
     "FI": "EPSG:3067",     # ETRS89 / TM35FIN
     "EE": "EPSG:3301",     # Estonian Coordinate System
     "LV": "EPSG:3059",     # LKS-92 / TM
-    "LT": "EPSG:4258",     # ETRS89 geographic
+    "LT": "EPSG:3346",     # LKS94 / Lithuania TM
     "DE": "EPSG:25832",
     "PL": "EPSG:2180",
     "GB": "EPSG:27700",
