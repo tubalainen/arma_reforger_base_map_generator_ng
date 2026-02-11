@@ -3,15 +3,16 @@ Lantmäteriet API integration services.
 
 Provides access to Swedish national geodata APIs:
 - STAC Höjd: High-resolution elevation (1-2 m LiDAR)
+- OGC Features Hydrografi: Water bodies, waterways, wetlands
+- OGC Features Marktäcke: Land cover classification (forests, urban, farmland, etc.)
 - Historical Orthophotos: Aerial imagery via WMS (most recent color: 2005)
 - Topowebb: Topographic map tiles (WMTS, CC-BY open)
 
-Note: STAC Vektor was evaluated but provides municipality-level bulk downloads
-(ZIP/GeoPackage), not feature-level queries. OSM Overpass is used for all
-map features (roads, water, buildings, forests).
+For Swedish maps, Hydrografi and Marktäcke are used as primary data sources
+for water and land cover, with OSM Overpass as automatic fallback.
+Roads and individual building footprints always come from OSM.
 
-Authentication: Basic Auth (username/password) for STAC and WMS APIs.
-Topowebb is open data (CC-BY, no auth required).
+Authentication: Basic Auth (username/password) for all APIs except Topowebb.
 """
 
 from services.lantmateriet.auth import (

@@ -2,6 +2,8 @@
 
 Provides configuration for Swedish Lantmäteriet APIs:
 - STAC Höjd (elevation, 1-2 m LiDAR)
+- OGC Features Hydrografi (water bodies, waterways, wetlands)
+- OGC Features Marktäcke (land cover classification)
 - Historical Orthophotos WMS (aerial imagery, most recent color: 2005)
 - Topowebb WMTS (topographic map tiles, CC-BY open)
 
@@ -22,7 +24,11 @@ class LantmaterietConfig:
 
     # STAC APIs
     stac_hojd_endpoint: str = "https://api.lantmateriet.se/stac-hojd/v1/"
-    stac_vektor_endpoint: str = "https://api.lantmateriet.se/stac-vektor/v1"
+    stac_vektor_endpoint: str = "https://api.lantmateriet.se/stac-vektor/v1"  # Legacy (unused)
+
+    # OGC Features APIs
+    hydrografi_endpoint: str = "https://api.lantmateriet.se/ogc-features/v1/hydrografi"
+    marktacke_endpoint: str = "https://api.lantmateriet.se/ogc-features/v1/marktacke"
 
     # WMS/WMTS Services
     orthophoto_wms: str = "https://maps.lantmateriet.se/historiska-ortofoton/wms/v1"
