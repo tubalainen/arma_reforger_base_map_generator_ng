@@ -112,6 +112,21 @@ def geotiff_to_array(geotiff_bytes: bytes) -> tuple[np.ndarray, dict]:
                     elevation[nodata_mask] = interp(nodata_rows, nodata_cols)
                     logger.info(f"Interpolated {len(nodata_rows)} nodata pixels")
 
+    # Safety check: detect silently truncated responses where the WCS
+    # server returned the correct image dimensions but only filled a
+    # small corner with real data (rest is near-zero).  This happens
+    # with some national WCS endpoints (e.g. Poland's geoportal) when
+    # the requested area exceeds an undocumented size limit.
+    total_pixels = elevation.size
+    near_zero_count = np.sum(np.abs(elevation) < 0.01)
+    near_zero_pct = near_zero_count / total_pixels * 100
+    if near_zero_pct > 50:
+        logger.warning(
+            f"DEM may be truncated: {near_zero_pct:.1f}% of pixels are near-zero "
+            f"({near_zero_count}/{total_pixels}). The elevation API may have "
+            f"silently returned incomplete data."
+        )
+
     logger.info(
         f"DEM: {elevation.shape}, "
         f"range: {np.nanmin(elevation):.1f} - {np.nanmax(elevation):.1f} m"

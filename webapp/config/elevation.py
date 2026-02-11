@@ -98,6 +98,7 @@ ELEVATION_CONFIGS: dict[str, CountryElevationConfig] = {
         max_request_size=4096,  # Conservative estimate, similar to Estonia
         format="image/tiff",
         supports_scalesize=True,  # Verified: service declares WCS scaling extension support
+        max_area_m=5000,  # Polish geoportal silently truncates responses for large areas; observed limit ~5.5 km
     ),
     # Latvia: No WCS config - lvmgeoserver.lvm.lv only provides WMS (not WCS) for elevation.
     # The system will automatically fall back to OpenTopography Copernicus DEM 30m.
