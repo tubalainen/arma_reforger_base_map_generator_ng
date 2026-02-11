@@ -205,12 +205,17 @@ async def step_fetch_osm(
 def step_generate_heightmap(
     dem_bytes: bytes,
     osm_data: dict,
-    target_size: int,
+    target_size: int | tuple[int, int],
     target_resolution: float,
     output_dir: Path,
     job: Optional[MapGenerationJob] = None,
 ) -> dict:
     """Step 4: Generate heightmap with road flattening and water leveling.
+
+    Args:
+        target_size: Output heightmap dimensions.
+            - int: square heightmap (size x size)
+            - tuple (size_x, size_z): non-square heightmap (width x height)
 
     Returns result dict including '_elevation_array' and '_dem_metadata'
     for reuse in step 5 (avoids re-parsing the DEM).
@@ -299,7 +304,8 @@ def step_process_roads(
 
 async def step_fetch_satellite_imagery(
     bbox: dict,
-    target_size: int,
+    target_size_x: int,
+    target_size_z: int,
     output_dir: Path,
     country_codes: list[str] | None = None,
     job: Optional[MapGenerationJob] = None,
@@ -308,11 +314,15 @@ async def step_fetch_satellite_imagery(
 
     Uses country-aware dispatch: Swedish maps try Lantmäteriet orthophotos
     (sub-meter) first, falling back to Sentinel-2 Cloudless (10 m).
+
+    Args:
+        target_size_x: Satellite image width in pixels (matches heightmap X).
+        target_size_z: Satellite image height in pixels (matches heightmap Z).
     """
     from services.satellite_service import fetch_satellite_imagery
 
-    # Use square dimensions based on heightmap size
-    width = height = target_size
+    width = target_size_x
+    height = target_size_z
 
     bbox_tuple = (bbox["west"], bbox["south"], bbox["east"], bbox["north"])
 
@@ -336,12 +346,12 @@ async def step_fetch_satellite_imagery(
                 img = img.convert("RGB")
 
             # Resize to match heightmap dimensions if different
-            if img.size != (target_size, target_size):
+            if img.size != (width, height):
                 logger.info(
                     f"Resizing satellite image from {img.size[0]}x{img.size[1]} "
-                    f"to {target_size}x{target_size} to match heightmap"
+                    f"to {width}x{height} to match heightmap"
                 )
-                img = img.resize((target_size, target_size), Image.LANCZOS)
+                img = img.resize((width, height), Image.LANCZOS)
 
             # Save with DPI metadata (required by Enfusion Workbench for import)
             img.save(str(satellite_path), format="PNG", dpi=(96, 96))
@@ -528,15 +538,44 @@ async def run_generation(job: MapGenerationJob):
         logger.info(f"[{job.job_id}] Step 2: Elevation acquisition")
         job.add_log(f"Downloading elevation data ({primary_country})...")
 
+        # Compute per-axis heightmap dimensions from bbox aspect ratio.
+        # Enfusion supports non-square terrain (TerrainGridSizeX ≠ TerrainGridSizeZ).
+        # The longest geographic axis gets the user's selected vertex count;
+        # the shorter axis is proportional and snapped to valid Enfusion size.
+        from config.enfusion import snap_to_enfusion_size
+        from services.utils.geo import estimate_bbox_dimensions_m
+
+        user_vertices = job.options.get("heightmap_size", 2048)
+        user_vertices = snap_to_enfusion_size(user_vertices)
+
+        width_m, height_m = estimate_bbox_dimensions_m(bbox)
+
+        if width_m >= height_m:
+            target_size_x = user_vertices
+            target_size_z = snap_to_enfusion_size(round(user_vertices * (height_m / width_m)))
+        else:
+            target_size_z = user_vertices
+            target_size_x = snap_to_enfusion_size(round(user_vertices * (width_m / height_m)))
+
+        target_size = (target_size_x, target_size_z)
+        logger.info(
+            f"[{job.job_id}] Terrain dimensions: {target_size_x}x{target_size_z} vertices "
+            f"(bbox {width_m:.0f}m x {height_m:.0f}m)"
+        )
+        job.add_log(
+            f"Terrain dimensions: {target_size_x}x{target_size_z} vertices "
+            f"(area {width_m:.0f}m x {height_m:.0f}m)"
+        )
+
         # Pass the heightmap size to the elevation fetcher so it can limit
         # the output resolution.  Fetching at the native sensor resolution
         # (1 m → 15 000 px per axis for a 15 km area) then down-sampling to
         # the actual heightmap size (e.g. 2049) wastes ~1 GB of RAM during
         # the merge step.  We cap elevation to 2× the heightmap vertices so
         # there is still quality headroom for the later bicubic resample.
-        target_size = job.options.get("heightmap_size", 2048)
+        max_vertex = max(target_size_x, target_size_z)
         elevation_result = await step_fetch_elevation(
-            bbox, primary_country, job, max_pixels=target_size * 2,
+            bbox, primary_country, job, max_pixels=max_vertex * 2,
         )
 
         job.progress = 25
@@ -661,7 +700,8 @@ async def run_generation(job: MapGenerationJob):
 
         satellite_result = await step_fetch_satellite_imagery(
             bbox=bbox,
-            target_size=target_size,
+            target_size_x=target_size_x,
+            target_size_z=target_size_z,
             output_dir=output_dir,
             country_codes=country_info.get("countries", []),
             job=job,

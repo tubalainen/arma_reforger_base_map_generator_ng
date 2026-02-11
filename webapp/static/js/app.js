@@ -302,20 +302,17 @@ function onPolygonSelected(coords) {
         document.getElementById('btn-generate').disabled = false;
     }
 
-    // Check aspect ratio — warn if not square
+    // Check aspect ratio — inform user about non-square terrain
     const aspectWarning = document.getElementById('aspect-warning');
     const aspectWarningText = document.getElementById('aspect-warning-text');
     const aspectRatio = Math.max(lngKm, latKm) / Math.min(lngKm, latKm);
     if (aspectRatio > 1.05) {
-        // More than 5% off from square
-        const squareSideKm = Math.max(lngKm, latKm);
+        // More than 5% off from square — show info about non-square terrain
         aspectWarningText.innerHTML =
-            `<i class="bi bi-exclamation-triangle-fill"></i> ` +
-            `Non-square selection (${lngKm.toFixed(1)} x ${latKm.toFixed(1)} km). ` +
-            `Enfusion requires a square heightmap — the terrain will be mapped to a ` +
-            `<strong>${squareSideKm.toFixed(1)} x ${squareSideKm.toFixed(1)} km</strong> ` +
-            `square, which may cause stretching. ` +
-            `Use the <strong>⬜ Square</strong> tool for best results.`;
+            `<i class="bi bi-info-circle-fill"></i> ` +
+            `Non-square selection detected (${lngKm.toFixed(1)} x ${latKm.toFixed(1)} km). ` +
+            `The terrain will use different vertex counts per axis to match the area's aspect ratio ` +
+            `(no stretching or distortion).`;
         aspectWarning.classList.remove('d-none');
     } else {
         aspectWarning.classList.add('d-none');
@@ -347,7 +344,8 @@ function updateTerrainSizeDisplay() {
     const faces = vertices - 1;
     const terrainM = faces * res;
     document.getElementById('terrain-size-display').innerHTML =
-        `${faces} faces at ${res}m = <strong>${terrainM}m x ${terrainM}m</strong> terrain`;
+        `${faces} faces at ${res}m = up to <strong>${terrainM}m x ${terrainM}m</strong> terrain ` +
+        `<span class="text-muted">(proportional to selection)</span>`;
 }
 
 // ===========================================================================
