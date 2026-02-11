@@ -341,7 +341,7 @@ async def fetch_elevation_wcs_2_0(
 
 
 # ---------------------------------------------------------------------------
-# WCS 2.0.1 chunked fetch (for APIs with area limits)
+# Chunked fetch helpers (shared between WCS versions)
 # ---------------------------------------------------------------------------
 
 def _compute_chunks_1d(low: float, high: float, max_span: float) -> list[tuple[float, float]]:
@@ -359,6 +359,170 @@ def _compute_chunks_1d(low: float, high: float, max_span: float) -> list[tuple[f
         chunks.append((c_low, c_high))
     return chunks
 
+
+# ---------------------------------------------------------------------------
+# WCS 1.0.0 chunked fetch (for APIs with area/pixel limits)
+# ---------------------------------------------------------------------------
+
+async def fetch_elevation_wcs_1_0_chunked(
+    endpoint: str,
+    coverage_id: str,
+    bbox: tuple[float, float, float, float],
+    crs: str,
+    width: int | None = None,
+    height: int | None = None,
+    auth_params: dict | None = None,
+    format: str = "image/tiff",
+    max_area_m: int = 2000,
+    resolution_m: float = 1.0,
+    max_request_px: int = 3840,
+    job=None,
+) -> bytes:
+    """
+    Fetch elevation via WCS 1.0.0 with automatic area chunking.
+
+    WCS 1.0.0 uses explicit WIDTH/HEIGHT parameters, so each chunk requests
+    a specific pixel count proportional to its geographic extent.  Tiles are
+    fetched independently and merged via rasterio.
+
+    Args:
+        endpoint:       WCS endpoint URL
+        coverage_id:    WCS COVERAGE name
+        bbox:           (min_x, min_y, max_x, max_y) in the native CRS
+        crs:            Native CRS string (e.g. EPSG:25833)
+        width:          Desired total raster width (pixels)
+        height:         Desired total raster height (pixels)
+        auth_params:    Authentication query parameters
+        format:         WCS FORMAT parameter (e.g. "GeoTIFF", "GTiff")
+        max_area_m:     Maximum metres per axis before chunking
+        resolution_m:   Native pixel resolution (for computing per-chunk px)
+        max_request_px: Maximum pixel dimension per single request
+
+    Returns:
+        Merged GeoTIFF bytes
+    """
+    x_min, y_min, x_max, y_max = bbox
+    x_span = x_max - x_min
+    y_span = y_max - y_min
+
+    # Do we actually need chunking?
+    if x_span <= max_area_m and y_span <= max_area_m:
+        # Small enough for a single request
+        return await fetch_elevation_wcs_1_0(
+            endpoint, coverage_id, bbox, crs,
+            width or max_request_px, height or max_request_px,
+            auth_params, format=format,
+        )
+
+    # Compute chunk grid
+    x_chunks = _compute_chunks_1d(x_min, x_max, max_area_m)
+    y_chunks = _compute_chunks_1d(y_min, y_max, max_area_m)
+    n_tiles = len(x_chunks) * len(y_chunks)
+    logger.info(
+        f"WCS 1.0.0 area {x_span:.0f}x{y_span:.0f} m exceeds {max_area_m} m limit — "
+        f"splitting into {len(x_chunks)}x{len(y_chunks)} = {n_tiles} tile(s)"
+    )
+    if job:
+        job.add_log(f"Splitting elevation area into {len(x_chunks)}x{len(y_chunks)} = {n_tiles} tiles for download...")
+
+    # Fetch each tile
+    import rasterio
+    from rasterio.transform import from_bounds
+    from rasterio.merge import merge as rasterio_merge
+
+    tile_datasets = []
+    tile_counter = 0
+    try:
+        for yi, (cy_lo, cy_hi) in enumerate(y_chunks):
+            for xi, (cx_lo, cx_hi) in enumerate(x_chunks):
+                # Throttle: small delay between chunk requests
+                if tile_counter > 0:
+                    await asyncio.sleep(0.3)
+                tile_counter += 1
+
+                chunk_bbox = (cx_lo, cy_lo, cx_hi, cy_hi)
+
+                # Per-chunk pixel dimensions (proportional, capped to server max)
+                chunk_w = min(max_request_px, max(64, int((cx_hi - cx_lo) / resolution_m)))
+                chunk_h = min(max_request_px, max(64, int((cy_hi - cy_lo) / resolution_m)))
+
+                logger.info(
+                    f"  Fetching tile [{yi},{xi}] "
+                    f"({cx_lo:.0f},{cy_lo:.0f})-({cx_hi:.0f},{cy_hi:.0f}) "
+                    f"-> {chunk_w}x{chunk_h} px"
+                )
+                if job:
+                    job.add_log(f"Downloading elevation tile {tile_counter}/{n_tiles}...")
+
+                tiff_bytes = await fetch_elevation_wcs_1_0(
+                    endpoint, coverage_id, chunk_bbox, crs,
+                    chunk_w, chunk_h,
+                    auth_params, format=format,
+                )
+
+                # Open as an in-memory rasterio dataset for merging
+                memfile = rasterio.MemoryFile(tiff_bytes)
+                ds = memfile.open()
+                tile_datasets.append((memfile, ds))
+
+        # Merge all tiles into a single raster
+        if job:
+            job.add_log(f"Merging {n_tiles} elevation tiles...")
+        datasets = [ds for _, ds in tile_datasets]
+        merged_array, merged_transform = rasterio_merge(datasets)
+
+        # If the caller requested a specific output size, resample
+        out_h, out_w = merged_array.shape[1], merged_array.shape[2]
+        if width and height and (out_w != width or out_h != height):
+            from rasterio.enums import Resampling
+            target_transform = from_bounds(
+                x_min, y_min, x_max, y_max, width, height
+            )
+            resampled = np.empty((merged_array.shape[0], height, width), dtype=merged_array.dtype)
+            rasterio.warp.reproject(
+                merged_array, resampled,
+                src_transform=merged_transform,
+                src_crs=crs,
+                dst_transform=target_transform,
+                dst_crs=crs,
+                resampling=Resampling.bilinear,
+                num_threads=os.cpu_count() or 2,
+            )
+            merged_array = resampled
+            merged_transform = target_transform
+            out_h, out_w = height, width
+
+        # Write merged GeoTIFF to bytes
+        profile = datasets[0].profile.copy()
+        profile.update(
+            width=out_w,
+            height=out_h,
+            transform=merged_transform,
+            count=merged_array.shape[0],
+        )
+        output = io.BytesIO()
+        with rasterio.open(output, "w", **profile) as dst:
+            dst.write(merged_array)
+        merged_bytes = output.getvalue()
+
+        logger.info(
+            f"Merged {n_tiles} WCS 1.0.0 tile(s) into {out_w}x{out_h} px GeoTIFF "
+            f"({len(merged_bytes)} bytes)"
+        )
+        return merged_bytes
+
+    finally:
+        for memfile, ds in tile_datasets:
+            try:
+                ds.close()
+                memfile.close()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# WCS 2.0.1 chunked fetch (for APIs with area limits)
+# ---------------------------------------------------------------------------
 
 async def fetch_elevation_wcs_2_0_chunked(
     endpoint: str,
@@ -747,6 +911,29 @@ async def fetch_elevation_for_country(
 
         # WCS-based APIs
         if config.version == "1.0.0":
+            # Use chunked fetch if the API has an area limit and the
+            # request exceeds it on either axis
+            if config.max_area_m > 0:
+                x_span = bbox_native[2] - bbox_native[0]
+                y_span = bbox_native[3] - bbox_native[1]
+                if x_span > config.max_area_m or y_span > config.max_area_m:
+                    logger.info(
+                        f"{config.name} area {x_span:.0f}x{y_span:.0f} m "
+                        f"exceeds limit {config.max_area_m} m — using chunked fetch"
+                    )
+                    return await fetch_elevation_wcs_1_0_chunked(
+                        config.endpoint, config.coverage_id,
+                        bbox_native, native_crs,
+                        width=target_width,
+                        height=target_height,
+                        auth_params=auth_params or None,
+                        format=config.format,
+                        max_area_m=config.max_area_m,
+                        resolution_m=config.resolution_m,
+                        max_request_px=config.max_request_size,
+                        job=job,
+                    )
+
             return await fetch_elevation_wcs_1_0(
                 config.endpoint, config.coverage_id,
                 bbox_native, native_crs,

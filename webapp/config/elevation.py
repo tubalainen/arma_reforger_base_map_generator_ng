@@ -33,7 +33,8 @@ ELEVATION_CONFIGS: dict[str, CountryElevationConfig] = {
         native_crs="EPSG:25833",
         resolution_m=1.0,
         auth_type="none",
-        max_request_size=4096,  # Norwegian API has lower size limits
+        max_request_size=3840,  # DescribeCoverage dimensionLimit: 3840 columns x 2160 rows
+        max_area_m=2000,  # Conservative: dimensionLimit 2160 rows at 1m = ~2.2 km per axis
         format="GeoTIFF",  # Norwegian API requires "GeoTIFF" instead of "image/tiff"
     ),
     "EE": CountryElevationConfig(
@@ -46,6 +47,7 @@ ELEVATION_CONFIGS: dict[str, CountryElevationConfig] = {
         resolution_m=1.0,
         auth_type="none",
         max_request_size=4096,  # Estonian API has lower size limits than others
+        max_area_m=4000,  # Conservative limit; server MAXSIZE likely 4096px at 1m = ~4 km
     ),
     "FI": CountryElevationConfig(
         name="Finland",

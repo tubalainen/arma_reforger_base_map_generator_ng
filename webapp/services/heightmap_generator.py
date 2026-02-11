@@ -32,6 +32,18 @@ from config.enfusion import snap_to_enfusion_size, VALID_ENFUSION_VERTEX_COUNTS
 logger = logging.getLogger(__name__)
 
 
+class ElevationTruncatedError(Exception):
+    """Raised when the WCS elevation data appears silently truncated.
+
+    Some WCS endpoints (e.g. Poland's geoportal) return valid TIFF files
+    with correct dimensions but only partial elevation data.  The unfilled
+    portion is near-zero, producing broken heightmaps.
+
+    When this is raised the caller should fall back to a lower-resolution
+    global source (e.g. OpenTopography Copernicus DEM 30 m).
+    """
+
+
 # ---------------------------------------------------------------------------
 # GeoTIFF to array with nodata interpolation
 # ---------------------------------------------------------------------------
@@ -121,11 +133,13 @@ def geotiff_to_array(geotiff_bytes: bytes) -> tuple[np.ndarray, dict]:
     near_zero_count = np.sum(np.abs(elevation) < 0.01)
     near_zero_pct = near_zero_count / total_pixels * 100
     if near_zero_pct > 50:
-        logger.warning(
-            f"DEM may be truncated: {near_zero_pct:.1f}% of pixels are near-zero "
-            f"({near_zero_count}/{total_pixels}). The elevation API may have "
-            f"silently returned incomplete data."
+        msg = (
+            f"DEM appears truncated: {near_zero_pct:.1f}% of pixels are near-zero "
+            f"({near_zero_count}/{total_pixels}). The elevation API silently "
+            f"returned incomplete data."
         )
+        logger.error(msg)
+        raise ElevationTruncatedError(msg)
 
     logger.info(
         f"DEM: {elevation.shape}, "
