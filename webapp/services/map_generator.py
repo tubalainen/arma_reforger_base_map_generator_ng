@@ -325,6 +325,7 @@ async def step_fetch_satellite_imagery(
 
         # Validate and convert to proper PNG — WMS may return JPEG
         # despite FORMAT=image/png request.
+        # Also ensure correct dimensions and DPI metadata for Enfusion import.
         try:
             from PIL import Image
             import io
@@ -333,10 +334,20 @@ async def step_fetch_satellite_imagery(
             original_format = img.format  # e.g. "JPEG", "PNG"
             if img.mode != "RGB":
                 img = img.convert("RGB")
-            img.save(str(satellite_path), format="PNG")
+
+            # Resize to match heightmap dimensions if different
+            if img.size != (target_size, target_size):
+                logger.info(
+                    f"Resizing satellite image from {img.size[0]}x{img.size[1]} "
+                    f"to {target_size}x{target_size} to match heightmap"
+                )
+                img = img.resize((target_size, target_size), Image.LANCZOS)
+
+            # Save with DPI metadata (required by Enfusion Workbench for import)
+            img.save(str(satellite_path), format="PNG", dpi=(96, 96))
             actual_dims = f"{img.size[0]}x{img.size[1]}"
             logger.info(
-                f"Saved satellite image as PNG ({actual_dims}, "
+                f"Saved satellite image as PNG ({actual_dims}, dpi=96, "
                 f"original format: {original_format})"
             )
         except Exception as e:
@@ -494,28 +505,6 @@ async def run_generation(job: MapGenerationJob):
         country_info = await step_detect_countries(job.polygon_coords)
         primary_country = country_info["primary_country"]
         bbox = country_info["bbox"]
-
-        # Expand bbox to square in metres so the square heightmap covers
-        # a square geographic area (no stretching/distortion).
-        from services.utils.geo import square_bbox, estimate_bbox_dimensions_m
-
-        original_dims = estimate_bbox_dimensions_m(bbox)
-        bbox = square_bbox(bbox)
-        squared_dims = estimate_bbox_dimensions_m(bbox)
-        country_info["bbox"] = bbox  # propagate to all downstream steps
-
-        if abs(original_dims[0] - squared_dims[0]) > 1 or abs(original_dims[1] - squared_dims[1]) > 1:
-            logger.info(
-                f"[{job.job_id}] Expanded bbox to square: "
-                f"{original_dims[0]:.0f}x{original_dims[1]:.0f}m -> "
-                f"{squared_dims[0]:.0f}x{squared_dims[1]:.0f}m"
-            )
-            job.add_log(
-                f"Expanded area to square: {original_dims[0]:.0f}x{original_dims[1]:.0f}m "
-                f"-> {squared_dims[0]:.0f}x{squared_dims[1]:.0f}m "
-                f"(Enfusion requires square heightmap)",
-                "info"
-            )
 
         job.progress = 10
         job.steps_completed.append({
