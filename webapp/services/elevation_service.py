@@ -442,9 +442,17 @@ async def fetch_elevation_wcs_1_0_chunked(
 
                 chunk_bbox = (cx_lo, cy_lo, cx_hi, cy_hi)
 
-                # Per-chunk pixel dimensions (proportional, capped to server max)
-                chunk_w = min(max_request_px, max(64, int((cx_hi - cx_lo) / resolution_m)))
-                chunk_h = min(max_request_px, max(64, int((cy_hi - cy_lo) / resolution_m)))
+                # Per-chunk pixel dimensions — proportional to the caller's
+                # desired output (see WCS 2.0.1 chunked fetcher for rationale).
+                if width and height:
+                    chunk_w = max(64, int(width * (cx_hi - cx_lo) / x_span))
+                    chunk_h = max(64, int(height * (cy_hi - cy_lo) / y_span))
+                else:
+                    chunk_w = min(max_request_px, max(64, int((cx_hi - cx_lo) / resolution_m)))
+                    chunk_h = min(max_request_px, max(64, int((cy_hi - cy_lo) / resolution_m)))
+                # Still cap to server maximum
+                chunk_w = min(chunk_w, max_request_px)
+                chunk_h = min(chunk_h, max_request_px)
 
                 logger.info(
                     f"  Fetching tile [{yi},{xi}] "
@@ -605,9 +613,22 @@ async def fetch_elevation_wcs_2_0_chunked(
 
                 chunk_bbox = (cx_lo, cy_lo, cx_hi, cy_hi)
 
-                # Per-chunk pixel dimensions (proportional, clamped to server max)
-                chunk_w = min(max_request_px, max(64, int((cx_hi - cx_lo) / resolution_m)))
-                chunk_h = min(max_request_px, max(64, int((cy_hi - cy_lo) / resolution_m)))
+                # Per-chunk pixel dimensions — proportional to the caller's
+                # desired output, NOT the native resolution.  Using native
+                # resolution would request e.g. 4096×4096 px per tile for a
+                # 5 km chunk at 1 m, producing ~67 MB GeoTIFFs × 9 tiles =
+                # 600 MB of data to merge, when the final output is only
+                # 2049×2049.  Instead, scale pixels proportionally to the
+                # chunk's fraction of the total extent.
+                if width and height:
+                    chunk_w = max(64, int(width * (cx_hi - cx_lo) / x_span))
+                    chunk_h = max(64, int(height * (cy_hi - cy_lo) / y_span))
+                else:
+                    chunk_w = min(max_request_px, max(64, int((cx_hi - cx_lo) / resolution_m)))
+                    chunk_h = min(max_request_px, max(64, int((cy_hi - cy_lo) / resolution_m)))
+                # Still cap to server maximum
+                chunk_w = min(chunk_w, max_request_px)
+                chunk_h = min(chunk_h, max_request_px)
 
                 logger.info(
                     f"  Fetching tile [{yi},{xi}] "
