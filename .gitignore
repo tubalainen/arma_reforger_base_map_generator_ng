@@ -37,6 +37,9 @@ new-generation.md
 lantmateriet.md
 api-expansion.md
 
+# Claude Code project memory
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db

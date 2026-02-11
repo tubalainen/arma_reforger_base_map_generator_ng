@@ -258,12 +258,13 @@ def step_process_roads(
     primary_country: str,
     output_dir: Path,
     transformer=None,
+    elevation_array=None,
     job: Optional[MapGenerationJob] = None,
 ) -> dict:
     """Step 6: Classify roads and export Enfusion-ready data."""
     from services.road_processor import (
         process_roads, export_roads_geojson, export_roads_spline_csv,
-        export_roads_geojson_local,
+        export_roads_geojson_local, export_roads_reference_csv,
     )
 
     road_result = process_roads(
@@ -287,6 +288,11 @@ def step_process_roads(
     road_csv = export_roads_spline_csv(road_result, transformer=transformer)
     with open(output_dir / "roads_splines.csv", "w") as f:
         f.write(road_csv)
+
+    # Export roads reference CSV for manual prefab setup in Workbench
+    reference_csv = export_roads_reference_csv(road_result)
+    with open(output_dir / "roads_reference.csv", "w") as f:
+        f.write(reference_csv)
 
     return road_result
 
@@ -316,14 +322,34 @@ async def step_fetch_satellite_imagery(
 
     if satellite_data:
         satellite_path = output_dir / "satellite_map.png"
-        with open(satellite_path, "wb") as f:
-            f.write(satellite_data)
+
+        # Validate and convert to proper PNG — WMS may return JPEG
+        # despite FORMAT=image/png request.
+        try:
+            from PIL import Image
+            import io
+
+            img = Image.open(io.BytesIO(satellite_data))
+            original_format = img.format  # e.g. "JPEG", "PNG"
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img.save(str(satellite_path), format="PNG")
+            actual_dims = f"{img.size[0]}x{img.size[1]}"
+            logger.info(
+                f"Saved satellite image as PNG ({actual_dims}, "
+                f"original format: {original_format})"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to validate/convert satellite image: {e}, saving raw bytes")
+            with open(satellite_path, "wb") as f:
+                f.write(satellite_data)
+            actual_dims = f"{width}x{height}"
 
         return {
             "success": True,
             "file": "satellite_map.png",
             "size_bytes": len(satellite_data),
-            "dimensions": f"{width}x{height}",
+            "dimensions": actual_dims,
             "source": source_name,
         }
     else:
@@ -469,6 +495,28 @@ async def run_generation(job: MapGenerationJob):
         primary_country = country_info["primary_country"]
         bbox = country_info["bbox"]
 
+        # Expand bbox to square in metres so the square heightmap covers
+        # a square geographic area (no stretching/distortion).
+        from services.utils.geo import square_bbox, estimate_bbox_dimensions_m
+
+        original_dims = estimate_bbox_dimensions_m(bbox)
+        bbox = square_bbox(bbox)
+        squared_dims = estimate_bbox_dimensions_m(bbox)
+        country_info["bbox"] = bbox  # propagate to all downstream steps
+
+        if abs(original_dims[0] - squared_dims[0]) > 1 or abs(original_dims[1] - squared_dims[1]) > 1:
+            logger.info(
+                f"[{job.job_id}] Expanded bbox to square: "
+                f"{original_dims[0]:.0f}x{original_dims[1]:.0f}m -> "
+                f"{squared_dims[0]:.0f}x{squared_dims[1]:.0f}m"
+            )
+            job.add_log(
+                f"Expanded area to square: {original_dims[0]:.0f}x{original_dims[1]:.0f}m "
+                f"-> {squared_dims[0]:.0f}x{squared_dims[1]:.0f}m "
+                f"(Enfusion requires square heightmap)",
+                "info"
+            )
+
         job.progress = 10
         job.steps_completed.append({
             "step": "country_detection",
@@ -580,7 +628,7 @@ async def run_generation(job: MapGenerationJob):
         job.current_step = "Generating surface masks..."
         job.progress = 60
         logger.info(f"[{job.job_id}] Step 5: Surface mask generation")
-        job.add_log("Generating surface masks (grass, forest, roads, rock, sand)...")
+        job.add_log("Generating surface masks (9 types: grass, forest, pine, asphalt, gravel, dirt, rock, sand, water edge)...")
 
         # Pass heightmap dimensions so masks are generated at matching size
         hm_dims_str = heightmap_result["dimensions"]
@@ -685,6 +733,7 @@ async def run_generation(job: MapGenerationJob):
         road_result = step_process_roads(
             osm_data, primary_country, output_dir,
             transformer=transformer,
+            elevation_array=heightmap_result.get("_elevation_array"),
             job=job,
         )
 
@@ -767,6 +816,7 @@ async def run_generation(job: MapGenerationJob):
             metadata=metadata,
             road_data=road_result,
             transformer=transformer,
+            elevation_array=heightmap_result.get("_elevation_array"),
         )
         enfusion_files = enfusion_gen.generate_all(output_dir, job=job)
 

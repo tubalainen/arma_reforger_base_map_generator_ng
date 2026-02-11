@@ -64,9 +64,13 @@ SURFACE_MATERIAL_BASE = "ArmaReforger/Terrains/Common/Surfaces"
 SURFACE_MATERIAL_MAP = {
     "grass": f"{SURFACE_MATERIAL_BASE}/Grass_01.emat",
     "forest_floor": f"{SURFACE_MATERIAL_BASE}/ForestFloor_01.emat",
+    "pine_floor": f"{SURFACE_MATERIAL_BASE}/ForestFloor_Pine_01.emat",
     "asphalt": f"{SURFACE_MATERIAL_BASE}/Asphalt_01.emat",
+    "gravel": f"{SURFACE_MATERIAL_BASE}/Gravel_01.emat",
+    "dirt": f"{SURFACE_MATERIAL_BASE}/Dirt_01.emat",
     "rock": f"{SURFACE_MATERIAL_BASE}/Rock_01.emat",
-    "sand_dirt": f"{SURFACE_MATERIAL_BASE}/Dirt_01.emat",
+    "sand": f"{SURFACE_MATERIAL_BASE}/Sand_01.emat",
+    "water_edge": f"{SURFACE_MATERIAL_BASE}/Mud_01.emat",
 }
 
 # Alternative materials the user can swap to (for SETUP_GUIDE reference)
@@ -76,25 +80,42 @@ SURFACE_MATERIAL_ALTERNATIVES = {
         f"{SURFACE_MATERIAL_BASE}/Grass_03.emat",
     ],
     "forest_floor": [
-        f"{SURFACE_MATERIAL_BASE}/ForestFloor_Pine_01.emat",
+        f"{SURFACE_MATERIAL_BASE}/Moss_01.emat",
+    ],
+    "pine_floor": [
+        f"{SURFACE_MATERIAL_BASE}/ForestFloor_01.emat",
         f"{SURFACE_MATERIAL_BASE}/Moss_01.emat",
     ],
     "asphalt": [
         f"{SURFACE_MATERIAL_BASE}/Concrete_01.emat",
         f"{SURFACE_MATERIAL_BASE}/Asphalt_Cracked_01.emat",
     ],
+    "gravel": [
+        f"{SURFACE_MATERIAL_BASE}/Rock_01.emat",
+        f"{SURFACE_MATERIAL_BASE}/Dirt_01.emat",
+    ],
+    "dirt": [
+        f"{SURFACE_MATERIAL_BASE}/Mud_01.emat",
+        f"{SURFACE_MATERIAL_BASE}/Sand_01.emat",
+    ],
     "rock": [
         f"{SURFACE_MATERIAL_BASE}/Rock_Granite_01.emat",
         f"{SURFACE_MATERIAL_BASE}/Gravel_01.emat",
     ],
-    "sand_dirt": [
+    "sand": [
+        f"{SURFACE_MATERIAL_BASE}/Dirt_01.emat",
+    ],
+    "water_edge": [
         f"{SURFACE_MATERIAL_BASE}/Sand_01.emat",
-        f"{SURFACE_MATERIAL_BASE}/Mud_01.emat",
+        f"{SURFACE_MATERIAL_BASE}/Dirt_01.emat",
     ],
 }
 
 # Recommended import order (most specific -> least specific)
-SURFACE_IMPORT_ORDER = ["rock", "forest_floor", "asphalt", "sand_dirt"]
+SURFACE_IMPORT_ORDER = [
+    "rock", "pine_floor", "forest_floor", "asphalt",
+    "gravel", "dirt", "sand", "water_edge",
+]
 
 # ---------------------------------------------------------------------------
 # Required world prefabs (verified from BI wiki "Suggested Default Prefabs")

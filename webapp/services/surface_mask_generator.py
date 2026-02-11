@@ -355,15 +355,21 @@ def generate_surface_masks(
     """
     Generate all surface masks for Enfusion.
 
-    Produces up to 5 normalized surface masks with soft edge transitions:
+    Produces 9 normalized surface masks with soft edge transitions:
     1. Grass (default complement — fills wherever no other surface claims)
-    2. Forest floor (under forest areas)
-    3. Asphalt/road surface (paved roads + urban)
-    4. Rock (steep slopes + above treeline)
-    5. Sand/dirt (near water, farmland, gravel roads)
+    2. Forest floor (deciduous forest areas)
+    3. Pine floor (coniferous forest areas)
+    4. Asphalt (paved roads + urban areas)
+    5. Gravel (gravel/unpaved roads)
+    6. Dirt (farmland, dirt paths)
+    7. Rock (steep slopes + above treeline)
+    8. Sand (beaches, shorelines, underwater seabed)
+    9. Water edge (near-water transition zone)
 
     The masks are mutually normalized: at every pixel, all mask values
     sum to exactly 255, ensuring clean Enfusion import regardless of order.
+    Block saturation (max 5 surfaces per 33x33 block) is enforced via
+    auto-merge of the weakest surface in each violating block.
 
     Args:
         elevation: DEM numpy array.
@@ -444,9 +450,18 @@ def generate_surface_masks(
         )
         job.progress = 62
 
-    # Forest polygons
+    # Forest polygons (all types)
     logger.debug("Rasterizing forest areas...")
     forest_binary = _rasterize_polygons(osm_data.get("forests"), bounds, w, h)
+
+    # Coniferous forests (leaf_type=needleleaved)
+    logger.debug("Rasterizing coniferous forest areas...")
+    coniferous_binary = _rasterize_polygons(
+        osm_data.get("forests"), bounds, w, h,
+        filter_tags={"leaf_type": ["needleleaved"]},
+    )
+    # Deciduous = all forest minus coniferous
+    deciduous_binary = forest_binary & ~coniferous_binary
 
     # Paved roads
     logger.debug("Rasterizing road network...")
@@ -515,38 +530,71 @@ def generate_surface_masks(
         rock = np.maximum(rock, treeline_mask)
         return ndimage.gaussian_filter(rock, sigma=sigma)
 
-    def _compute_forest():
-        forest = soft_edge_mask(forest_binary, transition_px=forest_transition_px)
+    def _compute_forest_floor():
+        """Deciduous forest floor."""
+        forest = soft_edge_mask(deciduous_binary, transition_px=forest_transition_px)
         forest *= (1.0 - treeline_mask)
         return forest
+
+    def _compute_pine_floor():
+        """Coniferous (needleleaved) forest floor."""
+        pine = soft_edge_mask(coniferous_binary, transition_px=forest_transition_px)
+        pine *= (1.0 - treeline_mask)
+        return pine
 
     def _compute_asphalt():
         asphalt_soft = soft_edge_mask(asphalt_binary, transition_px=2)
         urban_soft = soft_edge_mask(urban_combined, transition_px=3) * 0.5
         return np.maximum(asphalt_soft, urban_soft)
 
-    def _compute_sand_dirt():
+    def _compute_gravel():
+        """Gravel/unpaved roads."""
+        return soft_edge_mask(gravel_binary, transition_px=2) * 0.8
+
+    def _compute_dirt():
+        """Farmland and dirt paths."""
+        return soft_edge_mask(farmland_binary, transition_px=5) * 0.6
+
+    def _compute_sand():
+        """Sandy beaches, shorelines, and underwater seabed."""
         if np.any(water_binary):
             water_dilated = ndimage.binary_dilation(water_binary, iterations=sand_transition_px)
             shore_zone = water_dilated & ~water_binary
             sand_shore = soft_edge_mask(shore_zone, transition_px=sand_transition_px)
         else:
             sand_shore = np.zeros((h, w), dtype=np.float32)
-        farmland_soft = soft_edge_mask(farmland_binary, transition_px=5) * 0.6
-        gravel_soft = soft_edge_mask(gravel_binary, transition_px=2) * 0.8
-        return np.maximum(sand_shore, np.maximum(farmland_soft, gravel_soft))
+        # Underwater areas get full sand coverage (seabed)
+        seabed = water_binary.astype(np.float32)
+        return np.maximum(sand_shore, seabed)
 
-    # Run all 4 mask computations in parallel threads
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    def _compute_water_edge():
+        """Near-water transition zone (outer ring beyond immediate shoreline)."""
+        if np.any(water_binary):
+            outer_dilated = ndimage.binary_dilation(water_binary, iterations=sand_transition_px * 2)
+            inner_dilated = ndimage.binary_dilation(water_binary, iterations=sand_transition_px)
+            edge_only = outer_dilated & ~inner_dilated
+            return soft_edge_mask(edge_only, transition_px=sand_transition_px) * 0.7
+        return np.zeros((h, w), dtype=np.float32)
+
+    # Run all 8 mask computations in parallel threads
+    with ThreadPoolExecutor(max_workers=8) as pool:
         future_rock = pool.submit(_compute_rock)
-        future_forest = pool.submit(_compute_forest)
+        future_forest = pool.submit(_compute_forest_floor)
+        future_pine = pool.submit(_compute_pine_floor)
         future_asphalt = pool.submit(_compute_asphalt)
-        future_sand = pool.submit(_compute_sand_dirt)
+        future_gravel = pool.submit(_compute_gravel)
+        future_dirt = pool.submit(_compute_dirt)
+        future_sand = pool.submit(_compute_sand)
+        future_water_edge = pool.submit(_compute_water_edge)
 
         rock_float = future_rock.result()
         forest_float = future_forest.result()
+        pine_float = future_pine.result()
         asphalt_float = future_asphalt.result()
-        sand_dirt_float = future_sand.result()
+        gravel_float = future_gravel.result()
+        dirt_float = future_dirt.result()
+        sand_float = future_sand.result()
+        water_edge_float = future_water_edge.result()
 
     # =========================================================================
     # Step 4: Normalize all masks to sum to 1.0 at every pixel
@@ -557,17 +605,23 @@ def generate_surface_masks(
 
     logger.debug("Normalizing surface masks...")
 
-    # Water pixels get zeroed out (water is handled by WaterEntity, not surfaces)
-    water_exclusion = ~water_binary
+    # Water pixels: zero non-seabed masks, sand provides seabed coverage
+    water_mask_bool = water_binary.astype(bool)
 
-    # Apply water exclusion
-    rock_float *= water_exclusion
-    forest_float *= water_exclusion
-    asphalt_float *= water_exclusion
-    sand_dirt_float *= water_exclusion
+    rock_float[water_mask_bool] = 0
+    forest_float[water_mask_bool] = 0
+    pine_float[water_mask_bool] = 0
+    asphalt_float[water_mask_bool] = 0
+    gravel_float[water_mask_bool] = 0
+    dirt_float[water_mask_bool] = 0
+    water_edge_float[water_mask_bool] = 0
+    # sand_float already has seabed = 1.0 on water pixels (from _compute_sand)
 
-    # Stack non-grass masks
-    mask_stack = np.stack([rock_float, forest_float, asphalt_float, sand_dirt_float], axis=-1)
+    # Stack all non-grass masks
+    mask_stack = np.stack([
+        rock_float, forest_float, pine_float, asphalt_float,
+        gravel_float, dirt_float, sand_float, water_edge_float,
+    ], axis=-1)
 
     # Total of all non-grass masks at each pixel
     total_non_grass = mask_stack.sum(axis=-1)
@@ -586,13 +640,17 @@ def generate_surface_masks(
 
     # Grass is the complement: whatever's left after all other surfaces
     grass_float = np.clip(1.0 - total_non_grass, 0.0, 1.0)
-    grass_float *= water_exclusion  # No grass on water either
+    grass_float[water_mask_bool] = 0  # No grass underwater
 
     # Unpack normalized masks
     rock_float = mask_stack[..., 0]
     forest_float = mask_stack[..., 1]
-    asphalt_float = mask_stack[..., 2]
-    sand_dirt_float = mask_stack[..., 3]
+    pine_float = mask_stack[..., 2]
+    asphalt_float = mask_stack[..., 3]
+    gravel_float = mask_stack[..., 4]
+    dirt_float = mask_stack[..., 5]
+    sand_float = mask_stack[..., 6]
+    water_edge_float = mask_stack[..., 7]
 
     # =========================================================================
     # Step 5: Convert to uint8 and save
@@ -607,9 +665,13 @@ def generate_surface_masks(
     mask_arrays = {
         "grass": to_uint8(grass_float),
         "forest_floor": to_uint8(forest_float),
+        "pine_floor": to_uint8(pine_float),
         "asphalt": to_uint8(asphalt_float),
+        "gravel": to_uint8(gravel_float),
+        "dirt": to_uint8(dirt_float),
         "rock": to_uint8(rock_float),
-        "sand_dirt": to_uint8(sand_dirt_float),
+        "sand": to_uint8(sand_float),
+        "water_edge": to_uint8(water_edge_float),
     }
 
     # =========================================================================
@@ -618,36 +680,41 @@ def generate_surface_masks(
     if job:
         job.progress = 73
 
-    saturation_before = check_block_saturation(mask_arrays)
-    if saturation_before["violations"] > 0:
+    # With 9 surfaces, blocks may need multiple merge passes to get below 5.
+    # Determine default surface for merging (highest coverage).
+    coverage_quick = {
+        name: int((mask > 128).sum())
+        for name, mask in mask_arrays.items()
+    }
+    default_surface = max(coverage_quick, key=coverage_quick.get)
+
+    max_merge_passes = 5
+    for merge_pass in range(max_merge_passes):
+        saturation = check_block_saturation(mask_arrays)
+        if saturation["violations"] == 0:
+            break
+
         logger.info(
-            f"Block saturation: {saturation_before['violations']} violations "
-            f"out of {saturation_before['total_blocks']} blocks, auto-merging..."
+            f"Block saturation pass {merge_pass + 1}: {saturation['violations']} violations "
+            f"out of {saturation['total_blocks']} blocks, auto-merging..."
         )
-        if job:
+        if job and merge_pass == 0:
             job.add_log(
-                f"Found {saturation_before['violations']} block saturation violations, "
+                f"Found {saturation['violations']} block saturation violations, "
                 f"auto-merging to stay within 5-surface limit..."
             )
-
-        # Determine default surface for merging
-        coverage_quick = {
-            name: (mask > 128).sum()
-            for name, mask in mask_arrays.items()
-        }
-        default_surface = max(coverage_quick, key=coverage_quick.get)
 
         mask_arrays = auto_merge_violations(
             mask_arrays,
             default_surface=default_surface,
         )
 
-        saturation_after = check_block_saturation(mask_arrays)
-        logger.info(
-            f"After merge: {saturation_after['violations']} violations remaining"
-        )
-
     saturation_final = check_block_saturation(mask_arrays)
+    if saturation_final["violations"] > 0:
+        logger.warning(
+            f"After {max_merge_passes} merge passes, {saturation_final['violations']} "
+            f"violations remain"
+        )
 
     # =========================================================================
     # Step 7: Save mask files
@@ -691,22 +758,35 @@ def generate_surface_masks(
     # =========================================================================
     try:
         preview = np.zeros((h, w, 3), dtype=np.uint8)
-        # Green channel = grass
-        preview[:, :, 1] = mask_arrays["grass"]
-        # Red channel = forest + rock blend
-        preview[:, :, 0] = np.clip(
-            mask_arrays["forest_floor"].astype(np.int16) * 0.6
-            + mask_arrays["rock"].astype(np.int16) * 0.4,
+        # Green channel = grass + forest blend
+        preview[:, :, 1] = np.clip(
+            mask_arrays["grass"].astype(np.int16)
+            + mask_arrays["forest_floor"].astype(np.int16) * 0.3
+            + mask_arrays["pine_floor"].astype(np.int16) * 0.2,
             0, 255,
         ).astype(np.uint8)
-        # Blue channel = asphalt + sand blend
+        # Red channel = rock + dirt + gravel blend
+        preview[:, :, 0] = np.clip(
+            mask_arrays["rock"].astype(np.int16) * 0.5
+            + mask_arrays["dirt"].astype(np.int16) * 0.4
+            + mask_arrays["gravel"].astype(np.int16) * 0.3,
+            0, 255,
+        ).astype(np.uint8)
+        # Blue channel = asphalt + water_edge blend
         preview[:, :, 2] = np.clip(
             mask_arrays["asphalt"].astype(np.int16)
-            + mask_arrays["sand_dirt"].astype(np.int16) * 0.5,
+            + mask_arrays["water_edge"].astype(np.int16) * 0.5,
             0, 255,
         ).astype(np.uint8)
-        # Water overlay
-        preview[water_binary] = [30, 30, 200]
+        # Sand/seabed overlay (warm yellow-brown)
+        sand_mask = mask_arrays["sand"] > 30
+        preview[sand_mask] = np.clip(
+            preview[sand_mask].astype(np.int16) * 0.3
+            + np.array([180, 160, 80], dtype=np.int16) * 0.7,
+            0, 255,
+        ).astype(np.uint8)
+        # Deep water overlay
+        preview[water_mask_bool] = [30, 30, 200]
 
         preview_path = output_dir / "surface_preview.png"
         Image.fromarray(preview, mode="RGB").save(str(preview_path))

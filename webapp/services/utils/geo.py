@@ -46,6 +46,43 @@ def estimate_bbox_dimensions_m(bbox: dict) -> tuple[float, float]:
     return (width_m, height_m)
 
 
+def square_bbox(bbox: dict) -> dict:
+    """
+    Expand the shorter axis of a WGS84 bbox to make it square in metres.
+
+    Prevents terrain distortion when Enfusion requires a square heightmap.
+    The expansion is centred on the bbox midpoint.
+
+    Args:
+        bbox: Dict with west, south, east, north in EPSG:4326
+
+    Returns:
+        New bbox dict with the shorter axis expanded to match the longer.
+    """
+    width_m, height_m = estimate_bbox_dimensions_m(bbox)
+
+    if abs(width_m - height_m) < 1.0:
+        return dict(bbox)  # Already effectively square
+
+    center_lat = (bbox["south"] + bbox["north"]) / 2
+    center_lon = (bbox["west"] + bbox["east"]) / 2
+
+    m_per_deg_lat = 111320
+    m_per_deg_lng = 111320 * math.cos(math.radians(center_lat))
+
+    target_m = max(width_m, height_m)
+
+    half_lon_span = (target_m / 2) / m_per_deg_lng
+    half_lat_span = (target_m / 2) / m_per_deg_lat
+
+    return {
+        "west": center_lon - half_lon_span,
+        "south": center_lat - half_lat_span,
+        "east": center_lon + half_lon_span,
+        "north": center_lat + half_lat_span,
+    }
+
+
 def bbox_to_overpass_str(bbox: dict) -> str:
     """Convert bbox dict to Overpass bbox string (south,west,north,east)."""
     return f"{bbox['south']},{bbox['west']},{bbox['north']},{bbox['east']}"
