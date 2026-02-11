@@ -162,9 +162,13 @@ def organize_export_structure(output_dir: Path, map_name: str, job=None):
         "satellite_map.png",
         "surface_grass.png",
         "surface_forest_floor.png",
+        "surface_pine_floor.png",
         "surface_asphalt.png",
+        "surface_gravel.png",
+        "surface_dirt.png",
         "surface_rock.png",
-        "surface_sand_dirt.png",
+        "surface_sand.png",
+        "surface_water_edge.png",
         "surface_preview.png",
     ]
 
@@ -173,6 +177,7 @@ def organize_export_structure(output_dir: Path, map_name: str, job=None):
         "roads_enfusion.geojson",
         "roads_enfusion_local.geojson",
         "roads_splines.csv",
+        "roads_reference.csv",
         "features.json",
         "metadata.json",
     ]
@@ -257,10 +262,14 @@ def generate_import_guide(output_dir: Path, metadata: dict):
    - Import the corresponding `surface_*.png` mask
 3. Surface mapping:
    - `surface_grass.png` → Grass material
-   - `surface_forest_floor.png` → Forest floor / Leaf litter
+   - `surface_forest_floor.png` → Forest floor (deciduous)
+   - `surface_pine_floor.png` → Forest floor (coniferous)
    - `surface_asphalt.png` → Asphalt / Concrete
+   - `surface_gravel.png` → Gravel
+   - `surface_dirt.png` → Dirt / Farmland
    - `surface_rock.png` → Rock
-   - `surface_sand_dirt.png` → Sand / Dirt
+   - `surface_sand.png` → Sand / Seabed
+   - `surface_water_edge.png` → Mud / Water edge
 
 ### 4. Place Roads
 1. Open `roads_enfusion.geojson` for reference

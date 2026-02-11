@@ -384,3 +384,27 @@ def export_roads_geojson_local(processed_roads: dict, transformer) -> dict:
         "type": "FeatureCollection",
         "features": features,
     }
+
+
+def export_roads_reference_csv(processed_roads: dict) -> str:
+    """
+    Export a roads reference CSV for manual prefab setup in Enfusion World Editor.
+
+    Lists each road's type, surface, width, and suggested prefab name so the user
+    can manually attach RoadGeneratorEntity children to the splines.
+
+    Args:
+        processed_roads: Output from process_roads().
+
+    Returns:
+        CSV string content.
+    """
+    lines = ["road_index,osm_id,name,highway_type,surface,width_m,suggested_prefab,point_count"]
+    for i, road in enumerate(processed_roads.get("roads", [])):
+        name = road.get("name", "").replace('"', "'").replace(",", " ")
+        lines.append(
+            f'{i},{road["osm_id"]},"{name}",{road["highway_type"]},'
+            f'{road["surface"]},{road["width_m"]},{road["enfusion_prefab"]},'
+            f'{road["point_count"]}'
+        )
+    return "\n".join(lines)

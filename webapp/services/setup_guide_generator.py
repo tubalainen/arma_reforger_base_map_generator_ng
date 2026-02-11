@@ -307,9 +307,13 @@ Import masks in this specific order (most specific surfaces first):
 
             verification = {
                 "rock": "Mountain peaks and steep slopes should now show rock texture",
-                "forest_floor": "Forested areas should show dark earth/leaf litter texture",
+                "pine_floor": "Coniferous forest areas should show pine needle/bark texture",
+                "forest_floor": "Deciduous forest areas should show dark earth/leaf litter texture",
                 "asphalt": "Roads and urban areas should show paved surface",
-                "sand_dirt": "Shorelines and farmland should show dirt/sand texture",
+                "gravel": "Gravel roads and tracks should show gravel texture",
+                "dirt": "Farmland and dirt paths should show bare earth texture",
+                "sand": "Beaches, shorelines, and underwater seabed should show sand texture",
+                "water_edge": "Near-water transition zones should show wet/muddy texture",
             }.get(surface_name, "Surface should be visible in the expected areas")
 
             lines.append(f"""
@@ -381,30 +385,33 @@ No roads were found in the selected area."""
         by_surface = self.roads.get("by_surface", {})
         surface_str = ", ".join(f"{k}: {v}" for k, v in by_surface.items())
 
-        return f"""## Phase 5: Roads (Optional — Manual Placement)
+        return f"""## Phase 5: Roads (Manual Prefab Assignment Required)
 
 Your terrain has **{road_count}** road segments ({surface_str}).
 
-Road entities have been pre-generated in the **roads layer** (`{self.map_name}_roads.layer`).
-These provide a starting framework but may need manual refinement.
+Road **splines** have been pre-generated in the **roads layer** (`{self.map_name}_roads.layer`).
+Each spline follows the terrain elevation. You need to manually add road generator prefabs.
 
-### Step 5.1: Review Generated Roads
+### Step 5.1: Review Generated Splines
 
 1. In the World Editor hierarchy, expand the **roads** layer
-2. You should see SplineShapeEntity entries for each road
-3. Each has a RoadGeneratorEntity child with the correct road prefab
+2. You should see SplineShapeEntity entries for each road segment
+3. Splines include elevation data so they follow the terrain surface
 
-### Step 5.2: Refine Roads
+### Step 5.2: Add Road Generators
 
-- Select a road entity to see its spline in the viewport
-- Use the **Vector Tool** (V) to adjust spline points
-- Roads with **"Adjust Height Map"** enabled will automatically flatten terrain
-- Complex intersections may need manual cleanup
+For each road spline that you want to have a road surface:
+1. Select the SplineShapeEntity
+2. Right-click > **Add Child Entity** > **RoadGeneratorEntity**
+3. Set the road prefab (e.g. `Prefabs/WEGenerators/Roads/RG_Road_Asphalt_6m.et`)
+4. Enable **Adjust Height Map** if desired
+5. Use `Reference/roads_reference.csv` to find the suggested prefab for each road
 
 ### Step 5.3: Reference Data
 
-For manual road placement or verification:
-- `Reference/roads_enfusion.geojson` — road data with local coordinates and prefab names
+For road type/surface/width details:
+- `Reference/roads_reference.csv` — road index, type, surface, width, and suggested prefab
+- `Reference/roads_enfusion.geojson` — road data with local coordinates
 - `Reference/roads_splines.csv` — spline control points in local metres
 
 > **Note**: Road prefabs are located at `Prefabs/WEGenerators/Roads/` in the ArmaReforger data."""
@@ -524,10 +531,14 @@ To add lakes:
 | `Sourcefiles/heightmap_preview.png` | Visual preview of elevation |
 | `Sourcefiles/satellite_map.png` | Sentinel-2 satellite imagery |
 | `Sourcefiles/surface_grass.png` | Surface mask: grass/meadow |
-| `Sourcefiles/surface_forest_floor.png` | Surface mask: forest floor |
+| `Sourcefiles/surface_forest_floor.png` | Surface mask: deciduous forest floor |
+| `Sourcefiles/surface_pine_floor.png` | Surface mask: coniferous forest floor |
 | `Sourcefiles/surface_asphalt.png` | Surface mask: paved areas |
+| `Sourcefiles/surface_gravel.png` | Surface mask: gravel roads |
+| `Sourcefiles/surface_dirt.png` | Surface mask: farmland/dirt |
 | `Sourcefiles/surface_rock.png` | Surface mask: rock/slopes |
-| `Sourcefiles/surface_sand_dirt.png` | Surface mask: sand/dirt |
+| `Sourcefiles/surface_sand.png` | Surface mask: sand/seabed |
+| `Sourcefiles/surface_water_edge.png` | Surface mask: water edge/mud |
 | `Sourcefiles/surface_preview.png` | Combined surface preview |
 
 ### Reference Files (for manual placement)
@@ -535,6 +546,7 @@ To add lakes:
 |------|---------|
 | `Reference/roads_enfusion.geojson` | Road data with local coordinates |
 | `Reference/roads_splines.csv` | Road spline points (local metres) |
+| `Reference/roads_reference.csv` | Road type/surface/width for manual prefab setup |
 | `Reference/features.json` | Lakes, rivers, forests, buildings |
 | `Reference/metadata.json` | Full generation metadata |
 | `Reference/osm_*.geojson` | Raw OpenStreetMap data |"""
@@ -601,8 +613,9 @@ Countries:              {', '.join(self.input_data.get('countries', ['Unknown'])
 
 ### Roads not visible
 - Ensure the **roads** layer is enabled (checked) in the hierarchy
-- Select a road entity and check it has a valid RoadGeneratorEntity child
-- Try: right-click road > Generate Road
+- Road splines are generated without road prefabs — you need to add RoadGeneratorEntity manually
+- See `Reference/roads_reference.csv` for the suggested prefab for each road
+- Right-click a SplineShapeEntity > Add Child Entity > RoadGeneratorEntity
 
 ### No sky/atmosphere
 - Check the **default** layer has GenericWorldEntity with sky presets

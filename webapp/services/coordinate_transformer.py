@@ -273,23 +273,57 @@ class CoordinateTransformer:
                 self._transform_geometry_coords(sub_geom)
 
     def transform_points(
-        self, points: list[dict],
+        self,
+        points: list[dict],
+        elevation_array: Optional[np.ndarray] = None,
     ) -> list[dict]:
         """
         Transform a list of spline/road points from WGS84 to local coordinates.
 
+        If ``elevation_array`` is provided, the Y (up) coordinate is sampled
+        from the DEM so that spline points follow the terrain surface.
+        Otherwise Y defaults to 0.
+
         Args:
             points: List of dicts with 'x' (lon) and 'y' (lat) keys.
+            elevation_array: Optional DEM array (metres, north-up convention:
+                             row 0 = north edge of bbox).
 
         Returns:
-            List of dicts with 'x' (local_x) and 'z' (local_z) keys.
+            List of dicts with 'x' (local_x), 'y' (elevation), 'z' (local_z).
         """
+        # Pre-compute mapping constants for elevation sampling
+        if elevation_array is not None:
+            arr_h, arr_w = elevation_array.shape
+            if self.terrain_size_m:
+                tw, td = self.terrain_size_m
+            else:
+                tw = self._projected_width
+                td = self._projected_depth
+
         result = []
         for p in points:
             local_x, local_z = self.wgs84_to_local(p["x"], p["y"])
+
+            y_val = 0.0
+            if elevation_array is not None:
+                # Map local coords (0..tw, 0..td) to array pixel indices
+                px = int(local_x / tw * (arr_w - 1))
+                pz = int(local_z / td * (arr_h - 1))
+
+                # Clamp to array bounds
+                px = max(0, min(arr_w - 1, px))
+                pz = max(0, min(arr_h - 1, pz))
+
+                # Array is north-up: row 0 = north, local_z grows northward
+                row = (arr_h - 1) - pz
+                row = max(0, min(arr_h - 1, row))
+
+                y_val = float(elevation_array[row, px])
+
             result.append({
                 "x": round(local_x, 3),
-                "y": 0,  # Elevation set to 0; road generator adjusts from heightmap
+                "y": round(y_val, 3),
                 "z": round(local_z, 3),
             })
         return result
