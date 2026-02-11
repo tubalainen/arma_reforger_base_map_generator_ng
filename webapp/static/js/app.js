@@ -43,6 +43,76 @@ L.control.layers({
 const drawnItems = new L.FeatureGroup();
 map.addLayer(drawnItems);
 
+// ---------------------------------------------------------------------------
+// Square drawing tool (custom Leaflet.Draw handler)
+// Forces 1:1 aspect ratio in metres so Enfusion heightmap isn't distorted.
+// ---------------------------------------------------------------------------
+L.Draw.Square = L.Draw.Rectangle.extend({
+    statics: {
+        TYPE: 'square'
+    },
+
+    options: {
+        shapeOptions: {
+            color: '#539bf5',
+            fillColor: '#539bf5',
+            fillOpacity: 0.15,
+            weight: 2,
+            dashArray: '6, 4',
+        },
+        metric: true,
+    },
+
+    initialize: function (map, options) {
+        this.type = 'square';
+        L.Draw.Rectangle.prototype.initialize.call(this, map, options);
+    },
+
+    _drawShape: function (latlng) {
+        // Get the start point and current mouse position
+        const start = this._startLatLng;
+        if (!start) return;
+
+        // Compute deltas in degrees
+        const dLat = latlng.lat - start.lat;
+        const dLng = latlng.lng - start.lng;
+
+        // Convert to approximate metres for squaring
+        const midLat = (start.lat + latlng.lat) / 2;
+        const mPerDegLat = 111320;
+        const mPerDegLng = 111320 * Math.cos(midLat * Math.PI / 180);
+
+        const widthM = Math.abs(dLng) * mPerDegLng;
+        const heightM = Math.abs(dLat) * mPerDegLat;
+
+        // Use the larger dimension to make it square
+        const sizeM = Math.max(widthM, heightM);
+
+        // Convert back to degree deltas, preserving direction
+        const halfLngSpan = (sizeM / mPerDegLng);
+        const halfLatSpan = (sizeM / mPerDegLat);
+
+        const endLng = start.lng + (dLng >= 0 ? halfLngSpan : -halfLngSpan);
+        const endLat = start.lat + (dLat >= 0 ? halfLatSpan : -halfLatSpan);
+
+        if (!this._shape) {
+            this._shape = new L.Rectangle(
+                new L.LatLngBounds(start, new L.LatLng(endLat, endLng)),
+                this.options.shapeOptions
+            );
+            this._map.addLayer(this._shape);
+        } else {
+            this._shape.setBounds(
+                new L.LatLngBounds(start, new L.LatLng(endLat, endLng))
+            );
+        }
+    },
+});
+
+// Register the square draw handler with Leaflet.Draw toolbar
+L.drawLocal.draw.toolbar.buttons.square = 'Draw a square area (recommended)';
+
+// Custom toolbar that includes our Square tool
 const drawControl = new L.Control.Draw({
     position: 'topleft',
     draw: {
@@ -77,6 +147,43 @@ const drawControl = new L.Control.Draw({
 });
 map.addControl(drawControl);
 
+// Add a separate custom button for Square drawing above the draw toolbar
+const squareControl = L.Control.extend({
+    options: { position: 'topleft' },
+    onAdd: function (map) {
+        const container = L.DomUtil.create('div', 'leaflet-bar leaflet-draw-toolbar');
+        const link = L.DomUtil.create('a', 'leaflet-draw-draw-square', container);
+        link.href = '#';
+        link.title = 'Draw a square area (recommended for Enfusion)';
+        link.innerHTML = '<span style="font-size:14px;font-weight:bold;line-height:26px;">⬜</span>';
+        link.style.display = 'flex';
+        link.style.alignItems = 'center';
+        link.style.justifyContent = 'center';
+        link.style.width = '26px';
+        link.style.height = '26px';
+        link.style.cursor = 'pointer';
+
+        L.DomEvent.on(link, 'click', function (e) {
+            L.DomEvent.stop(e);
+            // Start the square draw handler
+            const squareDraw = new L.Draw.Square(map, {
+                shapeOptions: {
+                    color: '#539bf5',
+                    fillColor: '#539bf5',
+                    fillOpacity: 0.15,
+                    weight: 2,
+                    dashArray: '6, 4',
+                },
+            });
+            squareDraw.enable();
+        });
+
+        L.DomEvent.disableClickPropagation(container);
+        return container;
+    },
+});
+map.addControl(new squareControl());
+
 // ===========================================================================
 // State
 // ===========================================================================
@@ -104,7 +211,7 @@ map.on(L.Draw.Event.CREATED, function (event) {
 
     // Extract coordinates as [lng, lat] pairs
     let coords;
-    if (event.layerType === 'rectangle') {
+    if (event.layerType === 'rectangle' || event.layerType === 'square') {
         const bounds = layer.getBounds();
         coords = [
             [bounds.getWest(), bounds.getSouth()],
@@ -193,6 +300,25 @@ function onPolygonSelected(coords) {
     } else {
         warning.classList.add('d-none');
         document.getElementById('btn-generate').disabled = false;
+    }
+
+    // Check aspect ratio — warn if not square
+    const aspectWarning = document.getElementById('aspect-warning');
+    const aspectWarningText = document.getElementById('aspect-warning-text');
+    const aspectRatio = Math.max(lngKm, latKm) / Math.min(lngKm, latKm);
+    if (aspectRatio > 1.05) {
+        // More than 5% off from square
+        const squareSideKm = Math.max(lngKm, latKm);
+        aspectWarningText.innerHTML =
+            `<i class="bi bi-exclamation-triangle-fill"></i> ` +
+            `Non-square selection (${lngKm.toFixed(1)} x ${latKm.toFixed(1)} km). ` +
+            `Enfusion requires a square heightmap — the terrain will be mapped to a ` +
+            `<strong>${squareSideKm.toFixed(1)} x ${squareSideKm.toFixed(1)} km</strong> ` +
+            `square, which may cause stretching. ` +
+            `Use the <strong>⬜ Square</strong> tool for best results.`;
+        aspectWarning.classList.remove('d-none');
+    } else {
+        aspectWarning.classList.add('d-none');
     }
 
     // Detect countries (quick bbox check)

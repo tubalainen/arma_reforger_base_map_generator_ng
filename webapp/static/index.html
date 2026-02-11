@@ -38,7 +38,7 @@
                 <div class="sidebar-section">
                     <h6><i class="bi bi-vector-pen"></i> Area Selection</h6>
                     <p class="small mb-2">
-                        Use the polygon tool on the map to draw the area you want to generate.
+                        Use the <strong>⬜ Square</strong> tool (recommended) or polygon/rectangle tools to select your area.
                     </p>
                     <div id="selection-info" class="d-none">
                         <table class="table table-sm table-dark mb-1">
@@ -55,9 +55,12 @@
                                 <td id="info-size">-</td>
                             </tr>
                         </table>
-                        <div id="area-warning" class="alert alert-danger py-1 px-2 mb-0 small d-none">
+                        <div id="area-warning" class="alert alert-danger py-1 px-2 mb-1 small d-none">
                             <i class="bi bi-exclamation-triangle-fill"></i>
                             <span id="area-warning-text"></span>
+                        </div>
+                        <div id="aspect-warning" class="alert alert-warning py-1 px-2 mb-0 small d-none">
+                            <span id="aspect-warning-text"></span>
                         </div>
                     </div>
                     <div id="no-selection" class="text-center py-3">
