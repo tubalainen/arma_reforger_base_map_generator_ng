@@ -1,8 +1,15 @@
 """
-Lantmäteriet historical orthophotos (WMS) service.
+Lantmäteriet historical orthophotos (WMS) service — fallback only.
 
-Provides aerial imagery for Swedish maps from Lantmäteriet's
-Historiska Ortofoton WMS. Falls back to Sentinel-2 if unavailable.
+Serves as the secondary fallback for Swedish aerial imagery after the STAC Bild
+service (api.lantmateriet.se/stac-bild/v1/, 2007–2025, 0.16 m/px). This WMS
+endpoint is tried when STAC Bild is unavailable or returns no data, before
+the system falls back further to Sentinel-2.
+
+Dispatch order for Swedish maps:
+  1. Lantmäteriet STAC Bild  (2007–2025, 0.16 m/px)   ← primary
+  2. Lantmäteriet WMS        (2005 colour,  ~0.5 m)    ← this service
+  3. Sentinel-2 Cloudless    (2021, 10 m)               ← global fallback
 
 Important notes:
 - The most recent COLOR layer is from 2005 (OI.Histortho_color_2005).
@@ -99,30 +106,6 @@ async def fetch_historical_orthophoto(
                             f"Received {len(resp.content)} bytes of Lantmäteriet "
                             f"orthophoto ({width}x{height} px)"
                         )
-                        # Validate the image has actual visual content.
-                        # Some areas (e.g. Gotland) aren't covered by the
-                        # 2005 historical layer, so the WMS returns a valid
-                        # but entirely black/empty PNG.
-                        try:
-                            from PIL import Image
-                            import io
-                            img = Image.open(io.BytesIO(resp.content))
-                            if img.mode in ("RGB", "RGBA"):
-                                extrema = img.getextrema()
-                                # For RGB: extrema = ((r_min, r_max), (g_min, g_max), (b_min, b_max), ...)
-                                channel_ranges = [ch[1] - ch[0] for ch in extrema[:3]]
-                                max_range = max(channel_ranges)
-                                if max_range < 10:
-                                    logger.warning(
-                                        f"Lantmäteriet orthophoto appears blank/uniform "
-                                        f"(max channel range: {max_range}). "
-                                        f"Area likely not covered by this layer."
-                                    )
-                                    return None
-                        except Exception as val_err:
-                            logger.warning(
-                                f"Failed to validate orthophoto content: {val_err}"
-                            )
                         return resp.content
                     else:
                         logger.error(

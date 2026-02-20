@@ -3,13 +3,14 @@ Satellite imagery and land-cover data service.
 
 Fetches:
 - Sentinel-2 Cloudless imagery (EOX WMS) — global, 10 m
-- Lantmäteriet Historical Orthophotos (WMS) — Sweden only, 2005 color imagery
+- Lantmäteriet STAC Bild (COG orthophotos) — Sweden only, 2007–2025, 0.16 m/px
+- Lantmäteriet Historical Orthophotos (WMS) — Sweden only, 2005 color (fallback)
 - CORINE Land Cover (EEA Discomap WMS)
 - Tree Cover Density (Copernicus HRL ImageServer)
 
-Country-aware dispatch: Swedish maps try Lantmäteriet Historical Orthophotos
-first with Sentinel-2 as fallback. All other countries use Sentinel-2 directly.
-Note: Lantmäteriet orthophotos are from 2005 — areas may look dated.
+Country-aware dispatch: Swedish maps try Lantmäteriet STAC Bild first (most
+recent imagery, 2007–2025), then fall back to the WMS 2005 layer, then
+Sentinel-2. All other countries use Sentinel-2 directly.
 """
 
 from __future__ import annotations
@@ -236,20 +237,53 @@ async def fetch_satellite_imagery(
     """
     Fetch satellite imagery with country-based source priority.
 
-    For Swedish maps, tries Lantmäteriet Historical Orthophotos first
-    (2005 color imagery), falls back to Sentinel-2 Cloudless (2021, 10 m)
-    for other countries or on failure.
+    For Swedish maps, tries Lantmäteriet STAC Bild first (2007–2025 COG
+    orthophotos at 0.16 m/px via HTTP range requests), then falls back to the
+    legacy WMS 2005 colour layer, and finally to Sentinel-2 Cloudless (10 m).
+    All other countries use Sentinel-2 directly.
 
     Args:
         bbox_wgs84: (west, south, east, north) in WGS84
         width: Image width in pixels
         height: Image height in pixels
         country_codes: List of detected country codes (e.g. ["SE"])
+        job: Optional MapGenerationJob for progress logging
 
     Returns:
         Tuple of (image_bytes_or_None, source_name_string)
     """
     if country_codes and "SE" in country_codes:
+        # ------------------------------------------------------------------ #
+        # 1. Try STAC Bild first — most recent orthophotos (2007–2025, 0.16 m)
+        # ------------------------------------------------------------------ #
+        try:
+            from config.lantmateriet import LANTMATERIET_CONFIG
+            from services.lantmateriet.stac_orthophoto_service import (
+                fetch_stac_orthophoto,
+            )
+
+            if LANTMATERIET_CONFIG.has_credentials():
+                logger.info("Attempting Lantmäteriet STAC Bild (2007–2025 orthophotos)...")
+                stac_img = await fetch_stac_orthophoto(bbox_wgs84, width, height, job)
+                if stac_img:
+                    logger.info(
+                        f"Using Lantmäteriet STAC Bild orthophoto: {len(stac_img)} bytes"
+                    )
+                    return stac_img, "Lantmäteriet STAC Bild (most recent orthophoto)"
+                logger.warning(
+                    "STAC Bild orthophoto unavailable, falling back to WMS 2005"
+                )
+                if job:
+                    job.add_log("STAC Bild not available, trying historical orthophotos...", "warning")
+            else:
+                logger.info("No Lantmäteriet credentials — skipping STAC Bild")
+        except Exception as e:
+            logger.error(f"Error fetching Lantmäteriet STAC Bild orthophoto: {e}")
+            logger.warning("Falling back to WMS 2005 orthophoto")
+
+        # ------------------------------------------------------------------ #
+        # 2. Fall back to WMS historical orthophotos (2005 colour layer)
+        # ------------------------------------------------------------------ #
         try:
             from services.lantmateriet.orthophoto_service import (
                 fetch_historical_orthophoto,
@@ -257,40 +291,20 @@ async def fetch_satellite_imagery(
 
             logger.info("Attempting Lantmäteriet Historical Orthophotos (2005 color)...")
             if job:
-                job.add_log("Trying Lantmäteriet historical orthophotos...")
+                job.add_log("Trying Lantmäteriet historical orthophotos (2005)...")
             lm_img = await fetch_historical_orthophoto(bbox_wgs84, width, height)
             if lm_img:
-                # Validate the image has actual content — some WMS layers
-                # return valid PNGs that are entirely black/empty for areas
-                # without coverage. A real color aerial photo at these
-                # dimensions compresses to at least ~0.1 bytes/pixel.
-                min_expected_bytes = int(width * height * 0.1)
-                if len(lm_img) < min_expected_bytes:
-                    logger.warning(
-                        f"Lantmäteriet orthophoto suspiciously small: "
-                        f"{len(lm_img)} bytes for {width}x{height} "
-                        f"(expected >{min_expected_bytes}). "
-                        f"Likely empty/black image, falling back to Sentinel-2."
-                    )
-                    if job:
-                        job.add_log(
-                            "Lantmäteriet orthophoto appears empty for this area, "
-                            "falling back to Sentinel-2...",
-                            "warning"
-                        )
-                else:
-                    logger.info(
-                        f"Using Lantmäteriet orthophoto: {len(lm_img)} bytes"
-                    )
-                    return lm_img, "Lantmäteriet Historical Orthophotos (2005)"
-            else:
-                logger.warning(
-                    "Lantmäteriet orthophoto unavailable, falling back to Sentinel-2"
+                logger.info(
+                    f"Using Lantmäteriet WMS orthophoto: {len(lm_img)} bytes"
                 )
-                if job:
-                    job.add_log("Lantmäteriet orthophotos not available, falling back to Sentinel-2...", "warning")
+                return lm_img, "Lantmäteriet Historical Orthophotos (2005)"
+            logger.warning(
+                "Lantmäteriet WMS orthophoto unavailable, falling back to Sentinel-2"
+            )
+            if job:
+                job.add_log("Lantmäteriet orthophotos not available, falling back to Sentinel-2...", "warning")
         except Exception as e:
-            logger.error(f"Error fetching Lantmäteriet orthophoto: {e}")
+            logger.error(f"Error fetching Lantmäteriet WMS orthophoto: {e}")
             logger.warning("Falling back to Sentinel-2 Cloudless")
             if job:
                 job.add_log("Lantmäteriet orthophoto error, falling back to Sentinel-2...", "warning")
