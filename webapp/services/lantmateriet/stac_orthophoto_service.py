@@ -175,7 +175,7 @@ async def fetch_stac_orthophoto(
     search_url = f"{LANTMATERIET_CONFIG.stac_bild_endpoint}search"
     query = {
         "bbox": [w, s, e, n],
-        "sortby": "-datetime",   # newest imagery first
+        "sortby": [{"field": "properties.datetime", "direction": "desc"}],  # newest imagery first
         "limit": 50,
     }
 
