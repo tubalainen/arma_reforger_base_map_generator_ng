@@ -299,3 +299,102 @@ async def fetch_satellite_imagery(
         job.add_log(f"Downloading Sentinel-2 Cloudless imagery ({width}×{height})...")
     data = await fetch_sentinel2_cloudless(bbox_wgs84, width, height)
     return data, "Sentinel-2 Cloudless (EOX)"
+
+
+# ---------------------------------------------------------------------------
+# Satellite reprojection (WGS84 → terrain CRS)
+# ---------------------------------------------------------------------------
+
+
+def reproject_satellite_to_terrain_crs(
+    satellite_path,
+    src_bbox: tuple[float, float, float, float],
+    dst_crs: str,
+    dst_bounds: tuple[float, float, float, float],
+    target_size: int,
+) -> bool:
+    """
+    Reproject satellite_map.png from WGS84 to the terrain's native projected CRS.
+
+    The satellite image is fetched in WGS84 and linearly stretched, while roads
+    and the heightmap use a projected CRS (e.g. EPSG:3006 for Sweden). Without
+    reprojection the EPSG:3006 grid is rotated ~0.5° relative to WGS84 lat/lon
+    lines at high latitudes, causing up to ~90 m of road/satellite misalignment
+    across a 5 km terrain.
+
+    This function warps the image so that its pixel grid aligns with the same
+    projected bounding box used by the heightmap and road coordinate transformer.
+    The file is modified in-place.
+
+    Args:
+        satellite_path: Path to the PNG to reproject (modified in-place).
+        src_bbox: WGS84 bounding box (west, south, east, north).
+        dst_crs: Target CRS string, e.g. "EPSG:3006".
+        dst_bounds: Bounding box in dst_crs (min_x, min_y, max_x, max_y).
+            These are the _sw_projected and _ne_projected values from
+            CoordinateTransformer.
+        target_size: Output pixel dimensions (target_size × target_size).
+
+    Returns:
+        True on success, False on failure (original file left unchanged on error).
+    """
+    try:
+        from pathlib import Path
+
+        import numpy as np
+        from PIL import Image
+        from rasterio.crs import CRS
+        from rasterio.transform import from_bounds
+        from rasterio.warp import Resampling, reproject
+
+        satellite_path = Path(satellite_path)
+
+        # Load source image
+        img = Image.open(satellite_path)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        src_array = np.array(img)          # (H, W, 3)
+        src_h, src_w = src_array.shape[:2]
+
+        # rasterio expects (bands, H, W)
+        src_raster = src_array.transpose(2, 0, 1).astype(np.uint8)
+
+        # Source affine: WGS84, north-up (standard rasterio convention)
+        west, south, east, north = src_bbox
+        src_crs = CRS.from_epsg(4326)
+        src_transform = from_bounds(west, south, east, north, src_w, src_h)
+
+        # Destination affine: projected CRS, north-up
+        min_x, min_y, max_x, max_y = dst_bounds
+        dst_crs_obj = CRS.from_string(dst_crs)
+        dst_transform = from_bounds(min_x, min_y, max_x, max_y, target_size, target_size)
+
+        # Allocate destination
+        dst_raster = np.zeros((3, target_size, target_size), dtype=np.uint8)
+
+        # Reproject all three bands
+        for band in range(3):
+            reproject(
+                source=src_raster[band],
+                destination=dst_raster[band],
+                src_transform=src_transform,
+                src_crs=src_crs,
+                dst_transform=dst_transform,
+                dst_crs=dst_crs_obj,
+                resampling=Resampling.bilinear,
+            )
+
+        # Save reprojected image back to the same path
+        result_img = Image.fromarray(dst_raster.transpose(1, 2, 0))
+        result_img.save(str(satellite_path), format="PNG")
+
+        logger.info(
+            f"Reprojected satellite image EPSG:4326 → {dst_crs} "
+            f"({target_size}×{target_size}px, "
+            f"bounds: {min_x:.0f},{min_y:.0f} → {max_x:.0f},{max_y:.0f})"
+        )
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to reproject satellite image to {dst_crs}: {e}")
+        return False

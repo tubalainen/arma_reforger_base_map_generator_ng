@@ -958,6 +958,44 @@ async def run_generation(job: MapGenerationJob):
             "crs": country_info["crs"],
         })
 
+        # Step 7b: Reproject satellite image to terrain CRS (fixes road/satellite alignment)
+        # The satellite is fetched in WGS84 (linear lat/lon). Roads and the heightmap use
+        # a projected CRS (e.g. EPSG:3006 for Sweden). At high latitudes the EPSG:3006 grid
+        # is rotated relative to WGS84, causing up to ~90 m of displacement across a 5 km
+        # terrain. Reprojecting the satellite to the same CRS fixes this.
+        if (
+            satellite_result.get("success")
+            and transformer._use_pyproj
+        ):
+            from services.satellite_service import reproject_satellite_to_terrain_crs
+
+            satellite_path = output_dir / "satellite_map.png"
+            if satellite_path.exists():
+                dst_bounds = (
+                    transformer._sw_projected[0],
+                    transformer._sw_projected[1],
+                    transformer._ne_projected[0],
+                    transformer._ne_projected[1],
+                )
+                reproject_ok = reproject_satellite_to_terrain_crs(
+                    satellite_path=satellite_path,
+                    src_bbox=(bbox["west"], bbox["south"], bbox["east"], bbox["north"]),
+                    dst_crs=country_info["crs"],
+                    dst_bounds=dst_bounds,
+                    target_size=target_size_x,
+                )
+                if reproject_ok:
+                    job.add_log(
+                        f"Reprojected satellite image to {country_info['crs']} "
+                        f"for road/terrain alignment",
+                        "success",
+                    )
+                else:
+                    job.add_log(
+                        "Satellite reprojection failed — road/satellite alignment may be off",
+                        "warning",
+                    )
+
         # Step 8: Process roads (78% -> 82%)
         job.current_step = "Processing road network..."
         job.progress = 78
