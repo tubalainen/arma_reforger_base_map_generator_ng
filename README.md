@@ -4,8 +4,6 @@
 
 Instead of manually sourcing elevation data, painting surface masks by hand, placing roads one-by-one, and sculpting terrain around features, simply draw a polygon on the interactive map and get Enfusion-ready heightmaps, surface masks, and vector data in minutes.
 
-<img width="1706" height="1392" alt="image" src="https://github.com/user-attachments/assets/a79a29da-a05d-4d55-baf2-ddbde1b73142" />
-
 ## Features
 
 ### Elevation Data with Intelligent Fallback
@@ -71,7 +69,7 @@ The application uses a **smart fallback system**: it tries the country-specific 
 
 > **Note:** Some country APIs have per-request area limits (e.g. Finland NLS limits elevation queries to 10 × 10 km). The application automatically splits large areas into tiles and merges the results — no user action required.
 
-> **Sweden enhanced data:** With Lantmäteriet credentials, Swedish maps also get historical aerial orthophotos (from 2005) as an alternative to Sentinel-2's 2021 imagery. Map features (roads, water, buildings) always come from OpenStreetMap. If Lantmäteriet credentials are not configured, the application falls back to Sentinel-2 for imagery and OpenTopography for elevation.
+> **Sweden enhanced data:** With Lantmäteriet credentials, Swedish maps use the STAC Bild API to fetch near-current aerial orthophotos (2007–2025, 0.16 m/px) instead of Sentinel-2's 2021 imagery. Tiles are Cloud-Optimised GeoTIFFs streamed via HTTP range requests, so only the pixels needed for your area are downloaded. If STAC Bild is unavailable, the application falls back to the legacy WMS 2005 colour layer, then Sentinel-2. Map features (roads, water, buildings) always come from OpenStreetMap. If Lantmäteriet credentials are not configured, the application falls back to Sentinel-2 for imagery and OpenTopography for elevation.
 
 ## Prerequisites
 
@@ -401,7 +399,7 @@ The `docker-compose.yml` is pre-configured to use the GHCR.io image. See the [Qu
 - **Data Sources**:
   - Elevation: National WCS/STAC services + OpenTopography (global fallback)
   - Features: OSM Overpass API (multi-mirror pool for resilience)
-  - Satellite: Sentinel-2 Cloudless + Lantmäteriet Historical Orthophotos (Sweden, 2005)
+  - Satellite: Sentinel-2 Cloudless (global) + Lantmäteriet STAC Bild (Sweden, 2007–2025, 0.16 m/px) + Lantmäteriet WMS (Sweden, 2005 fallback)
   - Geocoding: Nominatim
 - **CI/CD**: GitHub Actions → GHCR.io (auto-publish on push to main)
 - **Security**: Session management, rate limiting (nginx + application), CORS, security headers, input validation
