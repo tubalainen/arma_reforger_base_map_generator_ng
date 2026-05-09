@@ -5,14 +5,16 @@
 # Order: highest capacity/reliability first, most-overloaded last.
 OVERPASS_ENDPOINTS = [
     "https://overpass.private.coffee/api/interpreter",           # Private.coffee — 4 servers, no rate limits
+    "https://overpass.osm.ch/api/interpreter",                   # osm.ch — Swiss-hosted, full planet database
     "https://overpass.kumi.systems/api/interpreter",             # Kumi Systems — well-known mirror
     "https://overpass-api.de/api/interpreter",                   # Main instance — most overloaded, frequent 504s
 ]
-OVERPASS_TIMEOUT = 180  # seconds
+OVERPASS_TIMEOUT = 60          # server-side query budget: [timeout:60] in Overpass QL
+OVERPASS_HTTP_TIMEOUT = 75     # httpx client timeout — server budget + 15s network buffer
 
 # Legacy aliases for backward compatibility
 OVERPASS_ENDPOINT = OVERPASS_ENDPOINTS[0]
-OVERPASS_FALLBACK_ENDPOINT = OVERPASS_ENDPOINTS[2]
+OVERPASS_FALLBACK_ENDPOINT = OVERPASS_ENDPOINTS[3]   # overpass-api.de (shifted to index 3)
 
 # OpenTopography Global DEM API
 OPENTOPOGRAPHY_ENDPOINT = "https://portal.opentopography.org/API/globaldem"
