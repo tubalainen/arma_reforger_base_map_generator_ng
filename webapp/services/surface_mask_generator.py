@@ -717,9 +717,10 @@ def generate_surface_masks(
         )
 
     # =========================================================================
-    # Step 7: Save mask files
+    # Step 7: Save mask files (only those with actual coverage)
     # =========================================================================
     masks = {}
+    skipped_surfaces = []
 
     def _save_mask(name: str, data: np.ndarray):
         path = output_dir / f"surface_{name}.png"
@@ -728,9 +729,24 @@ def generate_surface_masks(
         masks[name] = str(path)
 
     for name, array in mask_arrays.items():
-        _save_mask(name, array)
+        # Grass is always saved (it's the complement/default surface).
+        # All others are only saved when at least one pixel has non-zero coverage.
+        if name == "grass" or np.any(array > 0):
+            _save_mask(name, array)
+        else:
+            skipped_surfaces.append(name)
+            logger.info(f"Skipping surface_{name}.png — no coverage in this area")
+
+    if skipped_surfaces:
+        logger.info(f"Omitted {len(skipped_surfaces)} empty surface masks: {', '.join(skipped_surfaces)}")
+        if job:
+            job.add_log(
+                f"Omitted {len(skipped_surfaces)} surface masks with no coverage: "
+                f"{', '.join(skipped_surfaces)}",
+                "info",
+            )
     if job:
-        job.add_log(f"Saved {len(mask_arrays)} surface mask files")
+        job.add_log(f"Saved {len(masks)} surface mask files")
 
     # =========================================================================
     # Step 8: Compute coverage statistics
@@ -816,11 +832,15 @@ def generate_surface_masks(
             "success"
         )
 
+    surfaces_present = [s for s in mask_arrays.keys() if s in masks]
+
     return {
         "masks": masks,
         "mask_count": len(masks) - (1 if "preview" in masks else 0),
         "dimensions": f"{w}x{h}",
         "surfaces": list(mask_arrays.keys()),
+        "surfaces_present": surfaces_present,
+        "skipped_surfaces": skipped_surfaces,
         "coverage": coverage_stats,
         "block_saturation": {
             "violations": saturation_final["violations"],
