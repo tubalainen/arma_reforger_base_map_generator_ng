@@ -153,17 +153,36 @@ def geotiff_to_array(geotiff_bytes: bytes) -> tuple[np.ndarray, dict]:
     # small corner with real data (rest is near-zero).  This happens
     # with some national WCS endpoints (e.g. Poland's geoportal) when
     # the requested area exceeds an undocumented size limit.
+    #
+    # Coastal/ocean selections are exempt: COP30 and similar global DEMs store
+    # ocean pixels at exactly 0.0 m (sea level), not as nodata, so a coastal
+    # area with 60-70% ocean coverage will legitimately hit the 50% threshold.
+    # We distinguish truncation from ocean by requiring that the non-near-zero
+    # (land) pixels are both numerous (≥10% of total) and show realistic
+    # elevation variation (std > 0.5 m).  Truncated responses have almost no
+    # valid data and/or zero variance; genuine coastal data has both.
     total_pixels = elevation.size
     near_zero_count = np.sum(np.abs(elevation) < 0.01)
     near_zero_pct = near_zero_count / total_pixels * 100
     if near_zero_pct > 50:
-        msg = (
-            f"DEM appears truncated: {near_zero_pct:.1f}% of pixels are near-zero "
-            f"({near_zero_count}/{total_pixels}). The elevation API silently "
-            f"returned incomplete data."
-        )
-        logger.error(msg)
-        raise ElevationTruncatedError(msg)
+        non_zero = elevation[np.abs(elevation) >= 0.01]
+        non_zero_pct = non_zero.size / total_pixels * 100
+        land_std = float(np.std(non_zero)) if non_zero.size > 0 else 0.0
+        if non_zero_pct >= 10 and land_std > 0.5:
+            # Enough land pixels with realistic variation → coastal/ocean area.
+            logger.warning(
+                f"DEM has {near_zero_pct:.1f}% near-zero pixels, but "
+                f"{non_zero_pct:.1f}% are valid land data (std={land_std:.1f}m). "
+                f"Treating as coastal/ocean area, not truncated."
+            )
+        else:
+            msg = (
+                f"DEM appears truncated: {near_zero_pct:.1f}% of pixels are near-zero "
+                f"({near_zero_count}/{total_pixels}). The elevation API silently "
+                f"returned incomplete data."
+            )
+            logger.error(msg)
+            raise ElevationTruncatedError(msg)
 
     logger.info(
         f"DEM: {elevation.shape}, "

@@ -822,16 +822,25 @@ async def run_generation(job: MapGenerationJob):
             elevation_result["crs"] = "EPSG:4326"
             job.add_log("Downloaded fallback elevation from OpenTopography (30m)", "success")
 
-            heightmap_result = step_generate_heightmap(
-                dem_bytes=fallback_data,
-                osm_data=osm_data,
-                target_size=target_size,
-                target_resolution=target_resolution,
-                output_dir=output_dir,
-                job=job,
-            )
+            try:
+                heightmap_result = step_generate_heightmap(
+                    dem_bytes=fallback_data,
+                    osm_data=osm_data,
+                    target_size=target_size,
+                    target_resolution=target_resolution,
+                    output_dir=output_dir,
+                    job=job,
+                )
+            except ElevationTruncatedError as e2:
+                # Fallback also looks truncated — most likely a coastal/ocean
+                # selection where >50% of pixels are at sea level (0 m).
+                raise RuntimeError(
+                    f"Elevation data for this area appears to be mostly ocean or sea level. "
+                    f"Please select an area with sufficient land coverage. "
+                    f"Detail: {e2}"
+                ) from None
             job.add_log(
-                f"Heightmap generated using OpenTopography 30m fallback",
+                "Heightmap generated using OpenTopography 30m fallback",
                 "warning"
             )
 
