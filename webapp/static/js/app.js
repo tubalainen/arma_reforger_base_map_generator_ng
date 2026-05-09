@@ -195,7 +195,9 @@ let currentAccessToken = null;  // Access token for downloads
 let pollInterval = null;
 let lastLoggedStepCount = 0;
 let lastCurrentStep = '';
-let lastDisplayedLogCount = 0;
+// Cursor: index of the next log entry we want from the server.
+// Server returns logs[since:], so we advance by the number of entries received.
+let logsSinceCursor = 0;
 
 // ===========================================================================
 // Event handlers
@@ -483,8 +485,9 @@ function startPolling(jobId) {
 
     pollInterval = setInterval(async () => {
         try {
-            // Use public status endpoint that doesn't require auth
-            const resp = await fetch(`/status/${jobId}`);
+            // Use public status endpoint that doesn't require auth.
+            // Pass the log cursor so the server only returns new entries.
+            const resp = await fetch(`/status/${jobId}?since=${logsSinceCursor}`);
             const job = await resp.json();
 
             updateProgress(job);
@@ -506,7 +509,7 @@ function startPolling(jobId) {
         } catch (err) {
             console.error('Polling error:', err);
         }
-    }, 1500);
+    }, 500);
 }
 
 // ===========================================================================
@@ -552,7 +555,7 @@ function showProgress() {
     clearConsoleLog();
     lastLoggedStepCount = 0;
     lastCurrentStep = '';
-    lastDisplayedLogCount = 0;
+    logsSinceCursor = 0;
     addConsoleLog('Map generation job started', 'info');
 }
 
@@ -566,14 +569,14 @@ function updateProgress(job) {
     bar.style.width = job.progress + '%';
     bar.textContent = job.progress + '%';
 
-    // Display new log messages from job.logs
-    if (job.logs && Array.isArray(job.logs)) {
-        // Add only new log entries that we haven't displayed yet
-        for (let i = lastDisplayedLogCount; i < job.logs.length; i++) {
-            const logEntry = job.logs[i];
+    // Display new log messages from job.logs.
+    // The server already sliced these to entries since `logsSinceCursor`,
+    // so every entry here is new — append them all and advance the cursor.
+    if (job.logs && Array.isArray(job.logs) && job.logs.length > 0) {
+        for (const logEntry of job.logs) {
             addConsoleLog(logEntry.message, logEntry.level);
         }
-        lastDisplayedLogCount = job.logs.length;
+        logsSinceCursor += job.logs.length;
     }
 
     document.getElementById('progress-step').textContent = job.current_step;

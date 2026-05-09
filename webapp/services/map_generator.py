@@ -657,9 +657,15 @@ async def run_generation(job: MapGenerationJob):
     manages progress tracking and data flow between steps.
     """
     from config import OUTPUT_DIR
+    from services.job_log_handler import current_job_var
 
     output_dir = OUTPUT_DIR / job.job_id
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Bind this job to the current async context so JobLogHandler can route
+    # every logger.* call from app modules into job.logs. The token is reset
+    # in the outer finally block.
+    job_token = current_job_var.set(job)
 
     try:
         job.status = "running"
@@ -1187,3 +1193,5 @@ async def run_generation(job: MapGenerationJob):
         job.status = "failed"
         job.current_step = f"Error: {str(e)}"
         job.errors.append(str(e))
+    finally:
+        current_job_var.reset(job_token)

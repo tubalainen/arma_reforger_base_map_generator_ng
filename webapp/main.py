@@ -34,6 +34,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
+# Tee app log records into the active job's activity log so the frontend
+# panel mirrors `docker compose logs -f`.
+from services.job_log_handler import install_job_log_handler
+
+install_job_log_handler()
+
 # Enable multi-threaded GDAL for rasterio.warp.reproject operations
 configure_gdal_threading()
 
@@ -41,7 +47,7 @@ configure_gdal_threading()
 # Application version (for cache busting)
 # ===========================================================================
 
-APP_VERSION = "1.0.7"  # Increment when static files change
+APP_VERSION = "1.0.8"  # Increment when static files change
 
 # ===========================================================================
 # FastAPI app
@@ -446,12 +452,17 @@ async def start_generation(
 
 
 @app.get("/status/{job_id}")
-async def get_job_status_public(job_id: str):
+async def get_job_status_public(job_id: str, since: int = 0):
     """
     Get the current status and progress of a generation job (PUBLIC endpoint).
 
     This endpoint is accessible via Cloudflare tunnel and does NOT require
     authentication. It's used for polling job progress from the frontend.
+
+    The optional `since` query parameter is the index of the next log entry
+    the client wants. The response slices `logs` to entries from that index
+    forward and reports `logs_total` so the client can advance its cursor.
+    This keeps poll payloads small under fast polling and long log streams.
     """
     from services.map_generator import get_job
 
@@ -463,6 +474,16 @@ async def get_job_status_public(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
 
     job_data = job.to_dict()
+
+    logs = job_data.get("logs") or []
+    total = len(logs)
+    if since < 0:
+        since = 0
+    if since > total:
+        since = total
+    job_data["logs"] = logs[since:]
+    job_data["logs_total"] = total
+    job_data["logs_since"] = since
 
     # Add retention information if cleanup is scheduled
     with _cleanups_lock:
