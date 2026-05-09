@@ -429,33 +429,44 @@ For road type/surface/width details:
         rivers = self.features.get("rivers", 0)
         forests = self.features.get("forest_areas", 0)
 
-        return f"""## Phase 6: Vegetation & Water (Optional — Manual Placement)
+        return f"""## Phase 6: Vegetation & Water (Generators)
+
+The vegetation and water layers already contain pre-drawn closed splines —
+one per forest/lake polygon, projected to Enfusion local coordinates and
+clipped to the terrain. You only need to drop a generator prefab onto each
+spline; the spline-drawing work is done.
 
 ### Step 6.1: Forest Generator
 
-Your terrain has **{forests}** forest areas identified from OpenStreetMap data.
+Your terrain has **{forests}** forest areas identified from OpenStreetMap.
+The vegetation layer contains a closed `SplineShapeEntity` for each.
 
-To add forests:
-1. Create a **closed Spline** shape matching the forest boundary
-2. Enable **Avoid Roads** and **Avoid Lakes** options
-3. Use prefabs from `Prefabs/WEGenerators/Forest/` (prefixed `FG_`)
-4. Drag the prefab onto the spline you created and wait (it generates a forest)
+For each spline:
+1. Select the spline in the World Editor (vegetation layer)
+2. Drag a Forest Generator prefab from `Prefabs/WEGenerators/Forest/`
+   (prefixed `FG_`) onto the spline — it will populate the area with trees
+3. Enable **Avoid Roads** and **Avoid Lakes** on the generator
 
-> **Optional reference**: `Reference/osm_forests.geojson` and `Reference/features.json`
-> contain forest boundary data in Enfusion local coordinates for positioning guidance.
+> **Tip**: Pick the prefab that matches the dominant tree type for your
+> region (e.g. `FG_PineForest_*` for Nordic coniferous areas).
+> Reference: `Reference/osm_forests.geojson` includes leaf_type metadata
+> (needleleaved / broadleaved) per polygon.
 
 ### Step 6.2: Water Bodies
 
 Your terrain has **{lakes}** lakes and **{rivers}** rivers/streams.
+The water layer contains a closed `SplineShapeEntity` per lake/pond/reservoir.
+(Rivers are LineStrings and aren't included in the water layer; use the
+roads layer or future river-spline output for them.)
 
-To add lakes:
-1. Create a **closed Spline** shape matching the lake boundary
-2. Add a **Lake Generator** entity as a child
-3. Use prefabs from `Prefabs/WEGenerators/Water/Lake/` (prefixed `LG_`)
-4. Set **Flatten By Bottom Plane** for natural water level
-5. Reference: `Reference/osm_water.geojson` and `Reference/features.json`
+For each spline:
+1. Select the spline in the World Editor (water layer)
+2. Drag a Lake Generator prefab from `Prefabs/WEGenerators/Water/Lake/`
+   (prefixed `LG_`) onto the spline
+3. Enable **Flatten By Bottom Plane** for natural water level
 
-> **Tip**: Water body coordinates in features.json are already in Enfusion local metres."""
+> **Tip**: Water body coordinates in features.json are already in Enfusion
+> local metres."""
 
     def _phase_testing(self) -> str:
         return f"""## Phase 7: Testing (5 minutes)
