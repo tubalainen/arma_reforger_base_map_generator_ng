@@ -18,7 +18,7 @@ from typing import Optional
 
 import httpx
 
-from config import OVERPASS_ENDPOINTS, OVERPASS_TIMEOUT
+from config import OVERPASS_ENDPOINTS, OVERPASS_TIMEOUT, OVERPASS_HTTP_TIMEOUT
 from services.utils.geo import bbox_to_overpass_str
 from services.utils.geojson import (
     extract_coords_from_geometry,
@@ -50,6 +50,8 @@ def _endpoint_label(url: str) -> str:
     """Extract a short human-readable label from an Overpass endpoint URL."""
     if "private.coffee" in url:
         return "Private.coffee"
+    elif "osm.ch" in url:
+        return "osm.ch"
     elif "kumi" in url:
         return "Kumi"
     elif "overpass-api.de" in url:
@@ -98,7 +100,7 @@ async def _run_overpass_query(query: str, max_retries: int = 2, job=None) -> Opt
                     f"(endpoint {endpoint_idx + 1}/{len(endpoints)}, "
                     f"attempt {attempt + 1}/{max_retries})"
                 )
-                async with httpx.AsyncClient(timeout=OVERPASS_TIMEOUT + 30) as client:
+                async with httpx.AsyncClient(timeout=OVERPASS_HTTP_TIMEOUT) as client:
                     resp = await client.post(
                         endpoint,
                         data={"data": query},
@@ -140,6 +142,11 @@ async def _run_overpass_query(query: str, max_retries: int = 2, job=None) -> Opt
                         if job:
                             job.add_log(f"Overpass mirror [{label}] timed out, trying next...", "warning")
                         continue
+                    elif resp.status_code in (502, 503):
+                        logger.warning(f"Overpass [{label}] unavailable ({resp.status_code}), trying next...")
+                        if job:
+                            job.add_log(f"Overpass mirror [{label}] unavailable ({resp.status_code}), trying next...", "warning")
+                        continue
                     else:
                         logger.error(f"Overpass [{label}] error {resp.status_code}: {resp.text[:300]}")
                         continue
@@ -149,7 +156,7 @@ async def _run_overpass_query(query: str, max_retries: int = 2, job=None) -> Opt
 
         # All endpoints failed on this attempt; wait before retrying
         if attempt < max_retries - 1:
-            wait = 5  # Fixed 5 second wait instead of increasing wait time
+            wait = 10 * (2 ** attempt)  # exponential: 10s, 20s, ...
             logger.warning(
                 f"All {len(endpoints)} Overpass endpoints failed for {query_type}, "
                 f"retrying in {wait}s (attempt {attempt + 1}/{max_retries})"
