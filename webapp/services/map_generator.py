@@ -808,19 +808,27 @@ async def run_generation(job: MapGenerationJob):
             )
             job.progress = 42
 
+            # Prefer AWS Open Data (no API key) and fall back to OpenTopography
+            # if that fails — both serve identical COP30 data.
+            from services.global_dem.cop30_aws import fetch_elevation_cop30_aws
             from services.elevation_service import fetch_elevation_opentopography
-            fallback_data = await fetch_elevation_opentopography(bbox, "COP30")
+
+            fallback_data = await fetch_elevation_cop30_aws(bbox, job=job)
+            fallback_source_label = "AWS Open Data"
+            if not fallback_data:
+                fallback_data = await fetch_elevation_opentopography(bbox, "COP30")
+                fallback_source_label = "OpenTopography"
             if not fallback_data:
                 raise RuntimeError(
                     f"Elevation data from {original_source} was truncated, "
-                    f"and OpenTopography fallback also failed."
+                    f"and both AWS and OpenTopography fallbacks also failed."
                 )
 
             elevation_result["data"] = fallback_data
-            elevation_result["source"] = "Copernicus DEM GLO-30 (OpenTopography, fallback)"
+            elevation_result["source"] = f"Copernicus DEM GLO-30 ({fallback_source_label}, fallback)"
             elevation_result["resolution_m"] = 30
             elevation_result["crs"] = "EPSG:4326"
-            job.add_log("Downloaded fallback elevation from OpenTopography (30m)", "success")
+            job.add_log(f"Downloaded fallback elevation from {fallback_source_label} (30m)", "success")
 
             try:
                 heightmap_result = step_generate_heightmap(
