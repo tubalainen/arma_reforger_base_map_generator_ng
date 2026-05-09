@@ -75,6 +75,12 @@ ELEVATION_CONFIGS: dict[str, CountryElevationConfig] = {
         auth_env_var="DATAFORSYNINGEN_TOKEN",
         format="GTiff",  # Verified from DescribeCoverage: only supported format is "GTiff" (not "image/tiff")
         max_request_size=8192,  # Conservative limit for 0.4m data; 8192px = ~3.2km per axis
+        # The Dataforsyningen WCS upstream has a ~10s proxy timeout. A single
+        # 5km+ request over 0.4m native data (>200M source pixels) reliably
+        # returns 504 Gateway Timeout — see GitHub issue #42. Chunk to 2 km
+        # per axis (matches Norway's NHM-DTM at 1m) so each tile's server
+        # work stays within the timeout window.
+        max_area_m=2000,
     ),
     "SE": CountryElevationConfig(
         name="Sweden",
