@@ -594,6 +594,8 @@ def build_metadata(
         "surface_masks": {
             "count": surface_result["mask_count"],
             "surfaces": surface_result["surfaces"],
+            "surfaces_present": surface_result.get("surfaces_present", surface_result["surfaces"]),
+            "skipped_surfaces": surface_result.get("skipped_surfaces", []),
             "format": "8-bit grayscale PNG",
             "coverage": surface_result.get("coverage", {}),
             "block_saturation": surface_result.get("block_saturation", {}),
@@ -607,7 +609,7 @@ def build_metadata(
         "enfusion_import": {
             "heightmap_file": "heightmap.asc",
             "heightmap_png": "heightmap.png",
-            "surface_masks": [f"surface_{s}.png" for s in surface_result["surfaces"]],
+            "surface_masks": [f"surface_{s}.png" for s in surface_result.get("surfaces_present", surface_result["surfaces"])],
             "road_data": "roads_enfusion.geojson",
             "road_splines": "roads_splines.csv",
             "recommended_settings": {

@@ -67,6 +67,12 @@ class SetupGuideGenerator:
             SURFACE_MATERIAL_MAP.get("grass", "Grass_01.emat"),
         )
 
+        # Only surfaces actually generated (non-empty masks)
+        # Falls back to full SURFACE_IMPORT_ORDER for backwards compatibility
+        self.surfaces_present = set(
+            self.surf.get("surfaces_present", ["grass"] + list(SURFACE_IMPORT_ORDER))
+        )
+
     def generate(self, output_dir: Path) -> Path:
         """
         Generate the full SETUP_GUIDE.md.
@@ -276,14 +282,15 @@ The default surface covers 100% of your terrain as the base layer.
 > **Why {self.recommended_default}?** Your terrain is {self.coverage_per_surface.get(self.recommended_default, {}).get('percentage', 'N/A')}% {self.recommended_default},
 > making it the optimal default surface."""]
 
-        # Step 3.3: Add surface materials
-        lines.append("""### Step 3.3: Add Surface Materials
+        # Step 3.3: Add surface materials (only for surfaces that were generated)
+        present_ordered = [s for s in SURFACE_IMPORT_ORDER if s in self.surfaces_present]
 
-For each surface mask, you need to add the corresponding material to the Paint panel:""")
+        lines.append(f"""### Step 3.3: Add Surface Materials
 
-        for i, surface_name in enumerate(SURFACE_IMPORT_ORDER, 1):
+{len(present_ordered)} surface mask(s) were generated for this area. Add the corresponding materials to the Paint panel:""")
+
+        for i, surface_name in enumerate(present_ordered, 1):
             material = SURFACE_MATERIAL_MAP.get(surface_name, "Unknown.emat")
-            pct = self.coverage_per_surface.get(surface_name, {}).get("percentage", "?")
             alternatives = SURFACE_MATERIAL_ALTERNATIVES.get(surface_name, [])
             alt_str = f" (alternatives: {', '.join(a.split('/')[-1] for a in alternatives)})" if alternatives else ""
 
@@ -300,21 +307,22 @@ Import masks in this specific order (most specific surfaces first):
 > to import all masks at once. If using batch import, ensure files are named to match
 > the surface materials. Otherwise, import individually:""")
 
-        for i, surface_name in enumerate(SURFACE_IMPORT_ORDER, 1):
+        verification_text = {
+            "rock": "Mountain peaks and steep slopes should now show rock texture",
+            "pine_floor": "Coniferous forest areas should show pine needle/bark texture",
+            "forest_floor": "Deciduous forest areas should show dark earth/leaf litter texture",
+            "asphalt": "Roads and urban areas should show paved surface",
+            "gravel": "Gravel roads and tracks should show gravel texture",
+            "dirt": "Farmland and dirt paths should show bare earth texture",
+            "sand": "Beaches, shorelines, and underwater seabed should show sand texture",
+            "water_edge": "Near-water transition zones should show wet/muddy texture",
+        }
+
+        for i, surface_name in enumerate(present_ordered, 1):
             material = SURFACE_MATERIAL_MAP.get(surface_name, "Unknown.emat")
             material_short = material.split("/")[-1].replace(".emat", "")
             pct = self.coverage_per_surface.get(surface_name, {}).get("percentage", "?")
-
-            verification = {
-                "rock": "Mountain peaks and steep slopes should now show rock texture",
-                "pine_floor": "Coniferous forest areas should show pine needle/bark texture",
-                "forest_floor": "Deciduous forest areas should show dark earth/leaf litter texture",
-                "asphalt": "Roads and urban areas should show paved surface",
-                "gravel": "Gravel roads and tracks should show gravel texture",
-                "dirt": "Farmland and dirt paths should show bare earth texture",
-                "sand": "Beaches, shorelines, and underwater seabed should show sand texture",
-                "water_edge": "Near-water transition zones should show wet/muddy texture",
-            }.get(surface_name, "Surface should be visible in the expected areas")
+            verification = verification_text.get(surface_name, "Surface should be visible in the expected areas")
 
             lines.append(f"""
 #### Step 3.4.{i}: Import {surface_name.replace('_', ' ').title()} ({pct}% coverage)
@@ -507,6 +515,25 @@ To add lakes:
 - Coordinates: **{crs}**
 - All reference data uses Enfusion local metres (origin at terrain SW corner)."""
 
+    def _surface_mask_file_table(self) -> str:
+        """Return markdown table rows for surface masks present in this generation."""
+        descriptions = {
+            "forest_floor": "Surface mask: deciduous forest floor",
+            "pine_floor": "Surface mask: coniferous forest floor",
+            "asphalt": "Surface mask: paved areas",
+            "gravel": "Surface mask: gravel roads",
+            "dirt": "Surface mask: farmland/dirt",
+            "rock": "Surface mask: rock/slopes",
+            "sand": "Surface mask: sand/seabed",
+            "water_edge": "Surface mask: water edge/mud",
+        }
+        rows = []
+        for name in SURFACE_IMPORT_ORDER:
+            if name in self.surfaces_present:
+                desc = descriptions.get(name, f"Surface mask: {name.replace('_', ' ')}")
+                rows.append(f"| `Sourcefiles/surface_{name}.png` | {desc} |")
+        return "\n".join(rows) + ("\n" if rows else "")
+
     def _appendix_files(self) -> str:
         return f"""## Appendix A: File Reference
 
@@ -530,16 +557,8 @@ To add lakes:
 | `Sourcefiles/heightmap.png` | Alternative heightmap (16-bit PNG) |
 | `Sourcefiles/heightmap_preview.png` | Visual preview of elevation |
 | `Sourcefiles/satellite_map.png` | {self.satellite.get('source', 'Sentinel-2')} satellite imagery |
-| `Sourcefiles/surface_grass.png` | Surface mask: grass/meadow |
-| `Sourcefiles/surface_forest_floor.png` | Surface mask: deciduous forest floor |
-| `Sourcefiles/surface_pine_floor.png` | Surface mask: coniferous forest floor |
-| `Sourcefiles/surface_asphalt.png` | Surface mask: paved areas |
-| `Sourcefiles/surface_gravel.png` | Surface mask: gravel roads |
-| `Sourcefiles/surface_dirt.png` | Surface mask: farmland/dirt |
-| `Sourcefiles/surface_rock.png` | Surface mask: rock/slopes |
-| `Sourcefiles/surface_sand.png` | Surface mask: sand/seabed |
-| `Sourcefiles/surface_water_edge.png` | Surface mask: water edge/mud |
-| `Sourcefiles/surface_preview.png` | Combined surface preview |
+| `Sourcefiles/surface_grass.png` | Surface mask: grass/meadow (always present) |
+{self._surface_mask_file_table()}| `Sourcefiles/surface_preview.png` | Combined surface preview |
 
 ### Reference Files (for manual placement)
 | File | Purpose |
