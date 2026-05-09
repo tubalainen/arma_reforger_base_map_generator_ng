@@ -47,19 +47,20 @@ map.addLayer(drawnItems);
 // Square drawing tool (custom Leaflet.Draw handler)
 // Forces 1:1 aspect ratio in metres so Enfusion heightmap isn't distorted.
 // ---------------------------------------------------------------------------
+const SHAPE_STYLE = {
+    color: '#26cd4d',
+    fillColor: '#26cd4d',
+    fillOpacity: 0.15,
+    weight: 2,
+};
+
 L.Draw.Square = L.Draw.Rectangle.extend({
     statics: {
         TYPE: 'square'
     },
 
     options: {
-        shapeOptions: {
-            color: '#539bf5',
-            fillColor: '#539bf5',
-            fillOpacity: 0.15,
-            weight: 2,
-            dashArray: '6, 4',
-        },
+        shapeOptions: { ...SHAPE_STYLE },
         metric: true,
     },
 
@@ -69,26 +70,20 @@ L.Draw.Square = L.Draw.Rectangle.extend({
     },
 
     _drawShape: function (latlng) {
-        // Get the start point and current mouse position
         const start = this._startLatLng;
         if (!start) return;
 
-        // Compute deltas in degrees
         const dLat = latlng.lat - start.lat;
         const dLng = latlng.lng - start.lng;
 
-        // Convert to approximate metres for squaring
         const midLat = (start.lat + latlng.lat) / 2;
         const mPerDegLat = 111320;
         const mPerDegLng = 111320 * Math.cos(midLat * Math.PI / 180);
 
         const widthM = Math.abs(dLng) * mPerDegLng;
         const heightM = Math.abs(dLat) * mPerDegLat;
-
-        // Use the larger dimension to make it square
         const sizeM = Math.max(widthM, heightM);
 
-        // Convert back to degree deltas, preserving direction
         const halfLngSpan = (sizeM / mPerDegLng);
         const halfLatSpan = (sizeM / mPerDegLat);
 
@@ -109,32 +104,22 @@ L.Draw.Square = L.Draw.Rectangle.extend({
     },
 });
 
-// Register the square draw handler with Leaflet.Draw toolbar
 L.drawLocal.draw.toolbar.buttons.square = 'Draw a square area (recommended)';
 
-// Custom toolbar that includes our Square tool
+// Standard draw toolbar (polygon + rectangle + edit/remove). The Square
+// button is injected into the same toolbar below so all three drawing
+// tools live in one uniform control group.
 const drawControl = new L.Control.Draw({
     position: 'topleft',
     draw: {
         polygon: {
             allowIntersection: false,
             drawError: { color: '#f85149', timeout: 1000 },
-            shapeOptions: {
-                color: '#26cd4d',
-                fillColor: '#26cd4d',
-                fillOpacity: 0.15,
-                weight: 2,
-            },
+            shapeOptions: { ...SHAPE_STYLE },
         },
         rectangle: {
-            shapeOptions: {
-                color: '#26cd4d',
-                fillColor: '#26cd4d',
-                fillOpacity: 0.15,
-                weight: 2,
-            },
+            shapeOptions: { ...SHAPE_STYLE },
         },
-        // Disable other draw tools
         polyline: false,
         circle: false,
         circlemarker: false,
@@ -147,42 +132,27 @@ const drawControl = new L.Control.Draw({
 });
 map.addControl(drawControl);
 
-// Add a separate custom button for Square drawing above the draw toolbar
-const squareControl = L.Control.extend({
-    options: { position: 'topleft' },
-    onAdd: function (map) {
-        const container = L.DomUtil.create('div', 'leaflet-bar leaflet-draw-toolbar');
-        const link = L.DomUtil.create('a', 'leaflet-draw-draw-square', container);
-        link.href = '#';
-        link.title = 'Draw a square area (recommended for Enfusion)';
-        link.innerHTML = '<span style="font-size:14px;font-weight:bold;line-height:26px;">⬜</span>';
-        link.style.display = 'flex';
-        link.style.alignItems = 'center';
-        link.style.justifyContent = 'center';
-        link.style.width = '26px';
-        link.style.height = '26px';
-        link.style.cursor = 'pointer';
+// Inject a Square button into the same toolbar row as polygon and rectangle.
+// Using the existing Leaflet.Draw toolbar gives us identical sizing, borders,
+// and hover styling — see issue #40.
+(function addSquareToolButton() {
+    const rectButton = document.querySelector('.leaflet-draw-draw-rectangle');
+    if (!rectButton || !rectButton.parentNode) return;
+    if (rectButton.parentNode.querySelector('.leaflet-draw-draw-square')) return;
 
-        L.DomEvent.on(link, 'click', function (e) {
-            L.DomEvent.stop(e);
-            // Start the square draw handler
-            const squareDraw = new L.Draw.Square(map, {
-                shapeOptions: {
-                    color: '#539bf5',
-                    fillColor: '#539bf5',
-                    fillOpacity: 0.15,
-                    weight: 2,
-                    dashArray: '6, 4',
-                },
-            });
-            squareDraw.enable();
-        });
+    const link = document.createElement('a');
+    link.className = 'leaflet-draw-draw-square';
+    link.href = '#';
+    link.title = 'Draw a square area (recommended for Enfusion)';
+    link.setAttribute('role', 'button');
 
-        L.DomEvent.disableClickPropagation(container);
-        return container;
-    },
-});
-map.addControl(new squareControl());
+    L.DomEvent.on(link, 'click', function (e) {
+        L.DomEvent.stop(e);
+        new L.Draw.Square(map, { shapeOptions: { ...SHAPE_STYLE } }).enable();
+    });
+
+    rectButton.parentNode.insertBefore(link, rectButton.nextSibling);
+})();
 
 // ===========================================================================
 // State

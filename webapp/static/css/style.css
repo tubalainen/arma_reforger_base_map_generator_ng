@@ -355,6 +355,16 @@ body {
     background-size: 270px 30px !important;
 }
 
+/* Custom Square draw tool — uses an inline SVG icon so it sits visually
+ * with polygon/rectangle/edit/delete in the same toolbar (issue #40). */
+.leaflet-draw-toolbar a.leaflet-draw-draw-square,
+.leaflet-retina .leaflet-draw-toolbar a.leaflet-draw-draw-square {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 18'><rect x='3' y='3' width='12' height='12' fill='none' stroke='%23464646' stroke-width='1.6'/><text x='9' y='12' font-family='Helvetica,Arial,sans-serif' font-size='6' font-weight='700' fill='%23464646' text-anchor='middle'>1:1</text></svg>") !important;
+    background-size: 18px 18px !important;
+    background-position: center center !important;
+    background-repeat: no-repeat !important;
+}
+
 .leaflet-draw-toolbar {
     border: 1px solid var(--border-default) !important;
     border-radius: 6px;
