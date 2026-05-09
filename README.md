@@ -9,10 +9,11 @@ Instead of manually sourcing elevation data, painting surface masks by hand, pla
 ## Features
 
 ### Elevation Data with Intelligent Fallback
-- **High-resolution national LiDAR** (0.4m-10m) from country-specific APIs
-- **Sweden**: Lantmäteriet STAC Höjd (1-2 m LiDAR) with basic authentication
-- **Multi-source fallback chain**: Country API → OpenTopography global DEM (30m Copernicus)
-- **Automatic elevation fetching** based on detected countries in your polygon
+- **High-resolution national LiDAR** (0.4m-2m) from country-specific APIs
+- **Sweden**: Lantmäteriet STAC Höjd (1 m LiDAR) with basic authentication
+- **Worldwide 30m elevation with no API key required** — Copernicus DEM 30m streamed directly from AWS Open Data (`copernicus-dem-30m` bucket)
+- **Multi-source fallback chain**: Country WCS → AWS COP30 (no auth) → OpenTopography COP30 → SRTM → ALOS
+- **Automatic coastal/ocean handling** — coastal selections no longer false-positive as "DEM truncated"
 
 ### Automated Terrain Generation
 - **13-step generation pipeline** with real-time progress tracking
@@ -20,29 +21,37 @@ Instead of manually sourcing elevation data, painting surface masks by hand, pla
 - **16-bit heightmap export** in PNG and ESRI ASCII Grid (.asc) formats
 - **Treeline-aware surface generation** (rock above country-specific treeline elevations)
 
-### Surface Masks (5 Materials for Enfusion)
-- **Grass/meadow** from elevation and land cover analysis
-- **Forest floor** from OSM forest polygons
-- **Rock** from steep slopes (>45°) and above-treeline areas
-- **Asphalt** from paved road buffers
-- **Gravel/dirt** from unpaved road buffers
-- **Sand/pebbles** from shoreline proximity detection
+### Surface Masks (9 Materials for Enfusion)
+- **Grass/meadow** — default surface, complement of all others
+- **Deciduous forest floor** and **coniferous (pine) forest floor** — separated by OSM `leaf_type`
+- **Rock** — slopes >25° and above the country-specific treeline
+- **Asphalt** — paved road buffers + urban areas
+- **Gravel** — gravel/unpaved roads (track, path)
+- **Dirt** — farmland, dirt paths
+- **Sand** — shoreline transition zone (no longer paints lake interiors as "seabed")
+- **Water edge** — outer ring transition around water polygons
+- **Empty masks are auto-skipped** — sand/water_edge/dirt/etc. are omitted from the ZIP if they have no meaningful coverage in your area
+- **GeoJSON polygon holes are honored** — islands inside lakes are correctly rendered as land in every surface mask
 
 ### Road Networks
 - **Complete OSM road classification** (motorway to footpath)
 - **Country-specific surface inference** when OSM data is missing
 - **Enfusion prefab mapping** (RG_Road_* generators)
 - **Spline control point generation** for World Editor import
-- **Multi-mirror Overpass API pool** for reliable OSM data fetching (VK Maps, Private.coffee, Kumi, overpass-api.de)
+- **Multi-mirror Overpass API pool** for reliable OSM data fetching (Private.coffee, osm.ch, Kumi, overpass-api.de) with exponential backoff and automatic failover
 
 ### Water Features
 - **Lakes, rivers, streams, coastline, wetlands** from OSM
+- **Sweden**: Lantmäteriet Hydrografi OGC API (StandingWater, WatercourseLine/Polygon, Wetland) when credentials are configured
 - **Flat water surface elevation** with smooth shoreline transitions
+- **Auto-emitted closed splines** in `*_water.layer` — one per lake/pond/reservoir, ready to drop a Lake Generator prefab onto
 - **GeoJSON export** with structured metadata
 
 ### Building & Vegetation Data
 - **Building footprints** with height estimation and rotation
 - **Forest areas** with species classification (coniferous/deciduous/mixed)
+- **Sweden**: Lantmäteriet Marktäcke OGC API for landcover and wetlands
+- **Auto-emitted closed splines** in `*_vegetation.layer` — one per forest polygon, ready to drop a Forest Generator prefab onto
 - **Structured JSON export** for object placement
 
 ### Multi-User Support & Security
@@ -59,15 +68,17 @@ The application uses a **smart fallback system**: it tries the country-specific 
 
 | Country | Primary Source | Resolution | Auth Required | Fallback |
 |---------|---------------|-----------|---------------|----------|
-| Norway | Kartverket WCS | 10 m | No | OpenTopography (30m) |
-| Estonia | Maa-amet WMS | 5 m | No | OpenTopography (30m) |
-| Finland | NLS WCS | 2 m | Free API key | OpenTopography (30m) |
-| Denmark | Dataforsyningen WCS | 0.4 m | Free token | OpenTopography (30m) |
-| Sweden | Lantmäteriet STAC | 1-2 m | Free (basic auth) | OpenTopography (30m) |
-| Poland | GUGiK Geoportal WCS | 1 m | No | OpenTopography (30m) |
-| Latvia | OSM-based | varies | No | OpenTopography (30m) |
-| Lithuania | OSM-based | varies | No | OpenTopography (30m) |
-| **All other areas** | OpenTopography | 30 m (Copernicus DEM) | Demo key | - |
+| Norway | Kartverket WCS (NHM-DTM) | 1 m | No | AWS COP30 (30m) |
+| Estonia | Maa-amet WCS | 1 m | No | AWS COP30 (30m) |
+| Finland | NLS WCS (korkeusmalli_2m) | 2 m | Free API key | AWS COP30 (30m) |
+| Denmark | Dataforsyningen WCS (DHM) | 0.4 m | Free token | AWS COP30 (30m) |
+| Sweden | Lantmäteriet STAC Höjd | 1 m | Free (basic auth) | AWS COP30 (30m) |
+| Poland | GUGiK Geoportal WCS | 1 m | No | AWS COP30 (30m) |
+| Latvia | (no national WCS yet) | — | — | AWS COP30 (30m) |
+| Lithuania | (no national WCS yet) | — | — | AWS COP30 (30m) |
+| **All other areas** | AWS COP30 (Copernicus DEM Open Data) | 30 m | **None — direct S3 read** | OpenTopography → SRTM → ALOS |
+
+> **No API key needed for worldwide elevation.** As of v1.0.3, COP30 30 m is read directly from the AWS Open Data bucket (`copernicus-dem-30m`) — no `OPENTOPOGRAPHY_API_KEY` registration required. The OpenTopography path is kept as a same-data backup if AWS is unavailable.
 
 > **Note:** Some country APIs have per-request area limits (e.g. Finland NLS limits elevation queries to 10 × 10 km). The application automatically splits large areas into tiles and merges the results — no user action required.
 
@@ -154,10 +165,23 @@ cd arma_reforger_base_map_generator_ng
 cp .env.example .env
 ```
 
-Edit `.env` and add at minimum your **OpenTopography API key** (free registration at [portal.opentopography.org](https://portal.opentopography.org/)):
+The `.env` file is **optional for basic global use** — worldwide 30 m elevation
+streams from AWS Open Data with no key required. Add credentials only for the
+country APIs you want to use at higher resolution, or to set your timezone:
 
 ```bash
+# Optional: backup elevation source if AWS Open Data is unavailable
 OPENTOPOGRAPHY_API_KEY=your_key_here
+
+# Optional: country-specific high-res elevation (see API Keys section)
+LANTMATERIET_USERNAME=
+LANTMATERIET_PASSWORD=
+DATAFORSYNINGEN_TOKEN=
+NLS_FINLAND_API_KEY=
+
+# Optional: container timezone so server logs match the browser UI
+# (defaults to UTC). Examples: Europe/Stockholm, America/New_York
+TZ=Europe/Stockholm
 ```
 
 ### 2. Run
@@ -191,29 +215,39 @@ See the [Output Files](#output-files) section below for the full file listing.
 
 ## API Keys
 
-### Required: OpenTopography (Global Fallback)
+### Worldwide elevation needs no API key
 
-**OpenTopography** is the **automatic fallback** for all areas. When a country-specific API is unavailable, requires an unconfigured key, or fails, the application seamlessly falls back to OpenTopography's global Copernicus DEM (30m resolution).
+Global 30 m elevation (Copernicus DEM) is read directly from the AWS Open
+Data bucket `copernicus-dem-30m` — anonymous reads, no rate limit, no
+registration. This is the default for every country except the six with
+high-resolution national APIs below.
 
-**Why it's required**: Even for supported countries, the fallback ensures your map generation never fails due to a country API outage.
+### Optional backup: OpenTopography
+
+Used only if AWS Open Data is unavailable. Same Copernicus DEM 30m data
+served from a different host. Also exposes SRTM 30 m (<60°N) and
+ALOS World 3D 30 m as additional fallbacks.
 
 **Registration:** [portal.opentopography.org](https://portal.opentopography.org/) (free)
 **Env Variable:** `OPENTOPOGRAPHY_API_KEY`
-**Datasets included**: Copernicus DEM 30m (global), SRTM 30m (<60°N), ALOS World 3D 30m (global)
-
-After registering, go to "My Account" to get your API key.
 
 ### Optional: Country-Specific High-Resolution Sources
 
-Norway, Estonia, and Poland require **no API keys** -- full 1m elevation data is freely available through open data policies.
+Norway, Estonia, and Poland require **no API keys** — full 1 m elevation
+data is freely available through open data policies.
 
-For other countries, register for free API keys to access high-resolution elevation data:
+For other countries, register for free API keys to access high-resolution
+elevation data:
 
 | Country | Registration URL | Env Variable |
 |---------|-----------------|-------------|
 | Finland | [maanmittauslaitos.fi](https://www.maanmittauslaitos.fi/en/rajapinnat/api-avaimen-ohje) | `NLS_FINLAND_API_KEY` |
 | Denmark | [dataforsyningen.dk](https://dataforsyningen.dk/) | `DATAFORSYNINGEN_TOKEN` |
 | Sweden | [apimanager.lantmateriet.se](https://apimanager.lantmateriet.se/) | `LANTMATERIET_USERNAME` + `LANTMATERIET_PASSWORD` |
+
+> **Sweden bonus**: Lantmäteriet credentials also unlock orthophotos
+> (STAC Bild, 0.16 m/px, 2007–2025) and OGC API Features for vector
+> water and landcover (Hydrografi, Marktäcke).
 
 ## Output Files
 
@@ -225,10 +259,12 @@ The generated ZIP package is organized into an Enfusion-ready project structure:
 |------|--------|---------|
 | `addon.gproj` | Enfusion project | Workbench project file (open this in Enfusion Workbench) |
 | `*.ent` | Enfusion entity | World entity with pre-configured terrain settings |
-| `*_default.layer` | Enfusion layer | Terrain, lighting, post-processing entities |
-| `*_roads.layer` | Enfusion layer | Road spline entities with prefab mapping |
-| `*_vegetation.layer` | Enfusion layer | Vegetation placeholder layer |
-| `*_water.layer` | Enfusion layer | Water entity placeholder layer |
+| `*_default.layer` | Enfusion layer | Layer index for the world |
+| `*_managers.layer` | Enfusion layer | Game managers (camera, weather, sounds, map, etc.) |
+| `*_gamemode.layer` | Enfusion layer | GameMode entry point |
+| `*_roads.layer` | Enfusion layer | Road spline entities (one `SplineShapeEntity` per road segment) |
+| `*_vegetation.layer` | Enfusion layer | One closed `SplineShapeEntity` per forest polygon — drag a Forest Generator (`FG_*`) prefab onto each |
+| `*_water.layer` | Enfusion layer | One closed `SplineShapeEntity` per lake/pond/reservoir — drag a Lake Generator (`LG_*`) prefab onto each |
 | `*.conf` | Enfusion config | Mission configuration |
 | `*.meta` | Enfusion metadata | Resource metadata for each asset |
 | `SETUP_GUIDE.md` | Markdown | Personalized step-by-step Workbench import guide |
@@ -240,13 +276,19 @@ The generated ZIP package is organized into an Enfusion-ready project structure:
 | `heightmap.asc` | ESRI ASCII Grid | Enfusion heightmap import (preferred, lossless) |
 | `heightmap.png` | 16-bit PNG | Enfusion heightmap import (alternative format) |
 | `heightmap_preview.png` | 8-bit PNG | Visual preview of elevation |
-| `surface_grass.png` | 8-bit grayscale PNG | Grass/meadow surface mask |
-| `surface_forest_floor.png` | 8-bit grayscale PNG | Forest floor surface mask |
-| `surface_rock.png` | 8-bit grayscale PNG | Rock/alpine surface mask (steep slopes + above treeline) |
-| `surface_asphalt.png` | 8-bit grayscale PNG | Asphalt surface mask (paved road buffers) |
-| `surface_sand_dirt.png` | 8-bit grayscale PNG | Sand/dirt surface mask (shorelines + unpaved roads) |
+| `surface_grass.png` | 8-bit grayscale PNG | Default grass/meadow surface (always present) |
+| `surface_forest_floor.png` | 8-bit grayscale PNG | Deciduous forest floor (only if present in area) |
+| `surface_pine_floor.png` | 8-bit grayscale PNG | Coniferous forest floor (only if present in area) |
+| `surface_rock.png` | 8-bit grayscale PNG | Rock/alpine surface (steep slopes + above treeline) |
+| `surface_asphalt.png` | 8-bit grayscale PNG | Paved roads + urban areas |
+| `surface_gravel.png` | 8-bit grayscale PNG | Gravel/unpaved roads |
+| `surface_dirt.png` | 8-bit grayscale PNG | Farmland and dirt paths |
+| `surface_sand.png` | 8-bit grayscale PNG | Shoreline transition zone (skipped on landlocked maps) |
+| `surface_water_edge.png` | 8-bit grayscale PNG | Outer transition ring around water polygons |
 | `surface_preview.png` | RGB PNG | Combined surface preview visualization |
-| `satellite.png` | PNG | Satellite texture overlay |
+| `satellite_map.png` | PNG | Satellite texture overlay |
+
+> Surfaces with no meaningful coverage are auto-omitted from the ZIP — a desert map won't ship a `surface_pine_floor.png`, a landlocked map won't ship `surface_sand.png`, etc.
 
 ### Reference Data
 
@@ -271,8 +313,8 @@ The generated ZIP includes a pre-configured Enfusion project and a detailed **SE
 2. Open the `.gproj` in Enfusion Workbench — terrain entity and world layers are pre-configured
 3. Import `heightmap.asc` via Terrain Tools → Import Heightmap
 4. Batch-import `surface_*.png` masks via Terrain Tools → Import Surface Mask
-5. Import `satellite.png` as the satellite texture overlay
-6. Roads and water layers are pre-generated in the world file
+5. Import `satellite_map.png` as the satellite texture overlay
+6. Roads, vegetation and water layers are pre-populated with closed splines — drag a Forest Generator (`FG_*`) onto each forest spline and a Lake Generator (`LG_*`) onto each water spline
 
 See the **SETUP_GUIDE.md** inside the ZIP for exact step-by-step instructions with pre-computed values for your terrain.
 
@@ -387,7 +429,7 @@ The application is published to GitHub Container Registry and automatically buil
 docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest
 
 # Or use a specific version tag
-docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:v1.0.0
+docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:v1.0.6
 ```
 
 The `docker-compose.yml` is pre-configured to use the GHCR.io image. See the [Quick Start Guide](#quick-start-guide) for setup instructions.
@@ -395,12 +437,13 @@ The `docker-compose.yml` is pre-configured to use the GHCR.io image. See the [Qu
 ## Tech Stack
 
 - **Backend**: Python 3.11 + FastAPI + Uvicorn
-- **GIS Processing**: GDAL, rasterio, geopandas, shapely, pyproj, fiona
+- **GIS Processing**: GDAL, rasterio, shapely, pyproj, numpy, scipy, Pillow
 - **Frontend**: Leaflet.js + Leaflet.Draw + Bootstrap 5
 - **Container**: Docker (multi-stage build, non-root user)
 - **Data Sources**:
-  - Elevation: National WCS/STAC services + OpenTopography (global fallback)
-  - Features: OSM Overpass API (multi-mirror pool for resilience)
+  - Elevation: National WCS/STAC (SE/NO/EE/FI/DK/PL) → AWS COP30 Open Data → OpenTopography → SRTM → ALOS
+  - Features: OSM Overpass API (4-mirror pool: Private.coffee, osm.ch, Kumi, overpass-api.de)
+  - SE vector data: Lantmäteriet OGC API Features (Hydrografi, Marktäcke)
   - Satellite: Sentinel-2 Cloudless (global) + Lantmäteriet STAC Bild (Sweden, 2007–2025, 0.16 m/px) + Lantmäteriet WMS (Sweden, 2005 fallback)
   - Geocoding: Nominatim
 - **CI/CD**: GitHub Actions → GHCR.io (auto-publish on push to main)
