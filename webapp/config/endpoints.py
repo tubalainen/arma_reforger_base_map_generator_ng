@@ -4,7 +4,6 @@
 # All instances serve identical OSM data — differences are only in capacity/uptime.
 # Order: highest capacity/reliability first, most-overloaded last.
 OVERPASS_ENDPOINTS = [
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",  # VK Maps — 2×56 cores, 384GB RAM, no rate limits
     "https://overpass.private.coffee/api/interpreter",           # Private.coffee — 4 servers, no rate limits
     "https://overpass.kumi.systems/api/interpreter",             # Kumi Systems — well-known mirror
     "https://overpass-api.de/api/interpreter",                   # Main instance — most overloaded, frequent 504s
@@ -13,7 +12,7 @@ OVERPASS_TIMEOUT = 180  # seconds
 
 # Legacy aliases for backward compatibility
 OVERPASS_ENDPOINT = OVERPASS_ENDPOINTS[0]
-OVERPASS_FALLBACK_ENDPOINT = OVERPASS_ENDPOINTS[1]
+OVERPASS_FALLBACK_ENDPOINT = OVERPASS_ENDPOINTS[2]
 
 # OpenTopography Global DEM API
 OPENTOPOGRAPHY_ENDPOINT = "https://portal.opentopography.org/API/globaldem"

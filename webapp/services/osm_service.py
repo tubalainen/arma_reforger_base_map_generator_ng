@@ -48,16 +48,12 @@ def _bbox_to_overpass(bbox: dict) -> str:
 
 def _endpoint_label(url: str) -> str:
     """Extract a short human-readable label from an Overpass endpoint URL."""
-    if "mail.ru" in url:
-        return "VK Maps"
-    elif "private.coffee" in url:
+    if "private.coffee" in url:
         return "Private.coffee"
     elif "kumi" in url:
         return "Kumi"
     elif "overpass-api.de" in url:
         return "overpass-api.de"
-    elif "osm.jp" in url:
-        return "Japan"
     # Fallback: extract hostname
     try:
         from urllib.parse import urlparse

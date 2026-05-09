@@ -270,11 +270,11 @@ Getting 403 means your credentials are recognized, but your account hasn't been 
 
 ### Issue: Overpass API returning 504 timeout errors
 
-**Symptoms**: Logs show `Overpass [VK Maps] timeout (504), trying next...` cycling through multiple endpoints, or map features (roads, water, forests, buildings) are missing from the output.
+**Symptoms**: Logs show timeouts or errors cycling through multiple endpoints, or map features (roads, water, forests, buildings) are missing from the output.
 
 **Cause**: The Overpass API (used for OpenStreetMap data) is a public service that can be overloaded. The main `overpass-api.de` instance is particularly prone to 504 timeouts during peak hours.
 
-**Solution**: The application automatically cycles through 4 public Overpass mirrors (VK Maps → Private.coffee → Kumi → overpass-api.de) with 2 full retry passes. If all fail:
+**Solution**: The application automatically cycles through 3 public Overpass mirrors (Private.coffee → Kumi → overpass-api.de) with 2 full retry passes. If all fail:
 1. Try again later — the public instances may be temporarily overloaded
 2. Try a smaller polygon area — large areas generate heavier Overpass queries
 3. Check Overpass status: [overpass-api.de/api/status](https://overpass-api.de/api/status)
