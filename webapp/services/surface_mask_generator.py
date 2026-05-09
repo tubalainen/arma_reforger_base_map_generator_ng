@@ -556,16 +556,20 @@ def generate_surface_masks(
         return soft_edge_mask(farmland_binary, transition_px=5) * 0.6
 
     def _compute_sand():
-        """Sandy beaches, shorelines, and underwater seabed."""
+        """Sandy shoreline transition zone around water polygons.
+
+        Previously this also painted underwater pixels as sand ("seabed").
+        That assumption is wrong for inland Sweden — Lake Storsjön is not a
+        beach — and produced surface_sand.png masks where the entire lake
+        polygon was painted full-coverage sand (often >30% of the map).
+        Underwater pixels now fall through to the project's default surface;
+        the water layer covers them visually anyway.
+        """
         if np.any(water_binary):
             water_dilated = ndimage.binary_dilation(water_binary, iterations=sand_transition_px)
             shore_zone = water_dilated & ~water_binary
-            sand_shore = soft_edge_mask(shore_zone, transition_px=sand_transition_px)
-        else:
-            sand_shore = np.zeros((h, w), dtype=np.float32)
-        # Underwater areas get full sand coverage (seabed)
-        seabed = water_binary.astype(np.float32)
-        return np.maximum(sand_shore, seabed)
+            return soft_edge_mask(shore_zone, transition_px=sand_transition_px)
+        return np.zeros((h, w), dtype=np.float32)
 
     def _compute_water_edge():
         """Near-water transition zone (outer ring beyond immediate shoreline)."""
@@ -605,7 +609,10 @@ def generate_surface_masks(
 
     logger.debug("Normalizing surface masks...")
 
-    # Water pixels: zero non-seabed masks, sand provides seabed coverage
+    # Zero all surface masks on water pixels — the water layer covers the
+    # underwater terrain in-game, so what we paint there isn't visible.
+    # Leaving them at 0 lets Enfusion fall back to the project's default
+    # surface for those pixels.
     water_mask_bool = water_binary.astype(bool)
 
     rock_float[water_mask_bool] = 0
@@ -614,8 +621,8 @@ def generate_surface_masks(
     asphalt_float[water_mask_bool] = 0
     gravel_float[water_mask_bool] = 0
     dirt_float[water_mask_bool] = 0
+    sand_float[water_mask_bool] = 0
     water_edge_float[water_mask_bool] = 0
-    # sand_float already has seabed = 1.0 on water pixels (from _compute_sand)
 
     # Stack all non-grass masks
     mask_stack = np.stack([
@@ -728,14 +735,30 @@ def generate_surface_masks(
         img.save(str(path))
         masks[name] = str(path)
 
+    # A mask is "meaningful" only if it has more than a trivial amount of
+    # actual coverage. Anti-aliased polygon edges produce a few thousand
+    # dim non-zero pixels along boundaries, which used to ship as nearly-
+    # empty PNGs (e.g. surface_water_edge.png at 0.0% coverage with only
+    # faint outlines). Require >0.1% of pixels to have meaningful intensity
+    # (>=64/255 ≈ 25%) before considering the mask worth saving.
+    total_pixels = h * w
+    min_meaningful_pixels = max(1, total_pixels // 1000)  # 0.1% of pixels
+    meaningful_intensity_threshold = 64  # 25% of 255
+
     for name, array in mask_arrays.items():
         # Grass is always saved (it's the complement/default surface).
-        # All others are only saved when at least one pixel has non-zero coverage.
-        if name == "grass" or np.any(array > 0):
+        if name == "grass":
+            _save_mask(name, array)
+            continue
+        meaningful_pixels = int((array >= meaningful_intensity_threshold).sum())
+        if meaningful_pixels >= min_meaningful_pixels:
             _save_mask(name, array)
         else:
             skipped_surfaces.append(name)
-            logger.info(f"Skipping surface_{name}.png — no coverage in this area")
+            logger.info(
+                f"Skipping surface_{name}.png — only {meaningful_pixels} "
+                f"meaningful pixels (<{min_meaningful_pixels} threshold)"
+            )
 
     if skipped_surfaces:
         logger.info(f"Omitted {len(skipped_surfaces)} empty surface masks: {', '.join(skipped_surfaces)}")
