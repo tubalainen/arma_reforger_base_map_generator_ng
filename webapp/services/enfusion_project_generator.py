@@ -112,6 +112,8 @@ class EnfusionProjectGenerator:
         road_data: Optional[dict] = None,
         transformer=None,
         elevation_array=None,
+        forest_features: Optional[dict] = None,
+        water_features: Optional[dict] = None,
     ):
         """
         Initialize the project generator.
@@ -122,12 +124,21 @@ class EnfusionProjectGenerator:
             road_data: Optional processed road data for road layer generation.
             transformer: Optional CoordinateTransformer for road coordinate conversion.
             elevation_array: Optional DEM array (metres) for road elevation sampling.
+            forest_features: Optional GeoJSON FeatureCollection of forest polygons
+                             (from osm_data["forests"]). When supplied with a transformer,
+                             vegetation.layer is populated with one closed SplineShapeEntity
+                             per forest polygon (drag a Forest Generator prefab onto each).
+            water_features: Optional GeoJSON FeatureCollection of water polygons
+                            (from osm_data["water"]). Same treatment for water.layer
+                            (drag a Lake Generator prefab onto each spline).
         """
         self.map_name = sanitize_project_name(map_name)
         self.metadata = metadata
         self.road_data = road_data
         self.transformer = transformer
         self.elevation_array = elevation_array
+        self.forest_features = forest_features
+        self.water_features = water_features
 
         # Generate a deterministic GUID from the map name
         self.project_guid = generate_guid(self.map_name)
@@ -255,12 +266,12 @@ class EnfusionProjectGenerator:
 
         files["vegetation.layer"] = self._write_file(
             worlds_dir / f"{self.map_name}_vegetation.layer",
-            self._generate_placeholder_layer("vegetation")
+            self._generate_vegetation_layer()
         )
 
         files["water.layer"] = self._write_file(
             worlds_dir / f"{self.map_name}_water.layer",
-            self._generate_placeholder_layer("water")
+            self._generate_water_layer()
         )
 
         # Mission header
@@ -580,21 +591,215 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
         logger.info(f"Generated {len(entities)} spline-only road entities for roads layer")
         return "\n".join(entities) + "\n"
 
-    def _generate_placeholder_layer(self, layer_type: str) -> str:
-        """Generate a placeholder layer with a descriptive comment."""
-        comments = {
-            "vegetation": (
-                "// Vegetation layer — placeholder for Forest Generator entities.\n"
-                "// Use Reference/osm_forests.geojson and features.json for forest placement.\n"
-                "// Forest Generator prefabs: Prefabs/WEGenerators/Forest/ (FG_ prefix)\n"
-            ),
-            "water": (
-                "// Water layer — placeholder for Lake/River Generator entities.\n"
-                "// Use Reference/osm_water.geojson and features.json for water placement.\n"
-                "// Lake Generator prefabs: Prefabs/WEGenerators/Water/Lake/ (LG_ prefix)\n"
-            ),
-        }
-        return comments.get(layer_type, f"// {layer_type} layer — placeholder\n")
+    def _generate_vegetation_layer(self) -> str:
+        """
+        Emit one closed SplineShapeEntity per forest polygon.
+
+        The user opens the project in Workbench and drags a Forest Generator
+        prefab (Prefabs/WEGenerators/Forest/, FG_ prefix) onto each spline to
+        spawn the actual forest. Auto-attaching the prefab as a child entity
+        is deferred until we have a known-good Enfusion text-serialisation
+        example for parent-child entities.
+        """
+        header = (
+            "// Vegetation layer — one closed spline per forest polygon.\n"
+            "// To populate: drag a Forest Generator prefab from\n"
+            "//   Prefabs/WEGenerators/Forest/ (FG_ prefix, e.g. FG_PineForest_01.et)\n"
+            "// onto each spline in the World Editor and the generator will fill it\n"
+            "// with trees. Enable 'Avoid Roads' and 'Avoid Lakes' on the generator.\n"
+            "// Source data: Reference/osm_forests.geojson and features.json.\n"
+        )
+        body = self._polygon_features_to_splines(
+            self.forest_features,
+            entity_prefix="ForestArea",
+            empty_message="// No forest polygons found in this area.\n",
+        )
+        return header + body
+
+    def _generate_water_layer(self) -> str:
+        """
+        Emit one closed SplineShapeEntity per lake/pond/reservoir polygon.
+
+        Filters out non-polygon water features (rivers/streams are LineStrings
+        and don't fit the spline-area pattern; they'll be added in a future
+        iteration as separate river splines).
+
+        The user drags a Lake Generator prefab (Prefabs/WEGenerators/Water/Lake/,
+        LG_ prefix) onto each spline to spawn the lake.
+        """
+        header = (
+            "// Water layer — one closed spline per lake/pond/reservoir polygon.\n"
+            "// To populate: drag a Lake Generator prefab from\n"
+            "//   Prefabs/WEGenerators/Water/Lake/ (LG_ prefix, e.g. LG_Lake_01.et)\n"
+            "// onto each spline in the World Editor and enable\n"
+            "// 'Flatten By Bottom Plane' for natural water level.\n"
+            "// Rivers (LineString) are not included here; see roads.layer for\n"
+            "// the road network and a future release for river splines.\n"
+            "// Source data: Reference/osm_water.geojson and features.json.\n"
+        )
+        # Lake-like polygons only — rivers come in as LineString and are filtered
+        # naturally by the polygon-only loop, but a feature can still be tagged as
+        # a polygonal river (e.g. a wide watercourse). Restrict to standing-water
+        # types so we don't emit a Lake Generator for a moving river polygon.
+        body = self._polygon_features_to_splines(
+            self.water_features,
+            entity_prefix="Water",
+            filter_property="water_type",
+            filter_values=("lake", "pond", "reservoir", "water"),
+            empty_message="// No standing-water polygons found in this area.\n",
+        )
+        return header + body
+
+    def _polygon_features_to_splines(
+        self,
+        features: Optional[dict],
+        entity_prefix: str,
+        empty_message: str,
+        filter_property: Optional[str] = None,
+        filter_values: tuple[str, ...] = (),
+    ) -> str:
+        """
+        Convert GeoJSON polygon features into closed SplineShapeEntity blocks.
+
+        Each Polygon emits one entity from its exterior ring; each MultiPolygon
+        emits one entity per sub-polygon's exterior ring. Interior rings (holes)
+        are dropped — closed splines can't represent them, and the user can
+        manually mask out island areas if needed.
+
+        Points are projected from WGS84 to local terrain coordinates via the
+        same transformer + elevation_array path used for road splines, then
+        clipped to the terrain bounds. A polygon is skipped if fewer than 3
+        in-bounds points remain (degenerate / fully outside).
+
+        Args:
+            features: GeoJSON FeatureCollection or None.
+            entity_prefix: Per-entity name prefix, e.g. "ForestArea" → ForestArea_0.
+            empty_message: Comment to emit when there's nothing to write.
+            filter_property: Optional GeoJSON property name to filter on.
+            filter_values: Allowed values for filter_property (case-sensitive).
+
+        Returns:
+            Multi-line string suitable for appending to a .layer file.
+        """
+        if not self.transformer:
+            return "// (Coordinate transformer unavailable — splines cannot be projected.)\n"
+        if not features or not features.get("features"):
+            return empty_message
+
+        entities: list[str] = []
+        skipped_clipped = 0
+        skipped_filtered = 0
+
+        for feature in features["features"]:
+            if filter_property:
+                value = feature.get("properties", {}).get(filter_property, "")
+                if value not in filter_values:
+                    skipped_filtered += 1
+                    continue
+
+            geom = feature.get("geometry", {}) or {}
+            geom_type = geom.get("type", "")
+            coords = geom.get("coordinates", []) or []
+
+            # Collect every exterior ring this feature contributes
+            exterior_rings: list[list[list[float]]] = []
+            if geom_type == "Polygon" and coords:
+                exterior_rings.append(coords[0])
+            elif geom_type == "MultiPolygon" and coords:
+                for polygon in coords:
+                    if polygon:
+                        exterior_rings.append(polygon[0])
+            else:
+                continue  # Lines / points etc. — not handled here
+
+            for ring in exterior_rings:
+                entity = self._closed_spline_entity_from_ring(
+                    ring, entity_prefix, len(entities)
+                )
+                if entity is None:
+                    skipped_clipped += 1
+                    continue
+                entities.append(entity)
+
+        if skipped_clipped:
+            logger.info(
+                f"{entity_prefix}: skipped {skipped_clipped} polygon(s) — "
+                f"fewer than 3 in-bounds points after clipping"
+            )
+        if skipped_filtered:
+            logger.info(
+                f"{entity_prefix}: filtered out {skipped_filtered} feature(s) "
+                f"by {filter_property}"
+            )
+        logger.info(
+            f"{entity_prefix}: emitted {len(entities)} closed spline entit(y/ies)"
+        )
+
+        if not entities:
+            return empty_message
+        return "\n".join(entities) + "\n"
+
+    def _closed_spline_entity_from_ring(
+        self,
+        ring: list[list[float]],
+        entity_prefix: str,
+        index: int,
+    ) -> Optional[str]:
+        """
+        Project a single GeoJSON ring (list of [lon, lat] pairs) to a closed
+        SplineShapeEntity. Returns None if the ring has fewer than 3 in-bounds
+        points after clipping to the terrain.
+        """
+        if len(ring) < 3:
+            return None
+
+        # GeoJSON rings are typically explicitly closed (first==last). Drop the
+        # duplicate last point before projection; we'll re-close the spline below.
+        if len(ring) >= 2 and ring[0] == ring[-1]:
+            ring = ring[:-1]
+
+        wgs_points = [{"x": float(p[0]), "y": float(p[1])} for p in ring if len(p) >= 2]
+        if len(wgs_points) < 3:
+            return None
+
+        local_points = self.transformer.transform_points(
+            wgs_points,
+            elevation_array=self.elevation_array,
+        )
+
+        # Clip to terrain bounds with a small margin
+        margin = 1.0
+        in_bounds = [
+            pt for pt in local_points
+            if -margin <= pt["x"] <= self.terrain_width + margin
+            and -margin <= pt["z"] <= self.terrain_depth + margin
+        ]
+        if len(in_bounds) < 3:
+            return None
+
+        # Close the spline: append a final ShapePoint that repeats the origin
+        local_points = in_bounds + [in_bounds[0]]
+
+        origin = local_points[0]
+        point_defs = []
+        for j, pt in enumerate(local_points):
+            rel_x = pt["x"] - origin["x"]
+            rel_y = pt["y"] - origin["y"]
+            rel_z = pt["z"] - origin["z"]
+            point_defs.append(
+                f'   ShapePoint sp_{j} {{\n'
+                f'    Position {rel_x:.3f} {rel_y:.3f} {rel_z:.3f}\n'
+                f'   }}'
+            )
+
+        return (
+            f'SplineShapeEntity {entity_prefix}_{index} {{\n'
+            f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
+            f' Points {{\n'
+            + "\n".join(point_defs) + "\n"
+            f' }}\n'
+            f'}}'
+        )
 
     def _generate_mission_conf(self) -> str:
         """Generate mission header .conf file."""
