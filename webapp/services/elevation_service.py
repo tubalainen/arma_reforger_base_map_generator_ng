@@ -1107,11 +1107,30 @@ async def fetch_elevation(
             if job:
                 job.add_log(f"Failed to fetch from {config.name}, will try fallback source...", "warning")
 
-    # Fallback: OpenTopography Copernicus DEM 30 m
-    logger.info("Using OpenTopography Copernicus DEM 30 m fallback...")
+    # Fallback 1: COP30 directly from AWS Open Data — same data as OpenTopography
+    # serves, but no API key and no rate limit. Try this first; if it fails,
+    # fall through to OpenTopography (different infrastructure, same dataset).
+    from services.global_dem.cop30_aws import fetch_elevation_cop30_aws
+
+    logger.info("Trying Copernicus DEM 30 m directly from AWS Open Data...")
     if job:
-        job.add_log("Using OpenTopography Copernicus DEM 30m as fallback...")
+        job.add_log("Trying Copernicus DEM 30m directly from AWS Open Data (no API key)...")
         job.progress = 15
+    data = await fetch_elevation_cop30_aws(bbox, job=job)
+    if data:
+        result["data"] = data
+        result["source"] = "Copernicus DEM GLO-30 (AWS Open Data)"
+        result["resolution_m"] = 30
+        result["crs"] = "EPSG:4326"
+        if job:
+            job.add_log(f"Successfully fetched elevation data from AWS COP30 ({len(data)} bytes)", "success")
+            job.progress = 23
+        return result
+
+    # Fallback 2: OpenTopography Copernicus DEM 30 m (same data, different host)
+    logger.info("AWS COP30 unavailable — trying OpenTopography COP30 fallback...")
+    if job:
+        job.add_log("AWS COP30 unavailable, falling back to OpenTopography COP30...", "warning")
     data = await fetch_elevation_opentopography(bbox, "COP30")
     if data:
         result["data"] = data

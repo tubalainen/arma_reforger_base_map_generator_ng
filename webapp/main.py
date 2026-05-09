@@ -41,7 +41,7 @@ configure_gdal_threading()
 # Application version (for cache busting)
 # ===========================================================================
 
-APP_VERSION = "1.0.2"  # Increment when static files change
+APP_VERSION = "1.0.3"  # Increment when static files change
 
 # ===========================================================================
 # FastAPI app
