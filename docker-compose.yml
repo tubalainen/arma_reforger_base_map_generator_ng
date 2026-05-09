@@ -18,6 +18,10 @@ services:
       - PYTHONUNBUFFERED=1
       # Trust proxy headers from nginx/reverse proxy
       - FORWARDED_ALLOW_IPS=127.0.0.1
+      # Container timezone — controls timestamps in server logs so they
+      # match the operator's wall clock and the browser UI. Defaults to UTC
+      # if not set in .env. Examples: Europe/Stockholm, America/New_York.
+      - TZ=${TZ:-UTC}
     restart: unless-stopped
     # Resource limits
     # Large maps (20+ km) with high-res elevation (1m LiDAR) need extra resources.

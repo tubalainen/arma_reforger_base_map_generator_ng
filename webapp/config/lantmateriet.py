@@ -26,6 +26,11 @@ class LantmaterietConfig:
     stac_bild_endpoint: str = "https://api.lantmateriet.se/stac-bild/v1/"
     stac_vektor_endpoint: str = "https://api.lantmateriet.se/stac-vektor/v1"
 
+    # OGC API Features (vector water + landcover; same Basic Auth as STAC).
+    # Consumed by services/lantmateriet/{hydrografi_service,marktacke_service}.py.
+    hydrografi_endpoint: str = "https://api.lantmateriet.se/ogc-features/v1/hydrografi"
+    marktacke_endpoint: str = "https://api.lantmateriet.se/ogc-features/v1/marktacke"
+
     # WMS/WMTS Services (WMS orthophotos used as fallback for STAC Bild)
     orthophoto_wms: str = "https://maps.lantmateriet.se/historiska-ortofoton/wms/v1"
     topowebb_wmts: str = "https://maps.lantmateriet.se/open/topowebb-ccby/v1/wmts"
