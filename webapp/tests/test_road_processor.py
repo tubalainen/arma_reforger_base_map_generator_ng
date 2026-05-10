@@ -170,3 +170,41 @@ class TestExportRoadsSplineCsv:
         lines = csv.strip().split("\n")
         assert lines[0].startswith("road_id,prefab,")
         assert len(lines) > 1
+
+
+class TestValidateRoadPrefab:
+    """The Phase 1 / L10 fix: never emit a fabricated prefab name."""
+
+    def test_known_prefab_passes_through(self):
+        from config.roads import validate_road_prefab
+        assert validate_road_prefab("RG_Road_Asphalt_6m") == "RG_Road_Asphalt_6m"
+
+    def test_unknown_falls_back_to_nearest_on_same_surface(self):
+        from config.roads import validate_road_prefab
+        # 5.5m asphalt isn't shipped — closest known is the 5m or 6m variant.
+        out = validate_road_prefab("RG_Road_Asphalt_5.5m")
+        assert out in {"RG_Road_Asphalt_5m", "RG_Road_Asphalt_6m"}
+
+    def test_fabricated_unusual_width_snaps_to_known(self):
+        from config.roads import validate_road_prefab
+        # 11m asphalt — closest known is 10m or 14m, picker should pick 10m.
+        assert validate_road_prefab("RG_Road_Asphalt_11m") == "RG_Road_Asphalt_10m"
+
+    def test_unknown_surface_falls_back_to_default(self):
+        from config.roads import validate_road_prefab
+        # Made-up "Mud" surface — no known prefabs to match against.
+        assert validate_road_prefab("RG_Road_Mud_5m") == "RG_Road_Asphalt_4m"
+
+    def test_garbage_input_falls_back_to_default(self):
+        from config.roads import validate_road_prefab
+        assert validate_road_prefab("totally bogus") == "RG_Road_Asphalt_4m"
+
+    def test_process_roads_only_emits_known_prefabs(self, sample_road_features):
+        from config.roads import KNOWN_ROAD_PREFABS
+        from services.road_processor import process_roads
+        processed = process_roads(sample_road_features, "NO")
+        for road in processed["roads"]:
+            assert road["enfusion_prefab"] in KNOWN_ROAD_PREFABS, (
+                f"Fabricated prefab leaked through validator: "
+                f"{road['enfusion_prefab']}"
+            )

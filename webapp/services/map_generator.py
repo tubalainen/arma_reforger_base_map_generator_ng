@@ -766,10 +766,36 @@ async def run_generation(job: MapGenerationJob):
             bbox, primary_country, output_dir, job=job
         )
 
+        if osm_data is None:
+            raise RuntimeError(
+                "Geographic feature fetch returned no result. All upstream "
+                "providers failed; aborting map generation."
+            )
+
         job.progress = 40
         feature_counts = {k: len(v.get("features", [])) for k, v in osm_data.items()}
         job.steps_completed.append({"step": "osm_features", "feature_counts": feature_counts})
         logger.info(f"[{job.job_id}] Geographic features: {feature_counts}")
+
+        # Detect total OSM/Lantmäteriet failure (every collection empty).
+        # When this happens the heightmap and terrain still render, but the
+        # generated map will have no roads, water, forests, buildings, or land
+        # use — the user should know before they start the 30-min Workbench
+        # workflow rather than discovering it after import.
+        if all(count == 0 for count in feature_counts.values()):
+            logger.warning(
+                f"[{job.job_id}] All geographic feature queries returned 0 "
+                f"features. Possible causes: Overpass outage, an extremely "
+                f"remote bbox with no mapped features, or a network issue."
+            )
+            job.add_log(
+                "All geographic feature queries returned zero features. The "
+                "terrain will still be generated but it will have no roads, "
+                "water, forests, buildings, or land use. Check Overpass "
+                "connectivity and verify the selected area actually contains "
+                "mapped features.",
+                "warning",
+            )
         job.add_log(
             f"Features: {feature_counts.get('roads', 0)} roads, "
             f"{feature_counts.get('water', 0)} water, "
