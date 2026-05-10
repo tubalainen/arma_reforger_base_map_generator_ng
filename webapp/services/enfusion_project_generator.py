@@ -20,6 +20,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
+import math
+
 from config.enfusion import (
     ARMA_REFORGER_GUID,
     PLATFORM_CONFIGS,
@@ -116,6 +118,7 @@ class EnfusionProjectGenerator:
         elevation_array=None,
         forest_features: Optional[dict] = None,
         water_features: Optional[dict] = None,
+        building_data: Optional[dict] = None,
     ):
         """
         Initialize the project generator.
@@ -133,6 +136,14 @@ class EnfusionProjectGenerator:
             water_features: Optional GeoJSON FeatureCollection of water polygons
                             (from osm_data["water"]). Same treatment for water.layer
                             (drag a Lake Generator prefab onto each spline).
+            building_data: Optional dict from feature_extractor.extract_building_features
+                           with a "buildings" list. When supplied, buildings.layer is
+                           populated with one entity per building (positioned prefab
+                           instance if a validated Enfusion prefab is in
+                           config.buildings.KNOWN_BUILDING_PREFABS, otherwise a
+                           closed-spline footprint marker the user wires manually).
+                           Buildings whose centroid falls inside an asphalt-road
+                           buffer are dropped (audit task L12).
         """
         self.map_name = sanitize_project_name(map_name)
         self.metadata = metadata
@@ -141,6 +152,7 @@ class EnfusionProjectGenerator:
         self.elevation_array = elevation_array
         self.forest_features = forest_features
         self.water_features = water_features
+        self.building_data = building_data
 
         # Generate a deterministic GUID from the map name
         self.project_guid = generate_guid(self.map_name)
@@ -276,6 +288,11 @@ class EnfusionProjectGenerator:
             self._generate_water_layer()
         )
 
+        files["buildings.layer"] = self._write_file(
+            worlds_dir / f"{self.map_name}_buildings.layer",
+            self._generate_buildings_layer()
+        )
+
         # Mission header
         files["mission.conf"] = self._write_file(
             missions_dir / f"{self.map_name}.conf",
@@ -342,6 +359,9 @@ Layer vegetation {{
 }}
 Layer water {{
  Index 5
+}}
+Layer buildings {{
+ Index 6
 }}
 '''
 
@@ -671,6 +691,229 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
         )
         return header + body
 
+    # -----------------------------------------------------------------------
+    # Buildings layer (Phase 2 / task A2 + L12)
+    # -----------------------------------------------------------------------
+
+    def _generate_buildings_layer(self) -> str:
+        """
+        Emit one entity per extracted building.
+
+        Two emission modes per building, decided by whether
+        ``config.buildings.KNOWN_BUILDING_PREFABS`` has a verified Enfusion
+        prefab path for the building's category:
+
+        * **Validated prefab** → emit a positioned prefab instance using the
+          ``${guid}path/to/prefab.et { coords X Y Z }`` syntax (the same
+          pattern the managers / roads layers use successfully).
+        * **No validated prefab** (the default until the user confirms paths
+          for a stock Reforger install) → emit a closed-spline footprint
+          marker on the building's exterior ring. The user sees the actual
+          building outline in the World Editor and drags a prefab onto it.
+
+        Buildings whose centroid falls inside the asphalt-road exclusion
+        zone (half road width + 1.5 m safety) are dropped (audit task L12)
+        — placing buildings on top of a generated road would produce visible
+        Z-fighting and block traffic.
+        """
+        header = (
+            "// Buildings layer — one entity per extracted OSM building.\n"
+            "// Buildings with a verified Enfusion prefab in\n"
+            "//   config/buildings.py::KNOWN_BUILDING_PREFABS\n"
+            "// are emitted as auto-positioned prefab instances. Buildings\n"
+            "// whose category has no verified prefab are emitted as closed\n"
+            "// footprint splines — drag a Building_*.et prefab from\n"
+            "// Prefabs/Structures/ onto each spline to wire it up.\n"
+            "// Buildings overlapping asphalt roads are dropped (L12).\n"
+            "// Source data: Reference/osm_buildings.geojson and features.json.\n"
+        )
+
+        if not self.transformer:
+            return header + "// (Coordinate transformer unavailable — buildings cannot be placed.)\n"
+        if not self.building_data:
+            return header + "// No building data available.\n"
+
+        buildings = self.building_data.get("buildings", [])
+        if not buildings:
+            return header + "// No buildings found in this area.\n"
+
+        exclusion_zone = self._build_road_exclusion_zone()
+
+        entities: list[str] = []
+        skipped_road_overlap = 0
+        skipped_out_of_bounds = 0
+        prefab_count = 0
+        marker_count = 0
+
+        for building in buildings:
+            center_lonlat = building.get("center")
+            if not center_lonlat or len(center_lonlat) < 2:
+                continue
+            lon, lat = float(center_lonlat[0]), float(center_lonlat[1])
+
+            # L12 — drop buildings that would sit on top of an asphalt road.
+            if exclusion_zone is not None and self._point_inside_geometry(
+                lon, lat, exclusion_zone
+            ):
+                skipped_road_overlap += 1
+                continue
+
+            # Transform the centroid to terrain-local coords (with elevation
+            # sampling) for positioning the entity.
+            local_pts = self.transformer.transform_points(
+                [{"x": lon, "y": lat, "z": 0}],
+                elevation_array=self.elevation_array,
+            )
+            if not local_pts:
+                skipped_out_of_bounds += 1
+                continue
+            origin = local_pts[0]
+            margin = 1.0
+            if not (
+                -margin <= origin["x"] <= self.terrain_width + margin
+                and -margin <= origin["z"] <= self.terrain_depth + margin
+            ):
+                skipped_out_of_bounds += 1
+                continue
+
+            prefab_path = building.get("enfusion_prefab")
+            building_name_raw = building.get("name", "") or ""
+            building_name = building_name_raw.replace('"', "'")
+            building_type = building.get("building_type", "yes")
+            comment = (
+                f' // {building_name} ({building_type})'
+                if building_name
+                else f' // {building_type}'
+            )
+
+            if prefab_path:
+                prefab_ref = f"${{{ARMA_REFORGER_GUID}}}{prefab_path}"
+                entities.append(
+                    f'{prefab_ref} {{{comment}\n'
+                    f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
+                    f'}}'
+                )
+                prefab_count += 1
+            else:
+                # Footprint marker: emit the exterior ring as a closed spline
+                # the user can right-click → Add Child Entity → BuildingEntity.
+                geom = building.get("geometry") or {}
+                ring = self._building_exterior_ring(geom)
+                if ring is None:
+                    # Fall back to a tiny spline at the centroid so the
+                    # building still appears in the editor hierarchy.
+                    ring = [
+                        [lon - 0.00001, lat - 0.00001],
+                        [lon + 0.00001, lat - 0.00001],
+                        [lon + 0.00001, lat + 0.00001],
+                        [lon - 0.00001, lat + 0.00001],
+                        [lon - 0.00001, lat - 0.00001],
+                    ]
+                entity = self._closed_spline_entity_from_ring(
+                    ring, "Building", len(entities), comment_suffix=comment
+                )
+                if entity is None:
+                    skipped_out_of_bounds += 1
+                    continue
+                entities.append(entity)
+                marker_count += 1
+
+        if skipped_road_overlap:
+            logger.info(
+                f"Buildings: dropped {skipped_road_overlap} that overlapped "
+                f"asphalt roads (L12 de-conflict)"
+            )
+        if skipped_out_of_bounds:
+            logger.info(
+                f"Buildings: dropped {skipped_out_of_bounds} that were "
+                f"outside terrain bounds or had no usable footprint"
+            )
+        logger.info(
+            f"Buildings layer: {prefab_count} auto-placed prefab instance(s), "
+            f"{marker_count} footprint marker(s)"
+        )
+
+        if not entities:
+            return header + "// No buildings remained after L12 filtering.\n"
+        return header + "\n".join(entities) + "\n"
+
+    def _build_road_exclusion_zone(self):
+        """
+        Build a single shapely geometry covering all asphalt road centerlines
+        buffered by half the road width plus a 1.5 m safety margin (L12).
+
+        Returns ``None`` if shapely is unavailable, no road data is provided,
+        or there are no asphalt roads in the area.
+        """
+        if not self.road_data:
+            return None
+        try:
+            from shapely.geometry import LineString
+            from shapely.ops import unary_union
+        except ImportError:  # pragma: no cover - shapely is a hard dep
+            logger.warning(
+                "shapely not available — skipping building/road L12 de-conflict"
+            )
+            return None
+
+        # Convert meter buffer widths to degrees using the area centroid's
+        # latitude. Errs on the larger-buffer side by dividing by the smaller
+        # m_per_deg value (longitude shrinks toward the poles).
+        bbox = self.metadata.get("input", {}).get("bbox", {}) or {}
+        center_lat = (bbox.get("south", 0) + bbox.get("north", 0)) / 2
+        m_per_deg_lat = 110540.0
+        m_per_deg_lon = 111320.0 * math.cos(math.radians(center_lat or 0.0))
+        smaller_m_per_deg = min(m_per_deg_lat, max(m_per_deg_lon, 1.0))
+        deg_per_m = 1.0 / smaller_m_per_deg
+
+        safety_margin_m = 1.5
+        buffered: list = []
+        for road in self.road_data.get("roads", []) or []:
+            if road.get("surface") != "asphalt":
+                continue
+            pts = road.get("spline_points", [])
+            if len(pts) < 2:
+                continue
+            try:
+                line = LineString([(float(p["x"]), float(p["y"])) for p in pts])
+            except (KeyError, ValueError, TypeError):
+                continue
+            try:
+                width_m = float(road.get("width_m", 4))
+            except (TypeError, ValueError):
+                width_m = 4.0
+            half_width_deg = (width_m / 2 + safety_margin_m) * deg_per_m
+            buffered.append(line.buffer(half_width_deg))
+
+        if not buffered:
+            return None
+        return unary_union(buffered)
+
+    @staticmethod
+    def _point_inside_geometry(lon: float, lat: float, geometry) -> bool:
+        """Cheap point-in-geometry test using shapely."""
+        try:
+            from shapely.geometry import Point
+        except ImportError:  # pragma: no cover
+            return False
+        try:
+            return geometry.contains(Point(lon, lat))
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+    @staticmethod
+    def _building_exterior_ring(geom: dict) -> Optional[list]:
+        """Return the exterior ring of a Polygon or first-MultiPolygon geometry."""
+        if not geom:
+            return None
+        gtype = geom.get("type")
+        coords = geom.get("coordinates") or []
+        if gtype == "Polygon" and coords:
+            return coords[0]
+        if gtype == "MultiPolygon" and coords and coords[0]:
+            return coords[0][0]
+        return None
+
     def _polygon_features_to_splines(
         self,
         features: Optional[dict],
@@ -765,11 +1008,16 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
         ring: list[list[float]],
         entity_prefix: str,
         index: int,
+        comment_suffix: str = "",
     ) -> Optional[str]:
         """
         Project a single GeoJSON ring (list of [lon, lat] pairs) to a closed
         SplineShapeEntity. Returns None if the ring has fewer than 3 in-bounds
         points after clipping to the terrain.
+
+        ``comment_suffix`` is appended to the entity declaration line as a
+        trailing ``// ...`` comment so callers can label the spline (e.g. with
+        the OSM name + building type).
         """
         if len(ring) < 3:
             return None
@@ -814,7 +1062,7 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             )
 
         return (
-            f'SplineShapeEntity {entity_prefix}_{index} {{\n'
+            f'SplineShapeEntity {entity_prefix}_{index} {{{comment_suffix}\n'
             f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
             f' Points {{\n'
             + "\n".join(point_defs) + "\n"
