@@ -6,7 +6,7 @@ Re-exports all configuration values from sub-modules so that existing
 
 Configuration is split into focused modules:
 - paths: BASE_DIR, OUTPUT_DIR, HOST, PORT
-- countries: COUNTRY_BOUNDS, COUNTRY_CRS, COUNTRY_NAMES, TREELINE_ELEVATION
+- countries: COUNTRY_CRS, COUNTRY_NAMES, TREELINE_ELEVATION
 - elevation: CountryElevationConfig, ELEVATION_CONFIGS, EU_DEM_CONFIG, API keys
 - roads: ROAD_DEFAULT_SURFACE, OSM_ROAD_TAGS, ROAD_DEFAULT_WIDTH, ROAD_ENFUSION_PREFAB, KNOWN_ROAD_PREFABS, validate_road_prefab
 - buildings: BUILDING_PREFAB_BASE, KNOWN_BUILDING_PREFABS, validate_building_prefab
@@ -20,7 +20,7 @@ from config.paths import BASE_DIR, OUTPUT_DIR, HOST, PORT
 
 # Country data
 from config.countries import (
-    COUNTRY_BOUNDS, COUNTRY_CRS, COUNTRY_NAMES, TREELINE_ELEVATION,
+    COUNTRY_CRS, COUNTRY_NAMES, TREELINE_ELEVATION,
 )
 
 # Elevation APIs

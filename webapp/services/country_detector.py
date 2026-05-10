@@ -1,229 +1,132 @@
 """
 Detect which country/countries a user-drawn polygon falls in.
 
-Primary method: offline shapely polygon intersection (fast, no network).
-Fallback: Nominatim reverse geocoding for countries not in the polygon set.
-
-Country boundary polygon data is loaded from data/country_polygons.json
-rather than being embedded inline, keeping this module focused on logic.
+Uses Natural Earth 1:10m Admin 0 — Countries (public domain) loaded once
+at import time into a Shapely STRtree for fast offline spatial lookup.
+No network calls; the dataset covers every country worldwide.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
 from pathlib import Path
 from typing import Optional
 
-import httpx
-from shapely.geometry import Polygon, Point, box
+from shapely.geometry import Polygon, Point, shape
+from shapely.strtree import STRtree
 
-from config import COUNTRY_BOUNDS, COUNTRY_CRS
+from config import COUNTRY_CRS
 
 logger = logging.getLogger(__name__)
 
-# Retry configuration for Nominatim
-NOMINATIM_MAX_RETRIES = 3
-NOMINATIM_RETRY_WAIT_S = 3.0
-RETRYABLE_STATUS_CODES = (429, 502, 503, 504)
-
 
 # ---------------------------------------------------------------------------
-# Load detailed country boundary polygons from external JSON data file.
-# These cover the Nordic + Baltic countries with high-resolution vertices
-# for accurate detection without needing network calls.
+# Load Natural Earth 10m country geometries at import time.
 # ---------------------------------------------------------------------------
 
-_POLYGON_FILE = Path(__file__).parent.parent / "data" / "country_polygons.json"
+_GEOJSON_FILE = (
+    Path(__file__).parent.parent / "data" / "ne_10m_admin_0_countries.geojson"
+)
 
 
-def _load_country_polygons() -> dict[str, list[tuple[float, float]]]:
-    """Load country polygon data from JSON file."""
+def _load_country_geometries() -> tuple[list[str], list, STRtree]:
+    """Load country geometries and build an STRtree for fast lookup.
+
+    Returns (codes, geoms, tree) where codes[i] is the ISO A2 of geoms[i],
+    and the STRtree's integer query results index into both lists.
+    """
     try:
-        data = json.loads(_POLYGON_FILE.read_text())
-        # Convert [lng, lat] lists back to (lng, lat) tuples for shapely
-        return {
-            code: [(coord[0], coord[1]) for coord in coords]
-            for code, coords in data.items()
-        }
-    except Exception as e:
-        logger.error(f"Failed to load country polygons from {_POLYGON_FILE}: {e}")
-        return {}
+        data = json.loads(_GEOJSON_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.error(f"Failed to load {_GEOJSON_FILE}: {exc}")
+        return [], [], STRtree([])
+
+    codes: list[str] = []
+    geoms: list = []
+    for feature in data.get("features", []):
+        props = feature.get("properties", {})
+        # ISO_A2_EH is the "Egypt/Hala'ib"-corrected ISO A2; preferred over
+        # ISO_A2, which has -99 placeholders for several disputed entries.
+        code = props.get("ISO_A2_EH") or props.get("ISO_A2")
+        if not code or code == "-99":
+            continue
+        try:
+            geom = shape(feature["geometry"])
+        except Exception:
+            continue
+        codes.append(code.upper())
+        geoms.append(geom)
+
+    return codes, geoms, STRtree(geoms)
 
 
-_COUNTRY_POLYGONS: dict[str, list[tuple[float, float]]] = _load_country_polygons()
+_CODES, _GEOMS, _TREE = _load_country_geometries()
+_CODE_TO_GEOM: dict[str, list] = {}
+for _i, _c in enumerate(_CODES):
+    _CODE_TO_GEOM.setdefault(_c, []).append(_GEOMS[_i])
 
 
-def _get_country_polygon(country_code: str) -> Optional[Polygon]:
-    """Get the simplified boundary polygon for a country, if available."""
-    coords = _COUNTRY_POLYGONS.get(country_code)
-    if coords is None:
+# Tolerance (in degrees) for the nearest-country fallback. NE 10m simplifies
+# coastlines and drops sub-kilometre islands, so points right on a coast or on
+# small archipelago islands (e.g. Björköby in the Kvarken — issue #38) can
+# fall just outside any polygon. ~0.25° ≈ 25 km at mid-latitudes is small
+# enough not to misattribute open-ocean points yet large enough to recover
+# every legitimate island miss observed in practice.
+_NEAREST_COUNTRY_TOLERANCE_DEG = 0.25
+
+
+def _candidate_indices(geom) -> list[int]:
+    """Return STRtree candidate indices for a query geometry."""
+    if not _GEOMS:
+        return []
+    return [int(i) for i in _TREE.query(geom)]
+
+
+def _nearest_country(geom) -> Optional[str]:
+    """Return the ISO A2 of the closest country within the tolerance."""
+    if not _GEOMS:
         return None
-    return Polygon(coords)
+    try:
+        idx = int(_TREE.nearest(geom))
+    except Exception:
+        return None
+    nearest_geom = _GEOMS[idx]
+    if nearest_geom.distance(geom) <= _NEAREST_COUNTRY_TOLERANCE_DEG:
+        return _CODES[idx]
+    return None
 
 
 def _get_country_for_point(lng: float, lat: float) -> Optional[str]:
-    """Determine which country a single point falls in using polygon data."""
+    """Determine which country a single point falls in.
+
+    Uses a `contains` check against the candidates returned by the STRtree,
+    falling back to the nearest country within ``_NEAREST_COUNTRY_TOLERANCE_DEG``
+    so coastal points and small islands missed by NE 10m simplification still
+    resolve correctly.
+    """
     pt = Point(lng, lat)
-    for code in COUNTRY_BOUNDS:
-        s, w, n, e = COUNTRY_BOUNDS[code]
-        if not (w <= lng <= e and s <= lat <= n):
-            continue
-        country_poly = _get_country_polygon(code)
-        if country_poly is not None and country_poly.contains(pt):
-            return code
-    return None
+    for i in _candidate_indices(pt):
+        if _GEOMS[i].contains(pt):
+            return _CODES[i]
+    return _nearest_country(pt)
 
 
 def _detect_countries_polygon(polygon_coords: list[list[float]]) -> list[str]:
-    """
-    Offline polygon-based country detection (fast, no network).
-
-    Uses detailed country outlines for Nordic/Baltic countries and Russia.
-    Only falls back to bounding-box intersection for countries without
-    detailed polygons.
-
-    Priority order:
-    1. Detailed polygon intersection (most accurate)
-    2. Bounding-box intersection (fallback for countries without detailed polygons)
-    """
+    """Offline polygon-based country detection. Returns sorted ISO A2 codes."""
     user_poly = Polygon([(c[0], c[1]) for c in polygon_coords])
-    detected_detailed = []  # Countries detected by detailed polygon
-    detected_bbox = []      # Countries detected by bounding box only
-
-    for code, (s, w, n, e) in COUNTRY_BOUNDS.items():
-        country_bbox = box(w, s, e, n)
-        if not user_poly.intersects(country_bbox):
-            continue
-
-        # Detailed polygon check if available (preferred)
-        country_poly = _get_country_polygon(code)
-        if country_poly is not None:
-            if user_poly.intersects(country_poly):
-                detected_detailed.append(code)
-        else:
-            # No detailed polygon -- accept bounding-box match only if
-            # no detailed polygons matched nearby
-            detected_bbox.append(code)
-
-    # Prioritize detailed polygon matches; only include bbox matches if no detailed matches found
-    if detected_detailed:
-        return sorted(detected_detailed)
-
-    return sorted(detected_bbox)
-
-
-async def _nominatim_reverse_geocode_with_retry(
-    client: httpx.AsyncClient,
-    lat: float,
-    lon: float,
-    max_retries: int = NOMINATIM_MAX_RETRIES,
-) -> Optional[dict]:
-    """
-    Execute a Nominatim reverse geocode request with retry logic.
-
-    Retries on 429, 502, 503, 504 status codes with exponential backoff.
-
-    Args:
-        client: httpx AsyncClient instance
-        lat: Latitude
-        lon: Longitude
-        max_retries: Maximum number of retry attempts
-
-    Returns:
-        Response JSON dict on success, or None on failure
-    """
-    for attempt in range(max_retries):
-        try:
-            resp = await client.get(
-                "https://nominatim.openstreetmap.org/reverse",
-                params={
-                    "lat": lat,
-                    "lon": lon,
-                    "format": "json",
-                    "zoom": 3,
-                    "addressdetails": 1,
-                },
-                headers={"User-Agent": "ArmaReforgerMapGenerator/1.0"},
-            )
-
-            if resp.status_code == 200:
-                return resp.json()
-            elif resp.status_code in RETRYABLE_STATUS_CODES:
-                if attempt < max_retries - 1:
-                    wait_time = NOMINATIM_RETRY_WAIT_S * (2 ** attempt)
-                    logger.warning(
-                        f"Nominatim returned status {resp.status_code} for ({lat}, {lon}), "
-                        f"retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})"
-                    )
-                    await asyncio.sleep(wait_time)
-                    continue
-                else:
-                    logger.error(
-                        f"Nominatim failed after {max_retries} retries for ({lat}, {lon}): "
-                        f"status {resp.status_code}"
-                    )
-                    return None
-            else:
-                logger.warning(
-                    f"Nominatim returned non-retryable status {resp.status_code} for ({lat}, {lon})"
-                )
-                return None
-
-        except Exception as exc:
-            if attempt < max_retries - 1:
-                wait_time = NOMINATIM_RETRY_WAIT_S * (2 ** attempt)
-                logger.warning(
-                    f"Nominatim request failed for ({lat}, {lon}): {exc}, "
-                    f"retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})"
-                )
-                await asyncio.sleep(wait_time)
-                continue
-            else:
-                logger.error(
-                    f"Nominatim request failed after {max_retries} retries for ({lat}, {lon}): {exc}"
-                )
-                return None
-
-    return None
-
-
-async def _detect_countries_nominatim(polygon_coords: list[list[float]]) -> list[str]:
-    """
-    Nominatim fallback: reverse-geocode sample points within the polygon.
-    Used when polygon-based detection finds no matches, or to refine
-    results for countries outside the detailed polygon set.
-    """
-    from shapely.geometry import Polygon as ShapelyPolygon
-
-    user_poly = ShapelyPolygon([(c[0], c[1]) for c in polygon_coords])
-    centroid = user_poly.centroid
-    bounds = user_poly.bounds  # (minx, miny, maxx, maxy)
-
-    sample_points = [
-        (centroid.x, centroid.y),
-        (bounds[0], bounds[1]),
-        (bounds[2], bounds[3]),
-        (bounds[0], bounds[3]),
-        (bounds[2], bounds[1]),
-        ((bounds[0] + bounds[2]) / 2, bounds[1]),
-        ((bounds[0] + bounds[2]) / 2, bounds[3]),
-        (bounds[0], (bounds[1] + bounds[3]) / 2),
-        (bounds[2], (bounds[1] + bounds[3]) / 2),
-    ]
-
-    countries: set[str] = set()
-    async with httpx.AsyncClient(timeout=30) as client:
-        for lon, lat in sample_points:
-            data = await _nominatim_reverse_geocode_with_retry(client, lat, lon)
-            if data:
-                cc = data.get("address", {}).get("country_code", "").upper()
-                if cc:
-                    countries.add(cc)
-
-    return sorted(countries)
+    found: set[str] = set()
+    for i in _candidate_indices(user_poly):
+        if _GEOMS[i].intersects(user_poly):
+            found.add(_CODES[i])
+    if found:
+        return sorted(found)
+    # Fallback: small selections over coastlines or archipelago islands may
+    # not intersect any simplified polygon. Use the nearest country within
+    # tolerance instead of returning nothing.
+    nearest = _nearest_country(user_poly)
+    return [nearest] if nearest else []
 
 
 def _utm_crs_from_centroid(lng: float, lat: float) -> str:
@@ -235,52 +138,50 @@ def _utm_crs_from_centroid(lng: float, lat: float) -> str:
         return f"EPSG:327{zone:02d}"
 
 
+def _intersection_area(user_poly: Polygon, code: str) -> float:
+    """Sum of intersection area between user polygon and all parts of country."""
+    total = 0.0
+    for geom in _CODE_TO_GEOM.get(code, []):
+        try:
+            total += user_poly.intersection(geom).area
+        except Exception:
+            continue
+    return total
+
+
 def get_crs_for_area(
     countries: list[str],
     polygon_coords: list[list[float]],
 ) -> str:
-    """
-    Determine the best CRS to use for the given area.
+    """Determine the best CRS to use for the given area.
 
-    For single-country areas, returns the country's preferred CRS.
-    For multi-country areas, picks the country with the most spatial
-    overlap.
+    Single-country: returns the country's preferred CRS (or UTM fallback).
+    Multi-country: picks the country with the most spatial overlap.
     """
     if len(countries) == 1:
-        return COUNTRY_CRS.get(countries[0], "EPSG:4326")
-
-    # For multi-country areas, pick the country with the most coverage
-    user_poly = Polygon([(c[0], c[1]) for c in polygon_coords])
-    best_code = None
-    best_area = 0.0
-
-    for code in countries:
-        country_poly = _get_country_polygon(code)
-        if country_poly is None:
-            continue
-        try:
-            intersection = user_poly.intersection(country_poly)
-            if intersection.area > best_area:
-                best_area = intersection.area
+        code = countries[0]
+        if code in COUNTRY_CRS:
+            return COUNTRY_CRS[code]
+        # Fall through to UTM based on polygon centroid
+    elif countries:
+        user_poly = Polygon([(c[0], c[1]) for c in polygon_coords])
+        best_code = None
+        best_area = 0.0
+        for code in countries:
+            area = _intersection_area(user_poly, code)
+            if area > best_area:
+                best_area = area
                 best_code = code
-        except Exception:
-            continue
+        if best_code and best_code in COUNTRY_CRS:
+            return COUNTRY_CRS[best_code]
 
-    if best_code:
-        return COUNTRY_CRS.get(best_code, "EPSG:4326")
-
-    # Default to UTM zone based on centroid
     centroid_lng = sum(c[0] for c in polygon_coords) / len(polygon_coords)
     centroid_lat = sum(c[1] for c in polygon_coords) / len(polygon_coords)
     return _utm_crs_from_centroid(centroid_lng, centroid_lat)
 
 
 async def detect_countries(polygon_coords: list[list[float]]) -> dict:
-    """
-    Main entry point: detect countries for a polygon.
-
-    Uses offline polygon-based detection first, with Nominatim as
-    optional fallback for countries not in the polygon set.
+    """Main entry point: detect countries for a polygon.
 
     Args:
         polygon_coords: List of [lng, lat] coordinate pairs forming the polygon.
@@ -288,35 +189,32 @@ async def detect_countries(polygon_coords: list[list[float]]) -> dict:
     Returns:
         Dict with:
             - countries: list of ISO 2-letter country codes
-            - primary_country: the country containing the polygon centroid
+            - primary_country: country with the largest intersection area
             - crs: recommended CRS for processing
             - bbox: bounding box dict (west, south, east, north)
     """
     polygon = Polygon([(c[0], c[1]) for c in polygon_coords])
     bounds = polygon.bounds  # (minx/west, miny/south, maxx/east, maxy/north)
 
-    # 1. Fast polygon-based detection
     countries = _detect_countries_polygon(polygon_coords)
-    logger.info(f"Polygon-based detection: {countries}")
+    logger.info(f"Country detection: {countries}")
 
-    # 2. If nothing found, try Nominatim as fallback
     if not countries:
-        try:
-            countries = await _detect_countries_nominatim(polygon_coords)
-            logger.info(f"Nominatim fallback detection: {countries}")
-        except Exception:
-            logger.warning("Nominatim fallback also failed")
-            countries = []
+        primary = "UNKNOWN"
+    elif len(countries) == 1:
+        primary = countries[0]
+    else:
+        # Pick the country with the largest overlap area; more robust than
+        # centroid for selections that straddle a coastline.
+        best_code = countries[0]
+        best_area = -1.0
+        for code in countries:
+            area = _intersection_area(polygon, code)
+            if area > best_area:
+                best_area = area
+                best_code = code
+        primary = best_code
 
-    # 3. Determine primary country (country containing centroid)
-    primary = countries[0] if countries else "UNKNOWN"
-    if len(countries) > 1:
-        centroid = polygon.centroid
-        centroid_country = _get_country_for_point(centroid.x, centroid.y)
-        if centroid_country and centroid_country in countries:
-            primary = centroid_country
-
-    # 4. Select CRS
     crs = get_crs_for_area(countries, polygon_coords)
 
     return {
@@ -333,10 +231,7 @@ async def detect_countries(polygon_coords: list[list[float]]) -> dict:
 
 
 def get_data_sources_for_country(country_code: str) -> dict:
-    """
-    Return the available data sources for a given country.
-    Indicates which sources are available and their priority.
-    """
+    """Return the available data sources for a given country."""
     from config import ELEVATION_CONFIGS
 
     sources = {
