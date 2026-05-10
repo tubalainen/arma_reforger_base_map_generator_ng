@@ -467,42 +467,66 @@ if the .layer file was hand-edited), re-attach it the original way:
 
         return f"""## Phase 6: Vegetation & Water (Generators)
 
-The vegetation and water layers already contain pre-drawn closed splines —
-one per forest/lake polygon, projected to Enfusion local coordinates and
-clipped to the terrain. You only need to drop a generator prefab onto each
-spline; the spline-drawing work is done.
+The vegetation and water layers contain pre-drawn splines projected to
+Enfusion local coordinates and clipped to the terrain. When a Forest or
+Lake Generator prefab path is configured in the catalog (see below), the
+generator child is auto-attached and the area fills with trees or water on
+world load — no manual prefab-dropping needed.
+
+By default the catalogs ship empty (the same safe pattern used for buildings),
+so manual wiring is the fallback until you confirm the prefab paths match your
+stock Reforger install.
 
 ### Step 6.1: Forest Generator
 
 Your terrain has **{forests}** forest areas identified from OpenStreetMap.
 The vegetation layer contains a closed `SplineShapeEntity` for each.
 
-For each spline:
+**If Forest Generator prefabs are auto-attached** (catalog populated):
+- The generator child already exists inside each spline — open the project
+  in Workbench, select any `ForestArea_*` spline, and you will see the
+  `FG_*.et` child in the entity tree. No further wiring needed.
+- Enable **Avoid Roads** and **Avoid Lakes** on each generator if not set.
+
+**If the catalog is empty** (default — manual wiring):
 1. Select the spline in the World Editor (vegetation layer)
 2. Drag a Forest Generator prefab from `Prefabs/WEGenerators/Forest/`
    (prefixed `FG_`) onto the spline — it will populate the area with trees
 3. Enable **Avoid Roads** and **Avoid Lakes** on the generator
 
-> **Tip**: Pick the prefab that matches the dominant tree type for your
-> region (e.g. `FG_PineForest_*` for Nordic coniferous areas).
-> Reference: `Reference/osm_forests.geojson` includes leaf_type metadata
-> (needleleaved / broadleaved) per polygon.
+> **To enable auto-attachment**: edit
+> `webapp/config/forests.py::KNOWN_FOREST_PREFABS` and add entries mapping
+> forest type keys (`"coniferous"`, `"deciduous"`, `"mixed"`) to the actual
+> `FG_*.et` paths from your Reforger install. No code changes — just config
+> edits. The leaf_type metadata in `Reference/osm_forests.geojson` shows
+> which type applies to each polygon.
 
 ### Step 6.2: Water Bodies
 
-Your terrain has **{lakes}** lakes and **{rivers}** rivers/streams.
-The water layer contains a closed `SplineShapeEntity` per lake/pond/reservoir.
-(Rivers are LineStrings and aren't included in the water layer; use the
-roads layer or future river-spline output for them.)
+Your terrain has **{lakes}** lakes/ponds/reservoirs and **{rivers}** rivers/streams.
 
-For each spline:
-1. Select the spline in the World Editor (water layer)
+**Lakes (closed splines)**: The water layer contains one closed `SplineShapeEntity`
+per lake/pond/reservoir.
+
+**If Lake Generator prefabs are auto-attached** (catalog populated):
+- The `LG_*.et` child already exists inside each spline — no manual wiring needed.
+- Enable **Flatten By Bottom Plane** on each generator if not set.
+
+**If the catalog is empty** (default — manual wiring):
+1. Select the lake spline in the World Editor (water layer)
 2. Drag a Lake Generator prefab from `Prefabs/WEGenerators/Water/Lake/`
    (prefixed `LG_`) onto the spline
 3. Enable **Flatten By Bottom Plane** for natural water level
 
-> **Tip**: Water body coordinates in features.json are already in Enfusion
-> local metres.
+> **To enable auto-attachment**: edit
+> `webapp/config/lakes.py::KNOWN_LAKE_PREFABS` and add entries mapping
+> water type keys (`"lake"`, `"pond"`, `"reservoir"`) to confirmed `LG_*.et`
+> paths. No code changes needed.
+
+**Rivers (open splines)**: The water layer also contains one open
+`SplineShapeEntity` per river/stream/canal LineString, labelled with the
+OSM name and estimated width. These are pre-positioned markers — add a
+river generator child manually if your project uses one.
 
 ### Step 6.3: Buildings
 

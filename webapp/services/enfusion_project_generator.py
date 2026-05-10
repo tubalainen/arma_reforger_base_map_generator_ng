@@ -26,6 +26,8 @@ from config.enfusion import (
     ARMA_REFORGER_GUID,
     PLATFORM_CONFIGS,
     ROAD_PREFAB_BASE,
+    FOREST_PREFAB_BASE,
+    LAKE_PREFAB_BASE,
     WORLD_ENTITY_DEFAULTS,
     TERRAIN_LOD_DEFAULTS,
     WORLD_PREFABS,
@@ -34,8 +36,19 @@ from config.enfusion import (
     compute_height_scale,
 )
 from config.roads import validate_road_prefab
+from config.forests import validate_forest_prefab, forest_type_from_osm
+from config.lakes import validate_lake_prefab
 
 logger = logging.getLogger(__name__)
+
+# Estimated river widths by OSM water_type (same values as feature_extractor)
+_RIVER_WIDTH_M = {
+    "river": 15.0,
+    "stream": 3.0,
+    "canal": 8.0,
+    "ditch": 1.5,
+    "drain": 2.0,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -636,60 +649,177 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
         """
         Emit one closed SplineShapeEntity per forest polygon.
 
-        The user opens the project in Workbench and drags a Forest Generator
-        prefab (Prefabs/WEGenerators/Forest/, FG_ prefix) onto each spline to
-        spawn the actual forest. Auto-attaching the prefab as a child entity
-        is deferred until we have a known-good Enfusion text-serialisation
-        example for parent-child entities.
+        When config.forests.KNOWN_FOREST_PREFABS has a confirmed FG_*.et path
+        for the polygon's forest type (coniferous / deciduous / mixed / scrub /
+        heath), a ForestGeneratorEntity child is auto-attached using the same
+        ${guid}path.et { coords 0 0 0 } pattern established for roads (v1.1.0)
+        and buildings (v1.2.0).
+
+        The catalog ships empty (never fabricate paths). Once a user or
+        contributor adds confirmed entries, the generator auto-upgrades those
+        forest types to auto-attached mode on the next generation — no code
+        change required.
         """
         header = (
             "// Vegetation layer — one closed spline per forest polygon.\n"
-            "// To populate: drag a Forest Generator prefab from\n"
-            "//   Prefabs/WEGenerators/Forest/ (FG_ prefix, e.g. FG_PineForest_01.et)\n"
-            "// onto each spline in the World Editor and the generator will fill it\n"
-            "// with trees. Enable 'Avoid Roads' and 'Avoid Lakes' on the generator.\n"
+            "// Forest Generator prefab auto-attached when a confirmed FG_*.et path\n"
+            "// exists in config/forests.py::KNOWN_FOREST_PREFABS for the forest type.\n"
+            "// Catalog ships empty — add entries to upgrade from manual to auto mode.\n"
+            "// Until populated: drag a Forest Generator from\n"
+            "//   Prefabs/WEGenerators/Forest/ onto each spline manually.\n"
+            "// Enable 'Avoid Roads' and 'Avoid Lakes' on the generator.\n"
             "// Source data: Reference/osm_forests.geojson and features.json.\n"
         )
+
+        def _forest_child(feature: dict) -> Optional[str]:
+            props = feature.get("properties", {}) or {}
+            ft = forest_type_from_osm(props)
+            path = validate_forest_prefab(ft)
+            return path  # None → spline-only fallback
+
         body = self._polygon_features_to_splines(
             self.forest_features,
             entity_prefix="ForestArea",
             empty_message="// No forest polygons found in this area.\n",
+            child_prefab_fn=_forest_child,
         )
         return header + body
 
     def _generate_water_layer(self) -> str:
         """
-        Emit one closed SplineShapeEntity per lake/pond/reservoir polygon.
+        Emit closed SplineShapeEntity per lake/pond/reservoir polygon AND open
+        SplineShapeEntity per river/stream LineString.
 
-        Filters out non-polygon water features (rivers/streams are LineStrings
-        and don't fit the spline-area pattern; they'll be added in a future
-        iteration as separate river splines).
+        Lakes: when config.lakes.KNOWN_LAKE_PREFABS has a confirmed LG_*.et
+        path for the water_type, a LakeGeneratorEntity child is auto-attached.
+        Rivers: always emitted as open splines (no generator child — river
+        generator paths TBD); the width comment shows an OSM-derived estimate.
 
-        The user drags a Lake Generator prefab (Prefabs/WEGenerators/Water/Lake/,
-        LG_ prefix) onto each spline to spawn the lake.
+        The lake catalog ships empty (same pattern as forests/buildings).
         """
         header = (
-            "// Water layer — one closed spline per lake/pond/reservoir polygon.\n"
-            "// To populate: drag a Lake Generator prefab from\n"
-            "//   Prefabs/WEGenerators/Water/Lake/ (LG_ prefix, e.g. LG_Lake_01.et)\n"
-            "// onto each spline in the World Editor and enable\n"
-            "// 'Flatten By Bottom Plane' for natural water level.\n"
-            "// Rivers (LineString) are not included here; see roads.layer for\n"
-            "// the road network and a future release for river splines.\n"
+            "// Water layer — lakes/ponds/reservoirs as closed splines,\n"
+            "// rivers/streams/canals as open splines.\n"
+            "// Lake Generator prefab auto-attached when a confirmed LG_*.et path\n"
+            "// exists in config/lakes.py::KNOWN_LAKE_PREFABS for the water type.\n"
+            "// Catalog ships empty — add entries to upgrade from manual to auto mode.\n"
+            "// Until populated: drag a Lake Generator from\n"
+            "//   Prefabs/WEGenerators/Water/Lake/ onto each lake spline manually.\n"
+            "// Enable 'Flatten By Bottom Plane' for natural water level.\n"
             "// Source data: Reference/osm_water.geojson and features.json.\n"
         )
-        # Lake-like polygons only — rivers come in as LineString and are filtered
-        # naturally by the polygon-only loop, but a feature can still be tagged as
-        # a polygonal river (e.g. a wide watercourse). Restrict to standing-water
-        # types so we don't emit a Lake Generator for a moving river polygon.
-        body = self._polygon_features_to_splines(
+
+        def _lake_child(feature: dict) -> Optional[str]:
+            water_type = (feature.get("properties", {}) or {}).get("water_type", "")
+            return validate_lake_prefab(water_type)  # None → spline-only fallback
+
+        lake_body = self._polygon_features_to_splines(
             self.water_features,
             entity_prefix="Water",
             filter_property="water_type",
             filter_values=("lake", "pond", "reservoir", "water"),
             empty_message="// No standing-water polygons found in this area.\n",
+            child_prefab_fn=_lake_child,
         )
-        return header + body
+        river_body = self._generate_river_splines()
+        return header + lake_body + river_body
+
+    def _generate_river_splines(self) -> str:
+        """
+        Emit one open SplineShapeEntity per river/stream/canal LineString.
+
+        Rivers are open (not closed) so they don't need to form a polygon.
+        A width comment shows the OSM-derived estimate in metres. No generator
+        child is auto-attached — river generator prefab paths are TBD.
+        """
+        if not self.transformer or not self.water_features:
+            return ""
+
+        features = self.water_features.get("features", []) or []
+        river_features = [
+            f for f in features
+            if (f.get("properties", {}) or {}).get("water_type", "") in _RIVER_WIDTH_M
+            and (f.get("geometry", {}) or {}).get("type") == "LineString"
+        ]
+        if not river_features:
+            return ""
+
+        section_header = (
+            "\n// River / stream splines — open SplineShapeEntity per waterway.\n"
+            "// Width estimate (metres) shown in the entity comment.\n"
+            "// Add a river generator child manually if your project uses one.\n"
+        )
+
+        entities: list[str] = []
+        skipped = 0
+
+        for i, feature in enumerate(river_features):
+            props = (feature.get("properties", {}) or {})
+            geom = (feature.get("geometry", {}) or {})
+            coords = geom.get("coordinates", []) or []
+
+            wgs_points = [
+                {"x": float(c[0]), "y": float(c[1])}
+                for c in coords if len(c) >= 2
+            ]
+            if len(wgs_points) < 2:
+                skipped += 1
+                continue
+
+            local_points = self.transformer.transform_points(
+                wgs_points,
+                elevation_array=self.elevation_array,
+            )
+
+            margin = 1.0
+            in_bounds = [
+                pt for pt in local_points
+                if -margin <= pt["x"] <= self.terrain_width + margin
+                and -margin <= pt["z"] <= self.terrain_depth + margin
+            ]
+            if len(in_bounds) < 2:
+                skipped += 1
+                continue
+
+            origin = in_bounds[0]
+            point_defs = []
+            for j, pt in enumerate(in_bounds):
+                rel_x = pt["x"] - origin["x"]
+                rel_y = pt["y"] - origin["y"]
+                rel_z = pt["z"] - origin["z"]
+                point_defs.append(
+                    f'   ShapePoint sp_{j} {{\n'
+                    f'    Position {rel_x:.3f} {rel_y:.3f} {rel_z:.3f}\n'
+                    f'   }}'
+                )
+
+            water_type = props.get("water_type", "river")
+            width_m = _RIVER_WIDTH_M.get(water_type, 5.0)
+            name = props.get("name", "") or ""
+            comment = (
+                f' // {name} (~{width_m:.0f}m)' if name
+                else f' // {water_type} (~{width_m:.0f}m)'
+            )
+
+            entities.append(
+                f'SplineShapeEntity River_{i} {{{comment}\n'
+                f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
+                f' Points {{\n'
+                + "\n".join(point_defs) + "\n"
+                f' }}\n'
+                f'}}'
+            )
+
+        if skipped:
+            logger.info(
+                f"River splines: skipped {skipped} segment(s) — "
+                f"< 2 in-bounds points after clipping"
+            )
+        logger.info(f"River splines: emitted {len(entities)} open spline(s)")
+
+        if not entities:
+            return ""
+        return section_header + "\n".join(entities) + "\n"
 
     # -----------------------------------------------------------------------
     # Buildings layer (Phase 2 / task A2 + L12)
@@ -921,6 +1051,7 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
         empty_message: str,
         filter_property: Optional[str] = None,
         filter_values: tuple[str, ...] = (),
+        child_prefab_fn=None,
     ) -> str:
         """
         Convert GeoJSON polygon features into closed SplineShapeEntity blocks.
@@ -941,6 +1072,9 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             empty_message: Comment to emit when there's nothing to write.
             filter_property: Optional GeoJSON property name to filter on.
             filter_values: Allowed values for filter_property (case-sensitive).
+            child_prefab_fn: Optional callable(feature) → str|None. When it
+                returns a non-None path, a generator child entity is added to
+                the spline using the ${guid}path.et { coords 0 0 0 } syntax.
 
         Returns:
             Multi-line string suitable for appending to a .layer file.
@@ -961,6 +1095,8 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
                     skipped_filtered += 1
                     continue
 
+            child_prefab = child_prefab_fn(feature) if child_prefab_fn else None
+
             geom = feature.get("geometry", {}) or {}
             geom_type = geom.get("type", "")
             coords = geom.get("coordinates", []) or []
@@ -978,7 +1114,8 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
 
             for ring in exterior_rings:
                 entity = self._closed_spline_entity_from_ring(
-                    ring, entity_prefix, len(entities)
+                    ring, entity_prefix, len(entities),
+                    child_prefab=child_prefab,
                 )
                 if entity is None:
                     skipped_clipped += 1
@@ -1009,6 +1146,7 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
         entity_prefix: str,
         index: int,
         comment_suffix: str = "",
+        child_prefab: Optional[str] = None,
     ) -> Optional[str]:
         """
         Project a single GeoJSON ring (list of [lon, lat] pairs) to a closed
@@ -1016,8 +1154,11 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
         points after clipping to the terrain.
 
         ``comment_suffix`` is appended to the entity declaration line as a
-        trailing ``// ...`` comment so callers can label the spline (e.g. with
-        the OSM name + building type).
+        trailing ``// ...`` comment so callers can label the spline.
+
+        ``child_prefab``: when not None, a generator child block is appended
+        inside the entity using the ``${guid}path.et { coords 0 0 0 }`` syntax
+        established for roads (v1.1.0) and buildings (v1.2.0).
         """
         if len(ring) < 3:
             return None
@@ -1061,13 +1202,22 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
                 f'   }}'
             )
 
+        child_block = ""
+        if child_prefab:
+            child_block = (
+                f' ${{{ARMA_REFORGER_GUID}}}{child_prefab} {{\n'
+                f'  coords 0 0 0\n'
+                f' }}\n'
+            )
+
         return (
             f'SplineShapeEntity {entity_prefix}_{index} {{{comment_suffix}\n'
             f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
             f' Points {{\n'
             + "\n".join(point_defs) + "\n"
             f' }}\n'
-            f'}}'
+            + child_block
+            + f'}}'
         )
 
     def _generate_mission_conf(self) -> str:
