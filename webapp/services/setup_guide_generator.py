@@ -708,6 +708,14 @@ Countries:              {', '.join(self.input_data.get('countries', ['Unknown'])
     def _appendix_troubleshooting(self) -> str:
         return """## Appendix C: Troubleshooting
 
+### World hangs at a low percentage when opening
+This is caused by SplineShapeEntities (forest or water areas) with too many
+vertices for the Workbench renderer — raw OSM polygon boundaries can exceed
+1,500 vertices per entity. The generator now caps splines at 200 points using
+Ramer-Douglas-Peucker simplification, so this should not occur for newly
+generated maps. If you have an older generated map, regenerate it from the
+webapp to get simplified layers.
+
 ### Project won't open
 - Ensure the folder is in the correct addons directory (NOT inside OneDrive)
 - Verify ArmaReforger is listed as a dependency in your Projects panel

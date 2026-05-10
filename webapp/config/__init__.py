@@ -55,6 +55,7 @@ from config.lakes import (
     KNOWN_LAKE_PREFABS, validate_lake_prefab,
 )
 
+
 # Surface classes
 from config.surfaces import SURFACE_CLASSES
 
