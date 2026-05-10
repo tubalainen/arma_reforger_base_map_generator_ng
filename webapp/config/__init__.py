@@ -9,6 +9,7 @@ Configuration is split into focused modules:
 - countries: COUNTRY_BOUNDS, COUNTRY_CRS, COUNTRY_NAMES, TREELINE_ELEVATION
 - elevation: CountryElevationConfig, ELEVATION_CONFIGS, EU_DEM_CONFIG, API keys
 - roads: ROAD_DEFAULT_SURFACE, OSM_ROAD_TAGS, ROAD_DEFAULT_WIDTH, ROAD_ENFUSION_PREFAB, KNOWN_ROAD_PREFABS, validate_road_prefab
+- buildings: BUILDING_PREFAB_BASE, KNOWN_BUILDING_PREFABS, validate_building_prefab
 - surfaces: SURFACE_CLASSES
 - endpoints: OVERPASS_*, OPENTOPOGRAPHY_*, SENTINEL2_*, CORINE_*, TREE_COVER_*
 - terrain: MAX_TERRAIN_SIZE, DEFAULT_GRID_CELL_SIZE, height scale defaults
@@ -37,6 +38,11 @@ from config.roads import (
     ROAD_DEFAULT_SURFACE, OSM_ROAD_TAGS,
     ROAD_DEFAULT_WIDTH, ROAD_ENFUSION_PREFAB,
     KNOWN_ROAD_PREFABS, validate_road_prefab,
+)
+
+# Building classification
+from config.buildings import (
+    BUILDING_PREFAB_BASE, KNOWN_BUILDING_PREFABS, validate_building_prefab,
 )
 
 # Surface classes

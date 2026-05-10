@@ -390,6 +390,13 @@ def extract_building_features(
 
         prefab_category = prefab_categories.get(building_type, "Building_Generic")
 
+        # Look up the verified Enfusion prefab path. None when the catalog
+        # doesn't have an entry for this category — the buildings-layer
+        # emitter falls back to a footprint-outline marker in that case
+        # rather than fabricating a path that fails to resolve in Workbench.
+        from config.buildings import validate_building_prefab
+        validated_prefab = validate_building_prefab(prefab_category)
+
         buildings.append({
             "osm_id": props.get("osm_id"),
             "name": props.get("name", ""),
@@ -399,6 +406,7 @@ def extract_building_features(
             "rotation_deg": rotation,
             "footprint_area_m2": footprint_area,
             "prefab_category": prefab_category,
+            "enfusion_prefab": validated_prefab,
             "geometry": geom,
         })
 

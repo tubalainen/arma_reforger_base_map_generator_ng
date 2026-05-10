@@ -502,7 +502,35 @@ For each spline:
 3. Enable **Flatten By Bottom Plane** for natural water level
 
 > **Tip**: Water body coordinates in features.json are already in Enfusion
-> local metres."""
+> local metres.
+
+### Step 6.3: Buildings
+
+Your terrain has **{self.features.get('buildings', 0)}** building footprints
+extracted from OpenStreetMap. The buildings layer (`{self.map_name}_buildings.layer`)
+emits one entity per building, in one of two modes depending on whether the
+generator has a confirmed Enfusion prefab path for the building's category:
+
+- **Auto-placed** (when a verified prefab is configured for the category):
+  the entity is a positioned `Building_*.et` prefab instance — appears in
+  the editor at the correct position with no further wiring needed.
+- **Footprint marker** (default until prefab paths are confirmed): the
+  entity is a closed `SplineShapeEntity` tracing the building's exterior
+  ring. You can right-click the spline > Add Child Entity > **BuildingEntity**
+  and set the prefab from `Prefabs/Structures/`.
+
+Buildings whose centroid would have fallen on top of an asphalt road have
+been dropped automatically (so traffic/pathing isn't broken).
+
+> **To enable auto-placement for your install**: edit
+> `webapp/config/buildings.py::KNOWN_BUILDING_PREFABS` and add entries
+> mapping the category labels (e.g. `Building_House`,
+> `Building_Apartments`) to the actual `.et` paths from your stock
+> Reforger install. No code changes required — the layer generator will
+> pick up the catalog on the next map generation.
+
+> Source data: `Reference/osm_buildings.geojson` and `features.json`
+> (look for the `buildings` array)."""
 
     def _phase_testing(self) -> str:
         return f"""## Phase 7: Testing (5 minutes)

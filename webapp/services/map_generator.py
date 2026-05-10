@@ -1142,6 +1142,7 @@ async def run_generation(job: MapGenerationJob):
             elevation_array=heightmap_result.get("_elevation_array"),
             forest_features=osm_data.get("forests"),
             water_features=osm_data.get("water"),
+            building_data=features.get("buildings"),
         )
         enfusion_files = enfusion_gen.generate_all(output_dir, job=job)
 
