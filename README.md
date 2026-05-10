@@ -2,7 +2,7 @@
 
 **Automate the tedious work of creating custom Arma Reforger maps.** This tool generates realistic terrain from real-world geodata, eliminating hours of manual work in the [Arma Reforger World Editor](https://community.bistudio.com/wiki/Arma_Reforger:World_Editor).
 
-Instead of manually sourcing elevation data, painting surface masks by hand, placing roads one-by-one, and sculpting terrain around features, simply draw a polygon on the interactive map and get Enfusion-ready heightmaps, surface masks, and vector data in minutes.
+Instead of manually sourcing elevation data, painting surface masks by hand, placing roads one-by-one, and sculpting terrain around features, simply draw a square or rectangle on the interactive map and get Enfusion-ready heightmaps, surface masks, and vector data in minutes.
 
 <img width="1920" height="1152" alt="image" src="https://github.com/user-attachments/assets/31b9a3de-3581-47aa-b060-ee56fbcf73f6" />
 
@@ -198,7 +198,7 @@ Docker will automatically pull the latest image from `ghcr.io/tubalainen/arma_re
 
 ### 3. Generate Your First Map
 
-1. **Draw a polygon** on the interactive map by clicking the rectangle or polygon tool in the top-left
+1. **Select an area** on the interactive map by clicking the rectangle or 1:1 square tool in the top-left (Enfusion only supports square / rectangular terrain)
 2. **Set options** in the sidebar:
    - **Map Name** — letters, numbers, underscores (used as Enfusion project folder name)
    - **Heightmap Size** — 2049x2049 is a good default (2048 terrain faces at your chosen cell size)
@@ -429,7 +429,7 @@ The application is published to GitHub Container Registry and automatically buil
 docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest
 
 # Or use a specific version tag
-docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:v1.2.3
+docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:v1.2.4
 ```
 
 The `docker-compose.yml` is pre-configured to use the GHCR.io image. See the [Quick Start Guide](#quick-start-guide) for setup instructions.

@@ -1,7 +1,7 @@
 /**
  * Arma Reforger Base Map Generator - Frontend Application
  *
- * Interactive map with polygon drawing for area selection,
+ * Interactive map with rectangle / 1:1-square area selection,
  * generation controls, and result display.
  */
 
@@ -37,7 +37,7 @@ L.control.layers({
 }, null, { position: 'topright' }).addTo(map);
 
 // ===========================================================================
-// Polygon drawing
+// Area drawing
 // ===========================================================================
 
 const drawnItems = new L.FeatureGroup();
@@ -106,17 +106,15 @@ L.Draw.Square = L.Draw.Rectangle.extend({
 
 L.drawLocal.draw.toolbar.buttons.square = 'Draw a square area (recommended)';
 
-// Standard draw toolbar (polygon + rectangle + edit/remove). The Square
-// button is injected into the same toolbar below so all three drawing
-// tools live in one uniform control group.
+// Standard draw toolbar (rectangle + edit/remove). The Square button is
+// injected into the same toolbar below so both drawing tools live in one
+// uniform control group. The Enfusion World Editor only supports
+// square / rectangular terrain (issue #50), so the polygon tool is
+// disabled.
 const drawControl = new L.Control.Draw({
     position: 'topleft',
     draw: {
-        polygon: {
-            allowIntersection: false,
-            drawError: { color: '#f85149', timeout: 1000 },
-            shapeOptions: { ...SHAPE_STYLE },
-        },
+        polygon: false,
         rectangle: {
             shapeOptions: { ...SHAPE_STYLE },
         },
@@ -132,7 +130,7 @@ const drawControl = new L.Control.Draw({
 });
 map.addControl(drawControl);
 
-// Inject a Square button into the same toolbar row as polygon and rectangle.
+// Inject a Square button into the same toolbar row as rectangle.
 // Using the existing Leaflet.Draw toolbar gives us identical sizing, borders,
 // and hover styling — see issue #40.
 (function addSquareToolButton() {
@@ -174,30 +172,28 @@ let logsSinceCursor = 0;
 // ===========================================================================
 
 map.on(L.Draw.Event.CREATED, function (event) {
-    // Clear previous polygon
+    // Only rectangle / square selections are supported — Enfusion World Editor
+    // can only build square or rectangular terrain (issue #50).
+    if (event.layerType !== 'rectangle' && event.layerType !== 'square') {
+        return;
+    }
+
+    // Clear previous selection
     drawnItems.clearLayers();
 
     const layer = event.layer;
     drawnItems.addLayer(layer);
     currentPolygon = layer;
 
-    // Extract coordinates as [lng, lat] pairs
-    let coords;
-    if (event.layerType === 'rectangle' || event.layerType === 'square') {
-        const bounds = layer.getBounds();
-        coords = [
-            [bounds.getWest(), bounds.getSouth()],
-            [bounds.getEast(), bounds.getSouth()],
-            [bounds.getEast(), bounds.getNorth()],
-            [bounds.getWest(), bounds.getNorth()],
-            [bounds.getWest(), bounds.getSouth()],
-        ];
-    } else {
-        const latLngs = layer.getLatLngs()[0];
-        coords = latLngs.map(ll => [ll.lng, ll.lat]);
-        // Close polygon
-        coords.push([latLngs[0].lng, latLngs[0].lat]);
-    }
+    // Extract bbox corners as [lng, lat] pairs (closed ring)
+    const bounds = layer.getBounds();
+    const coords = [
+        [bounds.getWest(), bounds.getSouth()],
+        [bounds.getEast(), bounds.getSouth()],
+        [bounds.getEast(), bounds.getNorth()],
+        [bounds.getWest(), bounds.getNorth()],
+        [bounds.getWest(), bounds.getSouth()],
+    ];
 
     currentPolygonCoords = coords;
     onPolygonSelected(coords);
