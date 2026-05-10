@@ -1,42 +1,10 @@
-"""Country geographic data: bounding boxes, CRS, names, treeline elevations."""
+"""Country geographic data: CRS, names, treeline elevations.
 
-# ---------------------------------------------------------------------------
-# Country bounding boxes (approx WGS84) — (lat_south, lon_west, lat_north, lon_east)
-# ---------------------------------------------------------------------------
-COUNTRY_BOUNDS: dict[str, tuple[float, float, float, float]] = {
-    # Nordics + Baltics
-    "SE": (55.34, 10.96, 69.06, 24.17),
-    "NO": (57.97,  4.64, 71.19, 31.17),
-    "DK": (54.56,  8.07, 57.75, 15.20),
-    "FI": (59.81, 20.55, 70.09, 31.59),
-    "EE": (57.52, 21.76, 59.68, 28.21),
-    "LV": (55.67, 20.97, 58.09, 28.24),
-    "LT": (53.90, 20.93, 56.45, 26.84),
-    # Extended
-    "DE": (47.30,  5.90, 55.10, 15.00),
-    "PL": (49.00, 14.10, 54.80, 24.20),
-    "RU": (41.20, 19.60, 81.90, 180.00),
-    "GB": (49.90, -8.20, 60.90,  1.80),
-    "FR": (42.30, -5.10, 51.10,  8.20),
-    "ES": (36.00, -9.30, 43.80,  3.30),
-    "IT": (36.60,  6.60, 47.10, 18.50),
-    "AT": (46.40,  9.50, 49.00, 17.20),
-    "CH": (45.80,  5.90, 47.80, 10.50),
-    "CZ": (48.50, 12.10, 51.10, 18.90),
-    "NL": (50.80,  3.40, 53.50,  7.20),
-    "BE": (49.50,  2.50, 51.50,  6.40),
-    "UA": (44.40, 22.10, 52.40, 40.20),
-    "RO": (43.60, 20.30, 48.30, 29.70),
-    "HU": (45.70, 16.10, 48.60, 22.90),
-    "SK": (47.70, 16.80, 49.60, 22.60),
-    "HR": (42.40, 13.50, 46.50, 19.40),
-    "RS": (42.20, 18.80, 46.20, 23.00),
-    "BG": (41.20, 22.40, 44.20, 28.60),
-    "GR": (34.80, 19.40, 41.70, 29.60),
-    "PT": (37.00, -9.50, 42.20, -6.20),
-    "IE": (51.40, -10.50, 55.40, -6.00),
-    "IS": (63.30, -24.50, 66.50, -13.50),
-}
+Country detection uses the bundled Natural Earth 10m dataset
+(``webapp/data/ne_10m_admin_0_countries.geojson``) via
+``webapp/services/country_detector.py``; no per-country bounding-box
+table is needed here.
+"""
 
 # CRS recommendations per country
 COUNTRY_CRS: dict[str, str] = {
