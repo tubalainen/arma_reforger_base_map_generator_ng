@@ -409,56 +409,56 @@ No roads were found in the selected area."""
         by_surface = self.roads.get("by_surface", {})
         surface_str = ", ".join(f"{k}: {v}" for k, v in by_surface.items())
 
-        return f"""## Phase 5: Roads (Auto-attached prefabs)
+        return f"""## Phase 5: Roads (manual generator attach)
 
 Your terrain has **{road_count}** road segments ({surface_str}).
 
-Both the road **splines** and their **`RoadGeneratorEntity`** prefabs have been
-pre-generated in the **roads layer** (`{self.map_name}_roads.layer`). Each
-spline follows the terrain elevation, and each spline already carries the
-correct road generator prefab as a child entity. You should see fully
-rendered roads as soon as the world finishes loading.
+The roads layer (`{self.map_name}_roads.layer`) carries one
+**SplineShapeEntity** per road segment, projected to Enfusion local
+coordinates and following terrain elevation. Each spline's `//` comment
+shows the road name and the **suggested prefab** chosen from the
+known-good Reforger road set, e.g.:
 
-### Step 5.1: Verify Roads Render
+```
+SplineShapeEntity Road_12 {{ // E18 | prefab: RG_Road_Asphalt_8m
+```
+
+Splines are emitted **without** an attached `RoadGeneratorEntity` child —
+v1.1.0 attempted to auto-attach the generator but the resulting nested
+prefab syntax hangs the World Editor at 4% on world load. v1.2.3 reverts
+that behaviour. Attach the generator manually as described below.
+
+### Step 5.1: Verify Splines Loaded
 
 1. In the World Editor hierarchy, expand the **roads** layer
 2. Make sure the layer's visibility checkbox is enabled (eye icon)
-3. You should see one **SplineShapeEntity** per road segment, each with a
-   **RoadGeneratorEntity** child showing the inferred prefab path
+3. You should see one **SplineShapeEntity** per road segment, with a `//`
+   comment listing the road name and the suggested prefab name
 4. Splines include elevation data so they follow the terrain surface
-5. If a road segment looks wrong, the per-road prefab path is in
-   `Reference/roads_reference.csv` for easy override
 
-### Step 5.2: Override a Prefab (only if you need to)
+### Step 5.2: Attach a `RoadGeneratorEntity` to Each Spline
 
-The auto-attached prefab is chosen from a **known-good** list (asphalt,
-gravel, dirt at the widths shipped with stock Reforger), so it should
-load without errors. If you want to swap one:
-
-1. Select the **RoadGeneratorEntity** child under the spline
-2. In the Object Properties panel, change the prefab reference to another
-   prefab from `Prefabs/WEGenerators/Roads/`
-3. Enable **Adjust Height Map** on the generator if you want the road to
-   carve into the terrain
-
-### Step 5.3: Manual Fallback
-
-If for some reason a road spline lost its child entity (rare — only happens
-if the .layer file was hand-edited), re-attach it the original way:
-
-1. Select the SplineShapeEntity
+1. Select the **SplineShapeEntity** in the hierarchy
 2. Right-click > **Add Child Entity** > **RoadGeneratorEntity**
-3. Set the road prefab from `Reference/roads_reference.csv`
+3. In the new child's properties, set the **Prefab** field to the value
+   shown in the spline's `// prefab: …` comment, fully qualified to
+   `Prefabs/WEGenerators/Roads/<prefab>.et`
+4. Optionally enable **Adjust Height Map** on the generator to carve the
+   road into the terrain
+5. Repeat for each road spline. `Reference/roads_reference.csv` has the
+   complete per-road prefab list if you want to script this in bulk.
 
-### Step 5.4: Reference Data
+### Step 5.3: Reference Data
 
 - `Reference/roads_reference.csv` — road index, type, surface, width, and
-  the prefab that was auto-attached
+  the suggested known-good prefab
 - `Reference/roads_enfusion.geojson` — road data with local coordinates
 - `Reference/roads_splines.csv` — spline control points in local metres
 
 > **Note**: Road prefabs are located at `Prefabs/WEGenerators/Roads/` in
-> the ArmaReforger data."""
+> the ArmaReforger data. The suggested prefab is snapped to a known-good
+> name (asphalt, gravel, dirt at the widths shipped with stock Reforger),
+> so it should load without errors."""
 
     def _phase_vegetation_water(self) -> str:
         lakes = self.features.get("lakes", 0)
@@ -739,12 +739,11 @@ webapp to get simplified layers.
 
 ### Roads not visible
 - Ensure the **roads** layer is **enabled** (eye icon checked) in the hierarchy
-- Each spline already has a `RoadGeneratorEntity` child with a prefab
-  attached — check the child is present and the prefab path resolves
-- Use `Reference/roads_reference.csv` to find which prefab was auto-attached
-  for each road, in case you want to override
-- If a child entity is missing, re-add it: right-click the SplineShapeEntity
-  > Add Child Entity > RoadGeneratorEntity
+- Road splines are emitted spline-only — they need a `RoadGeneratorEntity`
+  child to render. Right-click each SplineShapeEntity > **Add Child Entity**
+  > **RoadGeneratorEntity** and set the prefab from the spline's `// prefab: …`
+  comment (or `Reference/roads_reference.csv` for the full per-road list)
+- Splines without a generator render as a thin debug line only
 
 ### No sky/atmosphere
 - Check the **default** layer has GenericWorldEntity with sky presets

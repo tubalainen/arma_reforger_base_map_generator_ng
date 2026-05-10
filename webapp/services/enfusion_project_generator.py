@@ -25,7 +25,6 @@ import math
 from config.enfusion import (
     ARMA_REFORGER_GUID,
     PLATFORM_CONFIGS,
-    ROAD_PREFAB_BASE,
     FOREST_PREFAB_BASE,
     LAKE_PREFAB_BASE,
     WORLD_ENTITY_DEFAULTS,
@@ -527,28 +526,30 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
 
     def _generate_roads_layer(self) -> str:
         """
-        Generate the roads layer with one SplineShapeEntity per road and an
-        auto-attached RoadGeneratorEntity child carrying the inferred prefab.
+        Generate the roads layer with one spline-only SplineShapeEntity per road.
 
-        Each road's ``enfusion_prefab`` field is run through
-        ``validate_road_prefab`` so the emitted path always points at a known
-        prefab in a stock Reforger install. The child uses the standard
-        ``${guid}path/to/prefab.et { coords ... }`` instance syntax — the
-        same pattern the managers layer uses to instantiate world prefabs.
+        v1.1.0 attempted to auto-attach a ``RoadGeneratorEntity`` child by
+        nesting a ``${guid}path/to/prefab.et { coords 0 0 0 }`` instance line
+        inside the SplineShapeEntity body. Workbench rejects that nesting
+        form and stalls "Loading entity data..." at 4%. Reverted in v1.2.3.
+
+        The validated prefab name is still computed (via ``validate_road_prefab``)
+        and surfaced in the entity's trailing ``//`` comment so the user can
+        attach the right ``RoadGeneratorEntity`` child manually in Workbench.
+        ``Reference/roads_reference.csv`` carries the same data per road.
 
         Spline points include Y (elevation) values sampled from the heightmap
-        so roads follow the terrain surface.
+        so roads follow the terrain surface, and are simplified to at most
+        ``MAX_SPLINE_POINTS`` vertices to avoid choking the Workbench loader
+        on long OSM ways.
 
         Entity format:
-          SplineShapeEntity Road_N {
+          SplineShapeEntity Road_N { // <name> | prefab: RG_Road_<Surface>_<W>m
            coords X Y Z
            Points {
             ShapePoint sp_0 { Position 0 0 0 }
             ShapePoint sp_1 { Position relX relY relZ }
             ...
-           }
-           ${guid}Prefabs/WEGenerators/Roads/RG_Road_<Surface>_<W>m.et {
-            coords 0 0 0
            }
           }
 
@@ -594,8 +595,9 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
                 clipped += 1
                 continue
 
-            # Use clipped points
-            local_points = in_bounds
+            # Cap spline length so long OSM ways don't hang the Workbench
+            # loader. Same MAX_SPLINE_POINTS budget the closed-spline path uses.
+            local_points = self._simplify_local_polyline(in_bounds)
 
             # First point is the entity origin
             origin = local_points[0]
@@ -613,23 +615,19 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
                 )
 
             road_name = road.get("name", "").replace('"', "'")
-            comment = f' // {road_name}' if road_name else ""
-
             prefab_name = validate_road_prefab(
                 road.get("enfusion_prefab", "RG_Road_Asphalt_4m")
             )
-            prefab_ref = (
-                f'${{{ARMA_REFORGER_GUID}}}{ROAD_PREFAB_BASE}/{prefab_name}.et'
-            )
+            if road_name:
+                comment = f' // {road_name} | prefab: {prefab_name}'
+            else:
+                comment = f' // prefab: {prefab_name}'
 
             entity = (
                 f'SplineShapeEntity Road_{i} {{{comment}\n'
                 f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
                 f' Points {{\n'
                 + "\n".join(point_defs) + "\n"
-                f' }}\n'
-                f' {prefab_ref} {{\n'
-                f'  coords 0 0 0\n'
                 f' }}\n'
                 f'}}'
             )
@@ -641,8 +639,8 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             logger.info(f"Clipped {clipped} road segments outside terrain bounds")
 
         logger.info(
-            f"Generated {len(entities)} road entities (each with auto-attached "
-            f"RoadGeneratorEntity child) for roads layer"
+            f"Generated {len(entities)} spline-only road entities for roads "
+            f"layer (prefab name surfaced as a // comment per spline)"
         )
         return "\n".join(entities) + "\n"
 
@@ -781,6 +779,8 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             if len(in_bounds) < 2:
                 skipped += 1
                 continue
+
+            in_bounds = self._simplify_local_polyline(in_bounds)
 
             origin = in_bounds[0]
             point_defs = []
@@ -1437,6 +1437,81 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
         step = max(1, math.ceil(len(pts) / max_pts))
         return pts[::step][:max_pts]
 
+    @staticmethod
+    def _simplify_local_polyline(
+        pts: list[dict],
+        max_pts: int = MAX_SPLINE_POINTS,
+    ) -> list[dict]:
+        """
+        Reduce a local-coordinate open polyline to at most *max_pts* points
+        using Ramer-Douglas-Peucker in the XZ plane, falling back to uniform
+        decimation if shapely is unavailable or all tolerances fail.
+
+        Both endpoints are always preserved (unlike :py:meth:`_simplify_local_ring`,
+        which closes the loop). *pts* is a list of {"x":…, "y":…, "z":…} dicts
+        in local metres.
+        """
+        if len(pts) <= max_pts:
+            return pts
+
+        def _rdp(points, tol):
+            if len(points) <= 2:
+                return list(points)
+            ax, az = points[0]["x"], points[0]["z"]
+            bx, bz = points[-1]["x"], points[-1]["z"]
+            dx, dz = bx - ax, bz - az
+            seg_len_sq = dx * dx + dz * dz
+
+            def _perp(p):
+                if seg_len_sq == 0:
+                    return math.hypot(p["x"] - ax, p["z"] - az)
+                t = max(0.0, min(1.0, ((p["x"] - ax) * dx + (p["z"] - az) * dz) / seg_len_sq))
+                return math.hypot(p["x"] - (ax + t * dx), p["z"] - (az + t * dz))
+
+            max_d, idx = 0.0, 0
+            for i in range(1, len(points) - 1):
+                d = _perp(points[i])
+                if d > max_d:
+                    max_d, idx = d, i
+            if max_d > tol:
+                return _rdp(points[:idx + 1], tol)[:-1] + _rdp(points[idx:], tol)
+            return [points[0], points[-1]]
+
+        # Try shapely first for best quality, then pure-Python RDP, then decimation.
+        try:
+            from shapely.geometry import LineString
+            coords_2d = [(p["x"], p["z"]) for p in pts]
+            line = LineString(coords_2d)
+            for tol in (0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0):
+                s = line.simplify(tol, preserve_topology=False)
+                if s.is_empty:
+                    break
+                s_coords = list(s.coords)
+                if len(s_coords) <= max_pts and len(s_coords) >= 2:
+                    result = []
+                    for cx, cz in s_coords:
+                        nearest = min(pts, key=lambda p, cx=cx, cz=cz: (p["x"] - cx) ** 2 + (p["z"] - cz) ** 2)
+                        result.append({"x": cx, "y": nearest["y"], "z": cz})
+                    return result
+        except Exception:
+            pass
+
+        # Pure-Python RDP with escalating tolerance — open polyline, do not close.
+        for tol in (2.0, 5.0, 10.0, 20.0, 50.0):
+            s = _rdp(pts, tol)
+            if len(s) <= max_pts:
+                return s
+
+        # Last resort: uniform decimation, but always keep first + last.
+        step = max(1, math.ceil(len(pts) / max_pts))
+        decimated = pts[::step][:max_pts]
+        if decimated and decimated[-1] is not pts[-1]:
+            if len(decimated) >= max_pts:
+                decimated[-1] = pts[-1]
+            else:
+                decimated.append(pts[-1])
+        return decimated
+
     def _closed_spline_entity_from_ring(
         self,
         ring: list[list[float]],
@@ -1454,8 +1529,14 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
         trailing ``// ...`` comment so callers can label the spline.
 
         ``child_prefab``: when not None, a generator child block is appended
-        inside the entity using the ``${guid}path.et { coords 0 0 0 }`` syntax
-        established for roads (v1.1.0) and buildings (v1.2.0).
+        inside the entity using the ``${guid}path.et { coords 0 0 0 }`` syntax.
+
+        TODO: this nested-child syntax inside a SplineShapeEntity body is
+        unverified — the same form on roads (v1.1.0) caused Workbench to hang
+        at 4% on world load and was reverted in v1.2.3. The Phase 3 forest /
+        lake catalogues (``KNOWN_FOREST_PREFABS`` / ``KNOWN_LAKE_PREFABS``)
+        ship empty so this path stays dormant; populating either catalogue
+        may re-arm the same hang. Verify in Workbench before merging entries.
         """
         if len(ring) < 3:
             return None
