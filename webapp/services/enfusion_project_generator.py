@@ -31,6 +31,7 @@ from config.enfusion import (
     WORLD_PREFABS,
     PROJECT_NAME_ALLOWED_CHARS,
     PROJECT_NAME_MAX_LENGTH,
+    MAX_SPLINE_POINTS,
     compute_height_scale,
 )
 from config.roads import validate_road_prefab
@@ -1003,6 +1004,79 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             return empty_message
         return "\n".join(entities) + "\n"
 
+    @staticmethod
+    def _simplify_local_ring(
+        pts: list[dict],
+        max_pts: int = MAX_SPLINE_POINTS,
+    ) -> list[dict]:
+        """
+        Reduce a local-coordinate ring to at most *max_pts* points using
+        Ramer-Douglas-Peucker in the XZ plane, falling back to uniform
+        decimation if shapely is unavailable or all tolerances fail.
+
+        *pts* is a list of {"x":…, "y":…, "z":…} dicts (local metres, no
+        closing duplicate).  The returned list has the same dict structure.
+        """
+        if len(pts) <= max_pts:
+            return pts
+
+        def _rdp(points, tol):
+            if len(points) <= 2:
+                return list(points)
+            ax, az = points[0]["x"], points[0]["z"]
+            bx, bz = points[-1]["x"], points[-1]["z"]
+            dx, dz = bx - ax, bz - az
+            seg_len_sq = dx * dx + dz * dz
+
+            def _perp(p):
+                if seg_len_sq == 0:
+                    return math.hypot(p["x"] - ax, p["z"] - az)
+                t = max(0.0, min(1.0, ((p["x"] - ax) * dx + (p["z"] - az) * dz) / seg_len_sq))
+                return math.hypot(p["x"] - (ax + t * dx), p["z"] - (az + t * dz))
+
+            max_d, idx = 0.0, 0
+            for i in range(1, len(points) - 1):
+                d = _perp(points[i])
+                if d > max_d:
+                    max_d, idx = d, i
+            if max_d > tol:
+                return _rdp(points[:idx + 1], tol)[:-1] + _rdp(points[idx:], tol)
+            return [points[0], points[-1]]
+
+        # Try shapely first for best quality, then pure-Python RDP, then decimation.
+        try:
+            from shapely.geometry import Polygon
+            coords_2d = [(p["x"], p["z"]) for p in pts] + [(pts[0]["x"], pts[0]["z"])]
+            poly = Polygon(coords_2d)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            for tol in (0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0):
+                s = poly.simplify(tol, preserve_topology=True)
+                if s.is_empty:
+                    break
+                s_coords = list(s.exterior.coords)[:-1]  # drop closing dup
+                if len(s_coords) <= max_pts:
+                    result = []
+                    for cx, cz in s_coords:
+                        nearest = min(pts, key=lambda p, cx=cx, cz=cz: (p["x"] - cx) ** 2 + (p["z"] - cz) ** 2)
+                        result.append({"x": cx, "y": nearest["y"], "z": cz})
+                    return result
+        except Exception:
+            pass
+
+        # Pure-Python RDP with escalating tolerance
+        for tol in (2.0, 5.0, 10.0, 20.0, 50.0):
+            closed = pts + [pts[0]]
+            s = _rdp(closed, tol)
+            if len(s) >= 2 and s[-1]["x"] == s[0]["x"] and s[-1]["z"] == s[0]["z"]:
+                s = s[:-1]
+            if len(s) <= max_pts:
+                return s
+
+        # Last resort: uniform decimation
+        step = max(1, math.ceil(len(pts) / max_pts))
+        return pts[::step][:max_pts]
+
     def _closed_spline_entity_from_ring(
         self,
         ring: list[list[float]],
@@ -1045,6 +1119,8 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
         ]
         if len(in_bounds) < 3:
             return None
+
+        in_bounds = self._simplify_local_ring(in_bounds)
 
         # Close the spline: append a final ShapePoint that repeats the origin
         local_points = in_bounds + [in_bounds[0]]

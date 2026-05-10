@@ -184,6 +184,12 @@ BLOCK_VERTEX_SIZE = BLOCK_FACE_SIZE + 1  # 33
 # Maximum surfaces per block
 MAX_SURFACES_PER_BLOCK = 5
 
+# Maximum ShapePoints per SplineShapeEntity.
+# The Enfusion World Editor renderer freezes on very complex polygon splines
+# (e.g. raw OSM forest boundaries can exceed 1 500 vertices).  Any ring that
+# exceeds this limit is simplified with Ramer-Douglas-Peucker before emission.
+MAX_SPLINE_POINTS = 200
+
 # Recommended max externally-generated masks (leave room for manual refinement)
 RECOMMENDED_MAX_EXTERNAL_MASKS = 3
 
