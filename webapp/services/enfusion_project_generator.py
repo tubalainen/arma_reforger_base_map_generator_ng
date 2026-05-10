@@ -23,6 +23,7 @@ from typing import Optional
 from config.enfusion import (
     ARMA_REFORGER_GUID,
     PLATFORM_CONFIGS,
+    ROAD_PREFAB_BASE,
     WORLD_ENTITY_DEFAULTS,
     TERRAIN_LOD_DEFAULTS,
     WORLD_PREFABS,
@@ -30,6 +31,7 @@ from config.enfusion import (
     PROJECT_NAME_MAX_LENGTH,
     compute_height_scale,
 )
+from config.roads import validate_road_prefab
 
 logger = logging.getLogger(__name__)
 
@@ -491,11 +493,14 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
 
     def _generate_roads_layer(self) -> str:
         """
-        Generate the roads layer with spline-only SplineShapeEntity entries.
+        Generate the roads layer with one SplineShapeEntity per road and an
+        auto-attached RoadGeneratorEntity child carrying the inferred prefab.
 
-        No RoadGeneratorEntity children are created — users add road generators
-        manually in the Enfusion World Editor using Reference/roads_reference.csv
-        as a guide for prefab selection.
+        Each road's ``enfusion_prefab`` field is run through
+        ``validate_road_prefab`` so the emitted path always points at a known
+        prefab in a stock Reforger install. The child uses the standard
+        ``${guid}path/to/prefab.et { coords ... }`` instance syntax — the
+        same pattern the managers layer uses to instantiate world prefabs.
 
         Spline points include Y (elevation) values sampled from the heightmap
         so roads follow the terrain surface.
@@ -507,6 +512,9 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             ShapePoint sp_0 { Position 0 0 0 }
             ShapePoint sp_1 { Position relX relY relZ }
             ...
+           }
+           ${guid}Prefabs/WEGenerators/Roads/RG_Road_<Surface>_<W>m.et {
+            coords 0 0 0
            }
           }
 
@@ -573,11 +581,21 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             road_name = road.get("name", "").replace('"', "'")
             comment = f' // {road_name}' if road_name else ""
 
+            prefab_name = validate_road_prefab(
+                road.get("enfusion_prefab", "RG_Road_Asphalt_4m")
+            )
+            prefab_ref = (
+                f'${{{ARMA_REFORGER_GUID}}}{ROAD_PREFAB_BASE}/{prefab_name}.et'
+            )
+
             entity = (
                 f'SplineShapeEntity Road_{i} {{{comment}\n'
                 f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
                 f' Points {{\n'
                 + "\n".join(point_defs) + "\n"
+                f' }}\n'
+                f' {prefab_ref} {{\n'
+                f'  coords 0 0 0\n'
                 f' }}\n'
                 f'}}'
             )
@@ -588,7 +606,10 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
         if clipped > 0:
             logger.info(f"Clipped {clipped} road segments outside terrain bounds")
 
-        logger.info(f"Generated {len(entities)} spline-only road entities for roads layer")
+        logger.info(
+            f"Generated {len(entities)} road entities (each with auto-attached "
+            f"RoadGeneratorEntity child) for roads layer"
+        )
         return "\n".join(entities) + "\n"
 
     def _generate_vegetation_layer(self) -> str:

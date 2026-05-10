@@ -282,8 +282,24 @@ The default surface covers 100% of your terrain as the base layer.
 > **Why {self.recommended_default}?** Your terrain is {self.coverage_per_surface.get(self.recommended_default, {}).get('percentage', 'N/A')}% {self.recommended_default},
 > making it the optimal default surface."""]
 
-        # Step 3.3: Add surface materials (only for surfaces that were generated)
-        present_ordered = [s for s in SURFACE_IMPORT_ORDER if s in self.surfaces_present]
+        # Step 3.3: Add surface materials. The user should only see entries
+        # for surfaces that were actually generated AND have non-trivial
+        # coverage on the terrain — walking the user through a "rock" import
+        # for a flat coastal map (0.0% rock) wastes time and breeds distrust
+        # of the guide.
+        def _has_meaningful_coverage(surface_name: str) -> bool:
+            entry = self.coverage_per_surface.get(surface_name, {})
+            try:
+                pct = float(entry.get("percentage", 0.0))
+            except (TypeError, ValueError):
+                pct = 0.0
+            return pct > 0.0
+
+        present_ordered = [
+            s
+            for s in SURFACE_IMPORT_ORDER
+            if s in self.surfaces_present and _has_meaningful_coverage(s)
+        ]
 
         lines.append(f"""### Step 3.3: Add Surface Materials
 
@@ -393,36 +409,56 @@ No roads were found in the selected area."""
         by_surface = self.roads.get("by_surface", {})
         surface_str = ", ".join(f"{k}: {v}" for k, v in by_surface.items())
 
-        return f"""## Phase 5: Roads (Manual Prefab Assignment Required)
+        return f"""## Phase 5: Roads (Auto-attached prefabs)
 
 Your terrain has **{road_count}** road segments ({surface_str}).
 
-Road **splines** have been pre-generated in the **roads layer** (`{self.map_name}_roads.layer`).
-Each spline follows the terrain elevation. You need to manually add road generator prefabs.
+Both the road **splines** and their **`RoadGeneratorEntity`** prefabs have been
+pre-generated in the **roads layer** (`{self.map_name}_roads.layer`). Each
+spline follows the terrain elevation, and each spline already carries the
+correct road generator prefab as a child entity. You should see fully
+rendered roads as soon as the world finishes loading.
 
-### Step 5.1: Review Generated Splines
+### Step 5.1: Verify Roads Render
 
 1. In the World Editor hierarchy, expand the **roads** layer
-2. You should see SplineShapeEntity entries for each road segment
-3. Splines include elevation data so they follow the terrain surface
+2. Make sure the layer's visibility checkbox is enabled (eye icon)
+3. You should see one **SplineShapeEntity** per road segment, each with a
+   **RoadGeneratorEntity** child showing the inferred prefab path
+4. Splines include elevation data so they follow the terrain surface
+5. If a road segment looks wrong, the per-road prefab path is in
+   `Reference/roads_reference.csv` for easy override
 
-### Step 5.2: Add Road Generators
+### Step 5.2: Override a Prefab (only if you need to)
 
-For each road spline that you want to have a road surface:
+The auto-attached prefab is chosen from a **known-good** list (asphalt,
+gravel, dirt at the widths shipped with stock Reforger), so it should
+load without errors. If you want to swap one:
+
+1. Select the **RoadGeneratorEntity** child under the spline
+2. In the Object Properties panel, change the prefab reference to another
+   prefab from `Prefabs/WEGenerators/Roads/`
+3. Enable **Adjust Height Map** on the generator if you want the road to
+   carve into the terrain
+
+### Step 5.3: Manual Fallback
+
+If for some reason a road spline lost its child entity (rare — only happens
+if the .layer file was hand-edited), re-attach it the original way:
+
 1. Select the SplineShapeEntity
 2. Right-click > **Add Child Entity** > **RoadGeneratorEntity**
-3. Set the road prefab (e.g. `Prefabs/WEGenerators/Roads/RG_Road_Asphalt_6m.et`)
-4. Enable **Adjust Height Map** if desired
-5. Use `Reference/roads_reference.csv` to find the suggested prefab for each road
+3. Set the road prefab from `Reference/roads_reference.csv`
 
-### Step 5.3: Reference Data
+### Step 5.4: Reference Data
 
-For road type/surface/width details:
-- `Reference/roads_reference.csv` — road index, type, surface, width, and suggested prefab
+- `Reference/roads_reference.csv` — road index, type, surface, width, and
+  the prefab that was auto-attached
 - `Reference/roads_enfusion.geojson` — road data with local coordinates
 - `Reference/roads_splines.csv` — spline control points in local metres
 
-> **Note**: Road prefabs are located at `Prefabs/WEGenerators/Roads/` in the ArmaReforger data."""
+> **Note**: Road prefabs are located at `Prefabs/WEGenerators/Roads/` in
+> the ArmaReforger data."""
 
     def _phase_vegetation_water(self) -> str:
         lakes = self.features.get("lakes", 0)
@@ -642,10 +678,13 @@ Countries:              {', '.join(self.input_data.get('countries', ['Unknown'])
 - Consider reducing to 3-4 surface types in dense areas
 
 ### Roads not visible
-- Ensure the **roads** layer is enabled (checked) in the hierarchy
-- Road splines are generated without road prefabs — you need to add RoadGeneratorEntity manually
-- See `Reference/roads_reference.csv` for the suggested prefab for each road
-- Right-click a SplineShapeEntity > Add Child Entity > RoadGeneratorEntity
+- Ensure the **roads** layer is **enabled** (eye icon checked) in the hierarchy
+- Each spline already has a `RoadGeneratorEntity` child with a prefab
+  attached — check the child is present and the prefab path resolves
+- Use `Reference/roads_reference.csv` to find which prefab was auto-attached
+  for each road, in case you want to override
+- If a child entity is missing, re-add it: right-click the SplineShapeEntity
+  > Add Child Entity > RoadGeneratorEntity
 
 ### No sky/atmosphere
 - Check the **default** layer has GenericWorldEntity with sky presets

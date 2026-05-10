@@ -13,7 +13,12 @@ from typing import Optional
 
 import numpy as np
 
-from config import ROAD_DEFAULT_SURFACE, ROAD_DEFAULT_WIDTH, ROAD_ENFUSION_PREFAB
+from config import (
+    ROAD_DEFAULT_SURFACE,
+    ROAD_DEFAULT_WIDTH,
+    ROAD_ENFUSION_PREFAB,
+    validate_road_prefab,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +226,9 @@ def process_roads(
                 (surface, width_class),
                 f"RG_Road_{surface.capitalize()}_{int(width)}m"
             )
+        # Snap to a known-good prefab so we never write a fabricated name
+        # that fails to resolve in Workbench.
+        prefab = validate_road_prefab(prefab)
 
         # Convert coordinates to spline control points
         spline_points = []
