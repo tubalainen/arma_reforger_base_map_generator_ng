@@ -36,6 +36,8 @@ COUNTRY_BOUNDS: dict[str, tuple[float, float, float, float]] = {
     "PT": (37.00, -9.50, 42.20, -6.20),
     "IE": (51.40, -10.50, 55.40, -6.00),
     "IS": (63.30, -24.50, 66.50, -13.50),
+    # North America
+    "US": (24.40, -125.00, 49.40, -66.90),  # CONUS only — Alaska/Hawaii excluded
 }
 
 # CRS recommendations per country
@@ -67,6 +69,7 @@ COUNTRY_NAMES: dict[str, str] = {
     "BE": "Belgium", "UA": "Ukraine", "RO": "Romania", "HU": "Hungary",
     "SK": "Slovakia", "HR": "Croatia", "RS": "Serbia", "BG": "Bulgaria",
     "GR": "Greece", "PT": "Portugal", "IE": "Ireland", "IS": "Iceland",
+    "US": "United States",
 }
 
 # Treeline elevations per country (metres above sea level)
