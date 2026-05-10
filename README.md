@@ -429,7 +429,7 @@ The application is published to GitHub Container Registry and automatically buil
 docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest
 
 # Or use a specific version tag
-docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:v1.2.2
+docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:v1.2.3
 ```
 
 The `docker-compose.yml` is pre-configured to use the GHCR.io image. See the [Quick Start Guide](#quick-start-guide) for setup instructions.

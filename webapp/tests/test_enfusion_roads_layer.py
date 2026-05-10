@@ -1,13 +1,16 @@
 """
-Tests for the auto-attached RoadGeneratorEntity child in the roads layer
-(Phase 1 / task A1).
+Tests for the spline-only roads layer.
 
-Pre-Phase-1 the roads layer emitted SplineShapeEntity entries only and the
-user had to right-click each one in Workbench to add a RoadGeneratorEntity
-child. The generator now emits the child prefab inline using the same
-``${guid}path/to/prefab.et { coords ... }`` syntax the managers layer uses,
-backed by the validate_road_prefab safeguard so fabricated prefab names
-never reach the .layer file.
+v1.1.0 (Phase 1 / task A1) tried to auto-attach a ``RoadGeneratorEntity``
+child by nesting a ``${guid}path/to/prefab.et { coords ... }`` line inside
+each ``SplineShapeEntity`` body. That nesting form is unsupported and hung
+the World Editor at 4% on world load. v1.2.3 reverts to spline-only road
+entities, with the validated prefab name surfaced in the spline's ``//``
+comment so the user can attach the generator manually.
+
+These tests pin the spline-only behaviour and the new
+``_simplify_local_polyline`` vertex cap that protects the loader from
+multi-thousand-point OSM ways.
 """
 
 from __future__ import annotations
@@ -82,24 +85,16 @@ def make_generator():
     return _make
 
 
-class TestRoadsLayerAutoAttach:
-    def test_road_emits_spline_with_prefab_child(self, make_generator):
+class TestRoadsLayerSplineOnly:
+    def test_road_emits_spline_with_prefab_in_comment(self, make_generator):
         gen = make_generator([_road(0, "RG_Road_Asphalt_6m", name="E39")])
         out = gen._generate_roads_layer()
 
-        # Spline parent entity exists with the road name as a comment.
+        # Spline parent entity exists with road name + prefab in the comment.
         assert "SplineShapeEntity Road_0 {" in out
-        assert "// E39" in out
+        assert "// E39 | prefab: RG_Road_Asphalt_6m" in out
 
-        # The prefab child reference is nested inside the spline body.
-        from config.enfusion import ARMA_REFORGER_GUID, ROAD_PREFAB_BASE
-        expected_ref = (
-            f"${{{ARMA_REFORGER_GUID}}}{ROAD_PREFAB_BASE}/RG_Road_Asphalt_6m.et"
-        )
-        assert expected_ref in out
-        assert out.count(expected_ref) == 1
-
-    def test_unknown_prefab_is_normalized_before_emit(self, make_generator):
+    def test_unknown_prefab_is_normalized_in_comment(self, make_generator):
         from config.roads import KNOWN_ROAD_PREFABS
 
         gen = make_generator([_road(0, "RG_Road_Asphalt_99m")])
@@ -107,13 +102,17 @@ class TestRoadsLayerAutoAttach:
 
         # The fabricated 99m name must NOT reach the layer file.
         assert "RG_Road_Asphalt_99m" not in out
-        # Whatever prefab DID get emitted must be from the known-good set.
-        emitted = [p for p in KNOWN_ROAD_PREFABS if f"/{p}.et" in out]
-        assert len(emitted) == 1, (
-            f"Expected exactly one known prefab in output; found {emitted}"
+        # Whatever prefab name DID land in the comment must be a known-good one.
+        matched = [p for p in KNOWN_ROAD_PREFABS if f"prefab: {p}" in out]
+        assert len(matched) == 1, (
+            f"Expected exactly one known prefab in comment; found {matched}"
         )
 
-    def test_each_spline_gets_exactly_one_child_prefab(self, make_generator):
+    def test_no_nested_guid_reference_inside_splines(self, make_generator):
+        """
+        Regression guard for the v1.1.0 hang: no ``${...}`` instance line
+        may appear inside any ``SplineShapeEntity Road_*`` body.
+        """
         gen = make_generator([
             _road(0, "RG_Road_Asphalt_6m"),
             _road(1, "RG_Road_Gravel_4m"),
@@ -121,10 +120,10 @@ class TestRoadsLayerAutoAttach:
         ])
         out = gen._generate_roads_layer()
 
-        # 3 splines, 3 prefab children — one each.
         assert out.count("SplineShapeEntity Road_") == 3
-        from config.enfusion import ROAD_PREFAB_BASE
-        assert out.count(f"{ROAD_PREFAB_BASE}/") == 3
+        # Workbench rejects nested ${guid}path.et inside SplineShapeEntity —
+        # the .layer must contain zero such tokens.
+        assert "${" not in out
 
     def test_no_road_data_emits_friendly_comment(self):
         from services.enfusion_project_generator import EnfusionProjectGenerator
@@ -144,3 +143,38 @@ class TestRoadsLayerAutoAttach:
         gen = make_generator([bad])
         out = gen._generate_roads_layer()
         assert "SplineShapeEntity" not in out
+
+
+class TestRoadsLayerVertexCap:
+    """A long OSM way must be simplified to <= MAX_SPLINE_POINTS vertices
+    so the World Editor doesn't choke on 'Loading entity data...'."""
+
+    def test_long_road_capped_to_max_spline_points(self, make_generator):
+        from config.enfusion import MAX_SPLINE_POINTS
+
+        # 3000 collinear points across a 4 km terrain — RDP collapses easy.
+        n = 3000
+        long_road = _road(0, "RG_Road_Asphalt_6m", name="LongRoad")
+        long_road["spline_points"] = [
+            {"x": 0.001 + (i / (n - 1)) * 3.998, "y": 1.0, "z": 0}
+            for i in range(n)
+        ]
+        long_road["point_count"] = n
+
+        gen = make_generator([long_road])
+        out = gen._generate_roads_layer()
+
+        # Count ShapePoint sp_ entries inside the single Road_0 block.
+        sp_count = out.count("ShapePoint sp_")
+        assert sp_count <= MAX_SPLINE_POINTS, (
+            f"Road spline emitted {sp_count} points; "
+            f"expected <= MAX_SPLINE_POINTS ({MAX_SPLINE_POINTS})"
+        )
+        # Sanity: still at least 2 points so the spline is valid.
+        assert sp_count >= 2
+
+    def test_short_road_passes_through_unchanged(self, make_generator):
+        gen = make_generator([_road(0, "RG_Road_Asphalt_6m")])
+        out = gen._generate_roads_layer()
+        # Fixture has 3 points, well under the cap.
+        assert out.count("ShapePoint sp_") == 3

@@ -117,7 +117,9 @@ class TestSurfaceCoverageFiltering:
 
 
 class TestRoadsPhaseGuide:
-    """G6 — §5 must reflect the new auto-attach behavior."""
+    """v1.2.3 — §5 documents manual generator attach (the v1.1.0 auto-attach
+    nested ``${guid}...`` syntax was reverted because Workbench rejected it
+    and hung at 4% on world load)."""
 
     def test_no_roads_skipped_message(self):
         from services.setup_guide_generator import SetupGuideGenerator
@@ -125,14 +127,17 @@ class TestRoadsPhaseGuide:
         guide = SetupGuideGenerator("TestMap", meta)._phase_roads()
         assert "Phase 5: Roads (Skipped)" in guide
 
-    def test_with_roads_says_auto_attached(self):
+    def test_with_roads_describes_manual_attach(self):
         from services.setup_guide_generator import SetupGuideGenerator
         meta = _metadata(["grass"], {"grass": {"percentage": 100.0}}, road_count=12)
         guide = SetupGuideGenerator("TestMap", meta)._phase_roads()
 
-        # Headline now describes auto-attached prefabs.
-        assert "Auto-attached" in guide
-        # Manual fallback path still documented for the rare break case.
-        assert "Manual Fallback" in guide
-        # The old "Manual Prefab Assignment Required" framing must be gone.
-        assert "Manual Prefab Assignment Required" not in guide
+        # Headline + body describe manual generator attach.
+        assert "manual generator attach" in guide
+        assert "Add Child Entity" in guide
+        assert "RoadGeneratorEntity" in guide
+        # Prefab hint format from the .layer comment is documented.
+        assert "// prefab:" in guide
+        # The auto-attach framing from v1.1.0–v1.2.2 must be gone.
+        assert "Auto-attached" not in guide
+        assert "already carries" not in guide
