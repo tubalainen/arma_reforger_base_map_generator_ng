@@ -45,6 +45,17 @@ from config.buildings import (
     BUILDING_PREFAB_BASE, KNOWN_BUILDING_PREFABS, validate_building_prefab,
 )
 
+# Forest classification
+from config.forests import (
+    KNOWN_FOREST_PREFABS, validate_forest_prefab, forest_type_from_osm,
+)
+
+# Lake / water-body classification
+from config.lakes import (
+    KNOWN_LAKE_PREFABS, validate_lake_prefab,
+)
+
+
 # Surface classes
 from config.surfaces import SURFACE_CLASSES
 
