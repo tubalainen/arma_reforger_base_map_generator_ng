@@ -35,7 +35,9 @@ from config.enfusion import (
     SURFACE_IMPORT_ORDER,
 )
 from services.heightmap_generator import rasterize_features_to_mask
+from services.road_processor import infer_road_surface, infer_road_width
 from services.utils.parallel import parallel_gaussian_filter, parallel_edt
+from services.utils.rasterize import rasterize_lines_per_feature_width
 
 logger = logging.getLogger(__name__)
 
@@ -359,7 +361,7 @@ def generate_surface_masks(
     1. Grass (default complement — fills wherever no other surface claims)
     2. Forest floor (deciduous forest areas)
     3. Pine floor (coniferous forest areas)
-    4. Asphalt (paved roads + urban areas)
+    4. Asphalt (paved roads, per-feature width — matches road splines)
     5. Gravel (gravel/unpaved roads)
     6. Dirt (farmland, dirt paths)
     7. Rock (steep slopes + above treeline)
@@ -407,15 +409,15 @@ def generate_surface_masks(
     if job:
         job.add_log(f"Generating surface masks for {w}x{h} terrain (cell size: {cell_size_m}m)...")
 
-    # Resolution-scaled parameters
+    # Resolution-scaled parameters. Asphalt no longer uses a fixed buffer —
+    # each paved road feature is rasterized at its own OSM-derived width.
     sigma = max(1.0, 2.0 * (cell_size_m / 2.0))
-    road_buffer_px = max(2, int(6.0 / cell_size_m))    # ~6m paved road half-width
     gravel_buffer_px = max(1, int(3.0 / cell_size_m))   # ~3m gravel road half-width
     forest_transition_px = max(3, int(20.0 / cell_size_m))  # ~20m forest edge transition
     sand_transition_px = max(2, int(10.0 / cell_size_m))    # ~10m shoreline transition
 
     logger.debug(
-        f"Resolution-scaled params: sigma={sigma:.1f}, road_buf={road_buffer_px}px, "
+        f"Resolution-scaled params: sigma={sigma:.1f}, "
         f"gravel_buf={gravel_buffer_px}px, forest_edge={forest_transition_px}px"
     )
 
@@ -463,21 +465,10 @@ def generate_surface_masks(
     # Deciduous = all forest minus coniferous
     deciduous_binary = forest_binary & ~coniferous_binary
 
-    # Paved roads
-    logger.debug("Rasterizing road network...")
-    if job:
-        job.progress = 64
-    asphalt_types = [
-        "motorway", "trunk", "primary", "secondary", "tertiary",
-        "residential", "unclassified", "service", "motorway_link",
-        "trunk_link", "primary_link", "secondary_link", "tertiary_link",
-        "living_street", "cycleway",
-    ]
-    asphalt_binary = _rasterize_lines(
-        osm_data.get("roads"), bounds, w, h,
-        buffer_px=road_buffer_px,
-        filter_tags={"highway": asphalt_types},
-    )
+    # Paved roads — built later, after `urban_binary` is rasterized, so that
+    # the per-feature surface classification can consult the urban polygons to
+    # decide whether context-dependent highway types (residential / service /
+    # cycleway / unclassified) end up as asphalt vs gravel. See below.
 
     # Gravel/dirt roads
     gravel_types = ["track", "path", "footway", "bridleway"]
@@ -501,13 +492,78 @@ def generate_surface_masks(
         filter_tags={"type": ["farmland", "farmyard", "allotments", "orchard"]},
     )
 
-    # Urban areas + buildings
+    # Urban polygons — used solely as context input to the road-surface
+    # classifier so the asphalt mask agrees with road_processor's spline
+    # classification (residential/service/cycleway → asphalt inside urban
+    # polygons, gravel outside). Pre-v1.2.5 the urban polygons themselves
+    # (plus all building footprints) were painted as ~50% asphalt, which
+    # produced large rectangular asphalt patches in residential areas with
+    # no actual roads (issue #55). They are no longer painted directly.
     urban_binary = _rasterize_polygons(
         osm_data.get("land_use"), bounds, w, h,
         filter_tags={"type": ["residential", "industrial", "commercial", "retail"]},
     )
-    building_binary = _rasterize_polygons(osm_data.get("buildings"), bounds, w, h)
-    urban_combined = urban_binary | building_binary
+
+    # Paved roads — rasterize each feature at its own width (matching the
+    # per-feature width used by road_processor when emitting splines) and
+    # classify surface using the same infer_road_surface() helper so the
+    # asphalt mask follows exactly the same road set as the splines.
+    logger.debug("Rasterizing road network (per-feature widths)...")
+    if job:
+        job.progress = 64
+
+    def _line_midpoint_in_urban(coords: list) -> bool:
+        if not coords or len(coords) < 2:
+            return False
+        mid_lng, mid_lat = coords[len(coords) // 2]
+        west, south, east, north = bounds
+        if not (west <= mid_lng <= east and south <= mid_lat <= north):
+            return False
+        px = int((mid_lng - west) / (east - west) * w)
+        py = int((north - mid_lat) / (north - south) * h)
+        px = max(0, min(w - 1, px))
+        py = max(0, min(h - 1, py))
+        return bool(urban_binary[py, px])
+
+    def _is_asphalt_feature(feature: dict) -> bool:
+        geom = feature.get("geometry", {})
+        if geom.get("type") not in ("LineString", "MultiLineString"):
+            return False
+        props = feature.get("properties", {})
+        highway = props.get("highway", "")
+        if not highway:
+            return False
+        coords = geom.get("coordinates", [])
+        if geom.get("type") == "MultiLineString":
+            coords = coords[0] if coords else []
+        is_urban = _line_midpoint_in_urban(coords)
+        surface = infer_road_surface(
+            highway_type=highway,
+            osm_surface=props.get("surface", ""),
+            country_code=country_code,
+            is_in_forest=False,
+            is_in_urban=is_urban,
+        )
+        return surface == "asphalt"
+
+    def _feature_buffer_px(feature: dict) -> int:
+        props = feature.get("properties", {})
+        width_m = infer_road_width(
+            highway_type=props.get("highway", ""),
+            osm_width=props.get("width", ""),
+            osm_lanes=props.get("lanes", ""),
+            surface="asphalt",
+        )
+        return max(1, int(round((width_m / 2.0) / cell_size_m)))
+
+    asphalt_binary = rasterize_lines_per_feature_width(
+        osm_data.get("roads") or {"features": []},
+        width=w,
+        height=h,
+        bbox_wgs84=bounds,
+        buffer_px_fn=_feature_buffer_px,
+        filter_fn=_is_asphalt_feature,
+    ).astype(bool)
 
     # =========================================================================
     # Step 3: Compute soft-edge float masks [0.0, 1.0]
@@ -543,9 +599,7 @@ def generate_surface_masks(
         return pine
 
     def _compute_asphalt():
-        asphalt_soft = soft_edge_mask(asphalt_binary, transition_px=2)
-        urban_soft = soft_edge_mask(urban_combined, transition_px=3) * 0.5
-        return np.maximum(asphalt_soft, urban_soft)
+        return soft_edge_mask(asphalt_binary, transition_px=2)
 
     def _compute_gravel():
         """Gravel/unpaved roads."""
