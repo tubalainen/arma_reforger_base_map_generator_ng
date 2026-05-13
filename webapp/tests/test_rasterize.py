@@ -18,7 +18,10 @@ WEBAPP_DIR = Path(__file__).parent.parent
 if str(WEBAPP_DIR) not in sys.path:
     sys.path.insert(0, str(WEBAPP_DIR))
 
-from services.utils.rasterize import rasterize_features_to_mask  # noqa: E402
+from services.utils.rasterize import (  # noqa: E402
+    rasterize_features_to_mask,
+    rasterize_lines_per_feature_width,
+)
 
 
 # A 1°×1° bbox with width/height = 100 px → 1 pixel ≈ 0.01° on each side.
@@ -178,6 +181,91 @@ class TestLines:
         mask = rasterize_features_to_mask(gj, W, H, BBOX, buffer_px=1)
         # The horizontal centre row should have at least one painted pixel
         assert mask[H // 2].sum() > 0
+
+    def test_per_feature_width_renders_wider_for_wider_roads(self):
+        # Two horizontal LineStrings; one labelled width=4, the other width=14.
+        # The buffer_px_fn translates each to a different pixel half-width and
+        # the resulting mask must have a thicker stripe for the wider road.
+        gj = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[0.0, 0.25], [1.0, 0.25]],
+                    },
+                    "properties": {"width_m": 4},
+                },
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[0.0, 0.75], [1.0, 0.75]],
+                    },
+                    "properties": {"width_m": 14},
+                },
+            ],
+        }
+        # Width 14 → half=7 → pixel width 15; width 4 → half=2 → pixel width 5.
+        buffer_fn = lambda f: f["properties"]["width_m"] // 2
+        mask = rasterize_lines_per_feature_width(
+            gj, W, H, BBOX, buffer_px_fn=buffer_fn,
+        )
+
+        # Find the painted-stripe height around each road.
+        # narrow stripe: roughly centered at y = H * (1 - 0.25) = 75
+        # wide stripe:   roughly centered at y = H * (1 - 0.75) = 25
+        narrow_col = mask[:, W // 2]
+        narrow_stripe_y = np.where(narrow_col > 0)[0]
+        wide_col = mask[:, W // 2]
+        # Both stripes share the same column; split by centre y
+        narrow_band = narrow_stripe_y[narrow_stripe_y > H // 2]
+        wide_band = narrow_stripe_y[narrow_stripe_y < H // 2]
+
+        assert len(narrow_band) >= 1
+        assert len(wide_band) >= 1
+        # Wider road must paint strictly more pixels per column.
+        assert len(wide_band) > len(narrow_band), (
+            f"Wider road must produce a thicker stripe; got narrow={len(narrow_band)}, "
+            f"wide={len(wide_band)} — per-feature buffer_px_fn likely ignored."
+        )
+
+    def test_per_feature_filter_excludes_unwanted_features(self):
+        gj = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[0.0, 0.5], [1.0, 0.5]],
+                    },
+                    "properties": {"surface": "asphalt"},
+                },
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[0.5, 0.0], [0.5, 1.0]],
+                    },
+                    "properties": {"surface": "gravel"},
+                },
+            ],
+        }
+        mask = rasterize_lines_per_feature_width(
+            gj, W, H, BBOX,
+            buffer_px_fn=lambda f: 1,
+            filter_fn=lambda f: f["properties"]["surface"] == "asphalt",
+        )
+        # Horizontal asphalt line is drawn (centre row has pixels).
+        assert mask[H // 2].sum() > 0
+        # Vertical gravel line is filtered out (centre column has only the
+        # one painted pixel from the asphalt row).
+        col_pixels = mask[:, W // 2].sum()
+        assert col_pixels <= 3, (
+            f"Filtered-out gravel line should not be drawn; column sum={col_pixels}"
+        )
 
     def test_polygon_holes_dont_erase_lines(self):
         # Polygon with hole AND a line crossing the hole

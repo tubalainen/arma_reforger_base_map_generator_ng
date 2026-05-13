@@ -325,7 +325,7 @@ def reproject_satellite_to_terrain_crs(
     src_bbox: tuple[float, float, float, float],
     dst_crs: str,
     dst_bounds: tuple[float, float, float, float],
-    target_size: int,
+    target_size: tuple[int, int] | int,
 ) -> bool:
     """
     Reproject satellite_map.png from WGS84 to the terrain's native projected CRS.
@@ -347,7 +347,8 @@ def reproject_satellite_to_terrain_crs(
         dst_bounds: Bounding box in dst_crs (min_x, min_y, max_x, max_y).
             These are the _sw_projected and _ne_projected values from
             CoordinateTransformer.
-        target_size: Output pixel dimensions (target_size × target_size).
+        target_size: Output pixel dimensions as (width, height). For backwards
+            compatibility a scalar is also accepted and produces a square output.
 
     Returns:
         True on success, False on failure (original file left unchanged on error).
@@ -360,6 +361,11 @@ def reproject_satellite_to_terrain_crs(
         from rasterio.crs import CRS
         from rasterio.transform import from_bounds
         from rasterio.warp import Resampling, reproject
+
+        if isinstance(target_size, int):
+            target_w, target_h = target_size, target_size
+        else:
+            target_w, target_h = int(target_size[0]), int(target_size[1])
 
         satellite_path = Path(satellite_path)
 
@@ -381,10 +387,10 @@ def reproject_satellite_to_terrain_crs(
         # Destination affine: projected CRS, north-up
         min_x, min_y, max_x, max_y = dst_bounds
         dst_crs_obj = CRS.from_string(dst_crs)
-        dst_transform = from_bounds(min_x, min_y, max_x, max_y, target_size, target_size)
+        dst_transform = from_bounds(min_x, min_y, max_x, max_y, target_w, target_h)
 
-        # Allocate destination
-        dst_raster = np.zeros((3, target_size, target_size), dtype=np.uint8)
+        # Allocate destination (rasterio expects bands × H × W)
+        dst_raster = np.zeros((3, target_h, target_w), dtype=np.uint8)
 
         # Reproject all three bands
         for band in range(3):
@@ -404,7 +410,7 @@ def reproject_satellite_to_terrain_crs(
 
         logger.info(
             f"Reprojected satellite image EPSG:4326 → {dst_crs} "
-            f"({target_size}×{target_size}px, "
+            f"({target_w}×{target_h}px, "
             f"bounds: {min_x:.0f},{min_y:.0f} → {max_x:.0f},{max_y:.0f})"
         )
         return True

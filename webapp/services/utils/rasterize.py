@@ -19,6 +19,8 @@ Polygon-with-holes handling:
 
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw
 from scipy import ndimage
@@ -118,6 +120,72 @@ def rasterize_features_to_mask(
 
     # Convert 0/255 to 0/1
     return (mask > 0).astype(np.uint8)
+
+
+def rasterize_lines_per_feature_width(
+    geojson: dict,
+    width: int,
+    height: int,
+    bbox_wgs84: tuple[float, float, float, float],
+    buffer_px_fn: Callable[[dict], int],
+    filter_fn: Callable[[dict], bool] | None = None,
+) -> np.ndarray:
+    """
+    Rasterize LineString / MultiLineString features with a per-feature buffer.
+
+    Unlike rasterize_features_to_mask which applies one global buffer to every
+    line, this variant calls `buffer_px_fn(feature)` for each feature so that
+    e.g. a 4m residential street and a 14m motorway are rendered at different
+    pixel widths — which lets the asphalt surface mask match the per-feature
+    widths used to generate the road splines.
+
+    Args:
+        geojson: GeoJSON FeatureCollection.
+        width:   Output raster width in pixels.
+        height:  Output raster height in pixels.
+        bbox_wgs84: (west, south, east, north) bounding box.
+        buffer_px_fn: Callable receiving a feature dict and returning the
+            per-feature half-width in pixels. Drawn line width = 2*half+1.
+        filter_fn: Optional callable receiving a feature dict and returning
+            True if the feature should be drawn. Use this to reproduce the
+            road-surface classification logic (so the mask matches the spline).
+
+    Returns:
+        Binary uint8 mask (0 or 1).
+    """
+    west, south, east, north = bbox_wgs84
+    lng_range = east - west
+    lat_range = north - south
+    if lng_range <= 0 or lat_range <= 0:
+        return np.zeros((height, width), dtype=np.uint8)
+
+    line_img = Image.new("L", (width, height), 0)
+    line_draw = ImageDraw.Draw(line_img)
+
+    for feature in geojson.get("features", []):
+        if filter_fn is not None and not filter_fn(feature):
+            continue
+
+        geom = feature.get("geometry", {})
+        geom_type = geom.get("type", "")
+        coords = geom.get("coordinates", [])
+        if not coords:
+            continue
+
+        half = max(0, int(buffer_px_fn(feature)))
+        line_width = max(1, half * 2 + 1)
+
+        if geom_type == "LineString":
+            pixels = _coords_to_pixels(coords, west, north, lng_range, lat_range, width, height)
+            if len(pixels) >= 2:
+                line_draw.line(pixels, fill=255, width=line_width)
+        elif geom_type == "MultiLineString":
+            for line_coords in coords:
+                pixels = _coords_to_pixels(line_coords, west, north, lng_range, lat_range, width, height)
+                if len(pixels) >= 2:
+                    line_draw.line(pixels, fill=255, width=line_width)
+
+    return (np.array(line_img) > 0).astype(np.uint8)
 
 
 def _composite_polygon_with_holes(
