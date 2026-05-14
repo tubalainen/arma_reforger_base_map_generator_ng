@@ -120,6 +120,7 @@ def _cog_merge_rgb(
         (merged_rgb_array, affine_transform) where the array has shape
         (3, H, W) in uint8. Returns (None, None) on failure.
     """
+    import threading
     import time
 
     import rasterio
@@ -177,8 +178,36 @@ def _cog_merge_rgb(
             f"{int(x_max - x_min)}×{int(y_max - y_min)} m "
             f"→ target {target_width}×{target_height} px"
         )
+        if job:
+            # rasterio.merge is a single blocking call with no progress hook —
+            # warn the user up front so the UI doesn't look frozen.
+            job.add_log(
+                f"Merging {len(datasets)} orthophoto tiles into final image — "
+                f"this can take 30–120 seconds and the activity log will look "
+                f"idle while it runs. Please stand by..."
+            )
 
         merge_start = time.monotonic()
+
+        # Heartbeat thread: emit a progress line every 5s so docker logs and the
+        # web UI activity log show forward motion during the blocking merge.
+        heartbeat_stop = threading.Event()
+
+        def _heartbeat():
+            elapsed = 0
+            while not heartbeat_stop.wait(5.0):
+                elapsed += 5
+                logger.info(
+                    f"STAC Bild: merge in progress... {elapsed}s elapsed"
+                )
+                if job:
+                    job.add_log(
+                        f"...still merging orthophoto tiles ({elapsed}s elapsed)"
+                    )
+
+        heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
+        heartbeat_thread.start()
+
         try:
             # indexes=[1, 2, 3] selects the RGB bands (band 4 is NIR — skip it).
             # target_aligned_pixels=True snaps the output extent so pixels are
@@ -200,6 +229,8 @@ def _cog_merge_rgb(
             logger.error(f"rasterio.merge failed for STAC Bild COGs: {exc}")
             return None, None
         finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1.0)
             for ds in datasets:
                 try:
                     ds.close()
