@@ -47,7 +47,7 @@ configure_gdal_threading()
 # Application version (for cache busting)
 # ===========================================================================
 
-APP_VERSION = "1.3.10"  # Increment when static files change OR a new release ships
+APP_VERSION = "1.3.11"  # Increment when static files change OR a new release ships
 
 # ===========================================================================
 # FastAPI app
@@ -463,6 +463,13 @@ async def get_job_status_public(job_id: str, since: int = 0):
     the client wants. The response slices `logs` to entries from that index
     forward and reports `logs_total` so the client can advance its cursor.
     This keeps poll payloads small under fast polling and long log streams.
+
+    Cache-Control: no-store is critical. Without it, Cloudflare/CDN/browser
+    layers can cache the JSON response per (job_id, since) tuple. When the
+    cursor stops advancing because no new logs arrived yet, every subsequent
+    poll hits the same URL and gets a cached "no new logs" response — the
+    cursor never advances, and the activity log appears frozen even though
+    job.logs is growing in memory. Forcing no-store guarantees fresh polls.
     """
     from services.map_generator import get_job
 
@@ -496,7 +503,17 @@ async def get_job_status_public(job_id: str, since: int = 0):
                 "minutes_remaining": max(0, int(time_remaining)),
             }
 
-    return job_data
+    return JSONResponse(
+        content=job_data,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            # Cloudflare-specific bypass: skip the edge cache entirely.
+            "CDN-Cache-Control": "no-store",
+            "Cloudflare-CDN-Cache-Control": "no-store",
+        },
+    )
 
 
 @app.get("/api/job/{job_id}")
