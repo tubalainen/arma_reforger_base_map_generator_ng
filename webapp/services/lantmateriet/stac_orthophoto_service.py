@@ -91,6 +91,7 @@ def _cog_merge_rgb(
     epsg3006_bounds: tuple[float, float, float, float],
     target_width: int,
     target_height: int,
+    job=None,
 ) -> tuple[Optional[np.ndarray], object]:
     """
     Open COG tiles via VSICURL and merge the RGB bands over the target bbox.
@@ -119,22 +120,42 @@ def _cog_merge_rgb(
         (merged_rgb_array, affine_transform) where the array has shape
         (3, H, W) in uint8. Returns (None, None) on failure.
     """
+    import time
+
     import rasterio
     from rasterio.env import Env
     from rasterio.enums import Resampling
     from rasterio.merge import merge as rasterio_merge
 
     x_min, y_min, x_max, y_max = epsg3006_bounds
+    n_hrefs = len(vsicurl_hrefs)
 
     datasets = []
+    open_start = time.monotonic()
     with Env(**_gdal_vsicurl_env()):
         # Open all COG files (only the header is fetched at this point)
-        for href in vsicurl_hrefs:
+        for idx, href in enumerate(vsicurl_hrefs, 1):
             try:
                 ds = rasterio.open(href)
                 datasets.append(ds)
+                # Header-only open should be quick; log every tile so the user
+                # can see the loop progressing (one of ~50 lines per request).
+                logger.info(
+                    f"STAC Bild: opened COG {idx}/{n_hrefs} "
+                    f"({ds.width}×{ds.height} px native)"
+                )
             except Exception as exc:
                 logger.warning(f"Could not open COG {href}: {exc}")
+        open_elapsed = time.monotonic() - open_start
+        logger.info(
+            f"STAC Bild: opened {len(datasets)}/{n_hrefs} COG headers "
+            f"in {open_elapsed:.1f}s"
+        )
+        if job:
+            job.add_log(
+                f"Opened {len(datasets)}/{n_hrefs} Lantmäteriet COG tile headers "
+                f"in {open_elapsed:.1f}s — starting range-merge over target bounds..."
+            )
 
         if not datasets:
             return None, None
@@ -150,6 +171,14 @@ def _cog_merge_rgb(
             (y_max - y_min) / max(target_height, 1),
         )
 
+        logger.info(
+            f"STAC Bild: merging {len(datasets)} tiles at "
+            f"approx_res={approx_res:.2f} m/px over bounds "
+            f"{int(x_max - x_min)}×{int(y_max - y_min)} m "
+            f"→ target {target_width}×{target_height} px"
+        )
+
+        merge_start = time.monotonic()
         try:
             # indexes=[1, 2, 3] selects the RGB bands (band 4 is NIR — skip it).
             # target_aligned_pixels=True snaps the output extent so pixels are
@@ -176,6 +205,18 @@ def _cog_merge_rgb(
                     ds.close()
                 except Exception:
                     pass
+
+        merge_elapsed = time.monotonic() - merge_start
+        merged_mb = merged.nbytes / (1024 * 1024)
+        logger.info(
+            f"STAC Bild: range-merge complete in {merge_elapsed:.1f}s "
+            f"({merged.shape[2]}×{merged.shape[1]} px, {merged_mb:.0f} MB in-memory)"
+        )
+        if job:
+            job.add_log(
+                f"COG range-merge complete in {merge_elapsed:.1f}s "
+                f"({merged.shape[2]}×{merged.shape[1]} px, {merged_mb:.0f} MB)"
+            )
 
     return merged, transform
 
@@ -298,6 +339,7 @@ async def fetch_stac_orthophoto(
         epsg3006_bounds=(x_min, y_min, x_max, y_max),
         target_width=width,
         target_height=height,
+        job=job,
     )
 
     if merged_rgb is None:
@@ -315,6 +357,8 @@ async def fetch_stac_orthophoto(
     #    step-7b reprojection pipeline in map_generator.py is unchanged.
     # ------------------------------------------------------------------ #
     try:
+        import time as _time
+
         from rasterio.crs import CRS
         from rasterio.enums import Resampling
         from rasterio.transform import from_bounds
@@ -325,7 +369,19 @@ async def fetch_stac_orthophoto(
         dst_transform = from_bounds(w, s, e, n, width, height)
         dst_array = np.zeros((3, height, width), dtype=np.uint8)
 
+        warp_start = _time.monotonic()
+        logger.info(
+            f"STAC Bild: warping EPSG:3006 → WGS84 (Lanczos), "
+            f"target {width}×{height} px, 3 bands..."
+        )
+        if job:
+            job.add_log(
+                f"Warping orthophoto EPSG:3006 → WGS84 at {width}×{height} px "
+                f"(Lanczos, 3 bands)..."
+            )
+
         for band in range(3):
+            band_start = _time.monotonic()
             warp_reproject(
                 source=merged_rgb[band],
                 destination=dst_array[band],
@@ -335,6 +391,15 @@ async def fetch_stac_orthophoto(
                 dst_crs=dst_crs,
                 resampling=Resampling.lanczos,
             )
+            logger.info(
+                f"STAC Bild: warped band {band + 1}/3 in "
+                f"{_time.monotonic() - band_start:.1f}s"
+            )
+
+        warp_elapsed = _time.monotonic() - warp_start
+        logger.info(f"STAC Bild: warp complete in {warp_elapsed:.1f}s")
+        if job:
+            job.add_log(f"Orthophoto warp complete in {warp_elapsed:.1f}s")
 
     except Exception as exc:
         logger.error(f"STAC Bild: EPSG:3006 → WGS84 warp failed: {exc}")
@@ -344,16 +409,26 @@ async def fetch_stac_orthophoto(
     # 6. Encode as PNG and return
     # ------------------------------------------------------------------ #
     try:
+        import time as _time
+
         from PIL import Image
 
+        enc_start = _time.monotonic()
+        if job:
+            job.add_log(
+                f"Encoding orthophoto to PNG ({width}×{height} px)..."
+            )
         img = Image.fromarray(dst_array.transpose(1, 2, 0))  # (H, W, 3)
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         png_bytes = buf.getvalue()
+        enc_elapsed = _time.monotonic() - enc_start
 
         logger.info(
             f"STAC Bild: orthophoto ready — {width}×{height} px, "
-            f"{len(png_bytes) / 1024:.0f} KB, imagery year: {newest_year}"
+            f"{len(png_bytes) / (1024 * 1024):.1f} MB, "
+            f"imagery year: {newest_year}, "
+            f"PNG-encode {enc_elapsed:.1f}s"
         )
         if job:
             job.add_log(

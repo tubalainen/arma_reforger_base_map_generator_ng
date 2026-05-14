@@ -362,6 +362,7 @@ def reproject_satellite_to_terrain_crs(
     dst_crs: str,
     dst_bounds: tuple[float, float, float, float],
     target_size: tuple[int, int] | int,
+    job=None,
 ) -> bool:
     """
     Reproject satellite_map.png from WGS84 to the terrain's native projected CRS.
@@ -390,6 +391,7 @@ def reproject_satellite_to_terrain_crs(
         True on success, False on failure (original file left unchanged on error).
     """
     try:
+        import time
         from pathlib import Path
 
         import numpy as np
@@ -404,6 +406,11 @@ def reproject_satellite_to_terrain_crs(
             target_w, target_h = int(target_size[0]), int(target_size[1])
 
         satellite_path = Path(satellite_path)
+        if job:
+            job.add_log(
+                f"Reprojecting satellite WGS84 → {dst_crs} "
+                f"at {target_w}×{target_h} px (Lanczos)..."
+            )
 
         # Load source image
         img = Image.open(satellite_path)
@@ -432,7 +439,9 @@ def reproject_satellite_to_terrain_crs(
         # detail than bilinear — important when the source is sub-metre
         # imagery (Lantmäteriet STAC Bild at 0.16 m/px) being warped to a
         # sub-metre output texture (see #67).
+        warp_start = time.monotonic()
         for band in range(3):
+            band_start = time.monotonic()
             reproject(
                 source=src_raster[band],
                 destination=dst_raster[band],
@@ -441,6 +450,15 @@ def reproject_satellite_to_terrain_crs(
                 dst_transform=dst_transform,
                 dst_crs=dst_crs_obj,
                 resampling=Resampling.lanczos,
+            )
+            logger.info(
+                f"Satellite reproject: band {band + 1}/3 warped in "
+                f"{time.monotonic() - band_start:.1f}s"
+            )
+        warp_elapsed = time.monotonic() - warp_start
+        if job:
+            job.add_log(
+                f"Satellite reprojection complete in {warp_elapsed:.1f}s"
             )
 
         # Save reprojected image back to the same path

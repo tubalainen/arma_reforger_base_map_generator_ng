@@ -1083,6 +1083,7 @@ async def run_generation(job: MapGenerationJob):
                     dst_crs=country_info["crs"],
                     dst_bounds=dst_bounds,
                     target_size=(sat_target_x, sat_target_z),
+                    job=job,
                 )
                 if reproject_ok:
                     job.add_log(
