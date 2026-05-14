@@ -167,8 +167,13 @@ class EnfusionProjectGenerator:
         self.water_features = water_features
         self.building_data = building_data
 
-        # Generate a deterministic GUID from the map name
+        # Addon GUID — identifies this project in addon.gproj and dependency lists
         self.project_guid = generate_guid(self.map_name)
+        # Per-resource GUIDs — each file registered in Enfusion's resource system
+        # must have its own unique GUID; reusing project_guid for both .ent and .conf
+        # caused "duplicate GUID" registration errors in Workbench (issue #61).
+        self.world_ent_guid = generate_guid(self.map_name + ":world.ent")
+        self.mission_conf_guid = generate_guid(self.map_name + ":mission.conf")
 
         # Extract key values from metadata
         self._extract_terrain_params()
@@ -264,7 +269,7 @@ class EnfusionProjectGenerator:
         # World metadata
         files["world.ent.meta"] = self._write_file(
             worlds_dir / f"{self.map_name}.ent.meta",
-            self._generate_meta("ent", f"Worlds/{self.map_name}.ent")
+            self._generate_meta("ent", f"Worlds/{self.map_name}.ent", self.world_ent_guid)
         )
 
         # Layer files
@@ -314,7 +319,7 @@ class EnfusionProjectGenerator:
 
         files["mission.conf.meta"] = self._write_file(
             missions_dir / f"{self.map_name}.conf.meta",
-            self._generate_meta("conf", f"Missions/{self.map_name}.conf")
+            self._generate_meta("conf", f"Missions/{self.map_name}.conf", self.mission_conf_guid)
         )
 
         logger.info(f"Generated {len(files)} Enfusion project files in {output_dir}")
@@ -378,13 +383,14 @@ Layer buildings {{
 }}
 '''
 
-    def _generate_meta(self, resource_type: str, resource_path: str) -> str:
+    def _generate_meta(self, resource_type: str, resource_path: str, guid: str) -> str:
         """
         Generate a .meta file for a resource.
 
         Args:
             resource_type: "ent" or "conf"
             resource_path: Relative path to the resource file.
+            guid: Unique 16-char hex GUID for this specific resource.
         """
         # Determine resource class name
         if resource_type == "ent":
@@ -401,7 +407,7 @@ Layer buildings {{
         )
 
         return f'''MetaFileClass {{
- Name "{{{self.project_guid}}}{resource_path}"
+ Name "{{{guid}}}{resource_path}"
  Configurations {{
 {platforms}
  }}
@@ -1603,7 +1609,7 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
     def _generate_mission_conf(self) -> str:
         """Generate mission header .conf file."""
         return f'''SCR_MissionHeader {{
- World "{{{self.project_guid}}}Worlds/{self.map_name}.ent"
+ World "{{{self.world_ent_guid}}}Worlds/{self.map_name}.ent"
  m_sName "{self.map_name}"
  m_sGameMode "GameMaster"
  m_iPlayerCount 64

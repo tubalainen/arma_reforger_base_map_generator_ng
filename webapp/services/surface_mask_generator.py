@@ -776,6 +776,14 @@ def generate_surface_masks(
             f"After {max_merge_passes} merge passes, {saturation_final['violations']} "
             f"violations remain"
         )
+        if job:
+            job.add_log(
+                f"WARNING: {saturation_final['violations']} terrain block(s) still exceed the "
+                f"5-surface-material limit after auto-merge. Workbench will show "
+                f"'Too many layers' warnings when importing the surface masks — see "
+                f"SETUP_GUIDE Step 3.5 for how to resolve this in Workbench.",
+                "warning",
+            )
 
     # =========================================================================
     # Step 7: Save mask files (only those with actual coverage)

@@ -745,6 +745,17 @@ webapp to get simplified layers.
   comment (or `Reference/roads_reference.csv` for the full per-road list)
 - Splines without a generator render as a thin debug line only
 
+### "resource not registered" warnings for Reference/ files
+Workbench may print warnings such as:
+```
+resource not registered: Reference/features.json
+resource not registered: Reference/metadata.json
+```
+These are **expected and harmless**. The `Reference/` folder contains helper
+files for you (building locations, road list, generation metadata) — they are
+not Enfusion resources. Workbench scans the entire addon directory and warns
+about any file it does not recognise. You can safely ignore these warnings.
+
 ### No sky/atmosphere
 - Check the **default** layer has GenericWorldEntity with sky presets
 - Verify Lighting_Default.et is present and enabled
