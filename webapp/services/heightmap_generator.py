@@ -330,6 +330,95 @@ def flatten_roads_in_heightmap(
     return result
 
 
+_RIVER_WATER_TYPES = ("river", "stream", "canal", "ditch", "drain")
+
+
+def _rasterize_river_mask(
+    water_features: dict,
+    width: int,
+    height: int,
+    bbox_wgs84: tuple[float, float, float, float],
+    pixel_size_m: float,
+) -> np.ndarray:
+    """Rasterize OSM river/stream/canal LineStrings as a buffered band mask."""
+    from services.feature_extractor import _estimate_river_width
+    from services.utils.rasterize import rasterize_lines_per_feature_width
+
+    def _half_width_px(feature: dict) -> int:
+        water_type = (feature.get("properties", {}) or {}).get("water_type", "")
+        width_m = _estimate_river_width(water_type)
+        return max(1, int(round(width_m / (2.0 * pixel_size_m))))
+
+    def _is_river(feature: dict) -> bool:
+        water_type = (feature.get("properties", {}) or {}).get("water_type", "")
+        return water_type in _RIVER_WATER_TYPES
+
+    return rasterize_lines_per_feature_width(
+        water_features,
+        width,
+        height,
+        bbox_wgs84,
+        buffer_px_fn=_half_width_px,
+        filter_fn=_is_river,
+    )
+
+
+def _synthesize_sea_mask(
+    water_features: dict,
+    elevation: np.ndarray,
+    bbox_wgs84: tuple[float, float, float, float],
+    pixel_size_m: float,
+    sea_level_threshold: float = 0.5,
+    coast_proximity_px: int = 50,
+) -> np.ndarray:
+    """
+    Build a sea polygon mask from OSM `natural=coastline` LineStrings + DEM.
+
+    OSM ships the coast as a LineString (with the sea conventionally on the
+    right), not as a polygon — there is no offshore feature we can rasterize
+    directly. We synthesize one by flood-filling low-elevation pixels from
+    bbox-edge seed pixels that are near the coastline. Returns an empty mask
+    for inland maps (no `coastline` features) or maps with no low-elevation
+    pixels at the bbox edge near a coast.
+    """
+    from services.utils.rasterize import rasterize_lines_per_feature_width
+
+    height, width = elevation.shape
+
+    def _is_coastline(feature: dict) -> bool:
+        return (feature.get("properties", {}) or {}).get("water_type") == "coastline"
+
+    coast = rasterize_lines_per_feature_width(
+        water_features,
+        width,
+        height,
+        bbox_wgs84,
+        buffer_px_fn=lambda _f: 0,  # 1-px stroke (line_width = 2*0+1 = 1)
+        filter_fn=_is_coastline,
+    )
+    if coast.sum() == 0:
+        return np.zeros((height, width), dtype=np.uint8)
+
+    low = elevation <= sea_level_threshold
+    edge = np.zeros_like(low, dtype=bool)
+    edge[0, :] = True
+    edge[-1, :] = True
+    edge[:, 0] = True
+    edge[:, -1] = True
+
+    near_coast = ndimage.binary_dilation(
+        coast.astype(bool), iterations=coast_proximity_px,
+    )
+    seed = low & edge & near_coast
+    if not seed.any():
+        seed = low & edge
+        if not seed.any():
+            return np.zeros((height, width), dtype=np.uint8)
+
+    sea = ndimage.binary_propagation(seed, mask=low)
+    return sea.astype(np.uint8)
+
+
 def flatten_water_in_heightmap(
     elevation: np.ndarray,
     water_mask: np.ndarray,
@@ -337,6 +426,7 @@ def flatten_water_in_heightmap(
     pixel_size_m: float = 2.0,
     max_depth_m: float = 8.0,
     shore_slope_m_per_m: float = 0.3,
+    region_depth_map: dict[int, float] | None = None,
 ) -> np.ndarray:
     """
     Set water-surface level per region and carve a depth bowl below it.
@@ -345,14 +435,21 @@ def flatten_water_in_heightmap(
     (10th percentile of the region's source-DEM elevations — robust against
     DEM/OSM misalignment that leaves the odd peak inside a lake polygon). The
     Lake Generator prefab in Enfusion later draws the water surface at this
-    level. To stop the bed being walkable (#66) we lower the terrain inside
-    the polygon as a function of distance to shore:
+    level. The terrain inside the polygon is lowered with a *linear gradient*
+    that runs from 0 at the shore to `region_max_depth` at the deepest
+    interior point:
 
-        depth_m(pixel) = min(max_depth_m, dist_to_shore_m × shore_slope_m_per_m)
+        region_max_depth = min(max_depth_m, max_dist_m × shore_slope_m_per_m)
+        depth(pixel)     = region_max_depth × dist_to_shore(pixel) / max_dist
 
-    Shore pixels sit exactly at the water surface (depth = 0), so the
-    transition with surrounding land stays smooth, while interior pixels of a
-    sufficiently large lake reach `max_depth_m` below the surface.
+    Pre-v1.3.5 every pixel further than `max_depth_m / shore_slope_m_per_m`
+    from any shore hit `max_depth_m` and the whole interior was a flat
+    plateau. The new shape ramps continuously across the region, so the bowl
+    is visible in the heightmap PNG for any region size, while small ponds
+    still stay shallow (their `max_dist_m × slope` cap fires before
+    `max_depth_m`). `region_depth_map`, if given, overrides `max_depth_m`
+    per labelled region so different water types (lakes/rivers/sea) can be
+    carved with different ceilings in a single call.
     """
     if water_mask.sum() == 0:
         return elevation
@@ -362,6 +459,8 @@ def flatten_water_in_heightmap(
 
     water_mask_bool = water_mask.astype(bool)
     labeled, n_features = ndimage.label(water_mask_bool)
+    if n_features == 0:
+        return elevation
 
     region_levels: dict[int, float] = {}
     for i in range(1, n_features + 1):
@@ -373,17 +472,31 @@ def flatten_water_in_heightmap(
         region_levels[i] = water_level
         water_surface_field[region_mask] = water_level
 
-    # Depth bowl: 0 at the shore, growing linearly with distance until clamped.
+    # Single global EDT, then scale per region by that region's maximum
+    # shore distance so every region reaches its full `max_depth_m` at its
+    # deepest interior point — small ponds get a shallow bowl, large lakes
+    # a deep one, both with a continuous gradient.
     dist_px = ndimage.distance_transform_edt(water_mask_bool)
-    depth_m = np.clip(
-        dist_px * pixel_size_m * shore_slope_m_per_m,
-        0.0,
-        max_depth_m,
-    )
+    region_ids = np.arange(1, n_features + 1)
+    max_dist_per_region = ndimage.maximum(dist_px, labeled, index=region_ids)
+
+    region_depth_map = region_depth_map or {}
 
     for region_id, water_level in region_levels.items():
         region_mask = labeled == region_id
-        result[region_mask] = water_level - depth_m[region_mask]
+        max_d_px = float(max_dist_per_region[region_id - 1])
+        if max_d_px <= 0:
+            continue
+        ceiling = float(region_depth_map.get(region_id, max_depth_m))
+        # Per-region cap: small ponds stay shallow (slope × radius caps depth
+        # below max_depth_m), large lakes hit `ceiling` at their deepest
+        # point. Either way the depth ramps linearly to that maximum.
+        region_max_depth = min(
+            ceiling,
+            max_d_px * pixel_size_m * shore_slope_m_per_m,
+        )
+        norm = dist_px[region_mask] / max_d_px  # 0 at shore, 1 at deepest pt
+        result[region_mask] = water_level - region_max_depth * norm
 
     # Shore blending: smooth land just outside water toward the water *surface*
     # level — not the carved bed — so the bowl doesn't bleed into the terrain.
@@ -578,7 +691,9 @@ def generate_heightmap(
                 elevation, road_mask, road_width_px=3, smooth_radius=5,
             )
 
-    # 4. Level water bodies
+    # 4. Level water bodies — four passes, one per water type, so each
+    # gets its own depth ceiling and rivers don't get merged into adjacent
+    # lakes by the connected-component labelling.
     if water_features and water_features.get("features"):
         logger.info("Leveling water bodies...")
         if job:
@@ -586,18 +701,49 @@ def generate_heightmap(
             job.progress = 53
         bbox = metadata.get("bounds")
         if bbox:
-            water_mask = rasterize_features_to_mask(
-                water_features,
-                elevation.shape[1], elevation.shape[0],
-                (bbox.left, bbox.bottom, bbox.right, bbox.top),
-                filter_tags={"natural": ["water"], "water_type": ["lake", "pond", "reservoir"]},
+            bbox_tuple = (bbox.left, bbox.bottom, bbox.right, bbox.top)
+            arr_h, arr_w = elevation.shape
+
+            lake_mask = rasterize_features_to_mask(
+                water_features, arr_w, arr_h, bbox_tuple,
+                filter_tags={
+                    "natural": ["water"],
+                    "water_type": ["lake", "pond", "reservoir", "water", "basin"],
+                },
             )
-            elevation = flatten_water_in_heightmap(
-                elevation,
-                water_mask,
-                transition_px=3,
-                pixel_size_m=target_resolution_m,
+            river_mask = _rasterize_river_mask(
+                water_features, arr_w, arr_h, bbox_tuple, target_resolution_m,
             )
+            wetland_mask = rasterize_features_to_mask(
+                water_features, arr_w, arr_h, bbox_tuple,
+                filter_tags={"water_type": ["wetland"]},
+            )
+            sea_mask = _synthesize_sea_mask(
+                water_features, elevation, bbox_tuple, target_resolution_m,
+            )
+
+            # Carve each type with its own depth ceiling. Order matters only
+            # where masks overlap (a river crossing a lake gets overwritten
+            # by the lake pass — desirable).
+            for mask, max_depth, label in (
+                (river_mask, 2.0, "river/stream"),
+                (wetland_mask, 1.0, "wetland"),
+                (sea_mask, 30.0, "sea"),
+                (lake_mask, 8.0, "lake/pond/reservoir"),
+            ):
+                if mask.sum() == 0:
+                    continue
+                logger.info(
+                    f"Carving bathymetry for {label} mask: "
+                    f"{int(mask.sum())} px, max_depth={max_depth} m"
+                )
+                elevation = flatten_water_in_heightmap(
+                    elevation,
+                    mask,
+                    transition_px=3,
+                    pixel_size_m=target_resolution_m,
+                    max_depth_m=max_depth,
+                )
 
     # 5. Light smoothing pass
     logger.info("Applying final smoothing...")

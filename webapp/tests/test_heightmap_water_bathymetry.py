@@ -22,7 +22,11 @@ if str(WEBAPP_DIR) not in sys.path:
 # scipy is a hard dep of heightmap_generator; skip the module if it's missing
 pytest.importorskip("scipy", reason="scipy is required for heightmap tests")
 
-from services.heightmap_generator import flatten_water_in_heightmap  # noqa: E402
+from services.heightmap_generator import (  # noqa: E402
+    _rasterize_river_mask,
+    _synthesize_sea_mask,
+    flatten_water_in_heightmap,
+)
 
 
 def _flat_terrain(size: int, elev: float = 100.0) -> np.ndarray:
@@ -135,6 +139,72 @@ class TestBathymetry:
         assert left_surface == pytest.approx(20.0, abs=1.0)
         assert right_surface == pytest.approx(50.0, abs=1.0)
 
+    def test_large_lake_has_gradient_not_plateau(self):
+        """A lake big enough that the old constant-slope formula would have
+        flattened most of its interior into a uniform plateau must now show
+        a continuous depth gradient. ≥50 % of the interior pixels must lie
+        strictly between the floor and the water surface."""
+        size = 200
+        elevation = _flat_terrain(size, elev=100.0)
+        mask = _disk_mask(size, radius=90)  # ~180-px diameter — old slope = 0.3 m/m
+                                            #   would plateau anything >54 px wide
+
+        out = flatten_water_in_heightmap(
+            elevation,
+            mask,
+            transition_px=0,
+            pixel_size_m=2.0,
+            max_depth_m=8.0,
+            shore_slope_m_per_m=0.3,
+        )
+
+        interior = out[mask.astype(bool)]
+        surface = 100.0
+        floor = surface - 8.0
+        strictly_between = (interior > floor + 1e-3) & (interior < surface - 1e-3)
+        fraction = float(np.mean(strictly_between))
+        assert fraction >= 0.5, (
+            f"only {fraction:.0%} of interior pixels lie strictly between "
+            f"floor={floor} and surface={surface} — plateau is back"
+        )
+
+    def test_region_depth_map_dispatch(self):
+        """`region_depth_map` overrides `max_depth_m` per labelled region."""
+        from scipy import ndimage as _ndi
+
+        size = 100
+        elevation = _flat_terrain(size, elev=50.0)
+        mask = np.zeros_like(elevation, dtype=np.uint8)
+        yy, xx = np.ogrid[:size, :size]
+        mask[(yy - 50) ** 2 + (xx - 25) ** 2 <= 100] = 1
+        mask[(yy - 50) ** 2 + (xx - 75) ** 2 <= 100] = 1
+
+        labeled, _ = _ndi.label(mask)
+        left_id = int(labeled[50, 25])
+        right_id = int(labeled[50, 75])
+        region_depth_map = {left_id: 1.0, right_id: 8.0}
+
+        out = flatten_water_in_heightmap(
+            elevation,
+            mask,
+            transition_px=0,
+            pixel_size_m=2.0,
+            max_depth_m=8.0,
+            shore_slope_m_per_m=10.0,  # huge slope → ceiling wins
+            region_depth_map=region_depth_map,
+        )
+
+        left_center = out[50, 25]
+        right_center = out[50, 75]
+        assert 48.5 < left_center < 49.5, (
+            f"left center {left_center} not within ~1 m of expected 49 "
+            f"(surface 50, ceiling 1)"
+        )
+        assert 41.5 < right_center < 42.5, (
+            f"right center {right_center} not within ~1 m of expected 42 "
+            f"(surface 50, ceiling 8)"
+        )
+
     def test_shore_blend_does_not_pull_land_down_into_bowl(self):
         """Land just outside the lake must not be dragged toward the bowl
         bottom — only toward the water surface."""
@@ -164,4 +234,90 @@ class TestBathymetry:
         assert shore_outside > midpoint, (
             f"transition pixel {shore_outside:.2f} dragged below "
             f"midpoint {midpoint:.2f} — shore blend leaked the bowl"
+        )
+
+
+def _line_feature(coords, water_type):
+    return {
+        "type": "Feature",
+        "properties": {"water_type": water_type},
+        "geometry": {"type": "LineString", "coordinates": coords},
+    }
+
+
+class TestRiverRasterization:
+    def test_river_linestring_carves_a_band(self):
+        """A horizontal river LineString must produce a band of pixels several
+        rows tall (matching its OSM-derived 15m width at 2 m/px)."""
+        bbox = (0.0, 0.0, 0.001, 0.001)  # ~111 m × 111 m tile (synthetic)
+        w_lon, s_lat, e_lon, n_lat = bbox
+        # A horizontal line across the bbox at mid-latitude
+        coords = [
+            [w_lon + 0.0001, (s_lat + n_lat) / 2],
+            [e_lon - 0.0001, (s_lat + n_lat) / 2],
+        ]
+        features = {"type": "FeatureCollection", "features": [
+            _line_feature(coords, "river"),
+        ]}
+
+        mask = _rasterize_river_mask(features, 64, 64, bbox, pixel_size_m=2.0)
+
+        # River = 15 m / (2 × 2 m) ≈ 4 px half-width → 9 px line width
+        rows_with_river = np.where(mask.sum(axis=1) > 0)[0]
+        assert rows_with_river.size >= 5, (
+            f"river carved only {rows_with_river.size} rows — expected ≥5"
+        )
+        # And rows on the edge of the bbox stay dry (river is mid-y only)
+        assert mask[0, :].sum() == 0
+        assert mask[-1, :].sum() == 0
+
+    def test_non_river_feature_is_ignored(self):
+        """A coastline LineString must not be rasterized as a river."""
+        bbox = (0.0, 0.0, 0.001, 0.001)
+        coords = [[0.0001, 0.0005], [0.0009, 0.0005]]
+        features = {"type": "FeatureCollection", "features": [
+            _line_feature(coords, "coastline"),
+        ]}
+        mask = _rasterize_river_mask(features, 64, 64, bbox, pixel_size_m=2.0)
+        assert mask.sum() == 0
+
+
+class TestSeaSynthesis:
+    def test_sea_synthesis_inland_map_returns_empty(self):
+        """No coastline features → empty mask even when low ground exists."""
+        bbox = (0.0, 0.0, 0.001, 0.001)
+        features = {"type": "FeatureCollection", "features": []}
+        elevation = np.full((64, 64), -5.0, dtype=np.float32)  # all below sea
+        mask = _synthesize_sea_mask(features, elevation, bbox, pixel_size_m=2.0)
+        assert mask.sum() == 0
+
+    def test_sea_synthesis_low_half_with_coastline(self):
+        """Left half low + right half high + coastline down the middle →
+        sea mask covers ≥90 % of the left half and 0 % of the right half."""
+        size = 100
+        bbox = (0.0, 0.0, 0.001, 0.001)
+        elevation = np.zeros((size, size), dtype=np.float32)
+        elevation[:, : size // 2] = -2.0       # left half: below sea level
+        elevation[:, size // 2 :] = 20.0       # right half: well above
+
+        # Coastline LineString runs vertically near the middle of the bbox
+        coords = [
+            [bbox[0] + (bbox[2] - bbox[0]) * 0.5, bbox[1] + 1e-6],
+            [bbox[0] + (bbox[2] - bbox[0]) * 0.5, bbox[3] - 1e-6],
+        ]
+        features = {"type": "FeatureCollection", "features": [
+            _line_feature(coords, "coastline"),
+        ]}
+
+        mask = _synthesize_sea_mask(features, elevation, bbox, pixel_size_m=2.0)
+
+        left = mask[:, : size // 2]
+        right = mask[:, size // 2 :]
+        left_fraction = float(left.mean())
+        right_fraction = float(right.mean())
+        assert left_fraction >= 0.9, (
+            f"sea mask only covers {left_fraction:.0%} of the low (left) half"
+        )
+        assert right_fraction == 0.0, (
+            f"sea mask leaked into the high (right) half ({right_fraction:.0%})"
         )
