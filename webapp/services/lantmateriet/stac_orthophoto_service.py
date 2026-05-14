@@ -333,7 +333,7 @@ async def fetch_stac_orthophoto(
                 src_crs=src_crs,
                 dst_transform=dst_transform,
                 dst_crs=dst_crs,
-                resampling=Resampling.bilinear,
+                resampling=Resampling.lanczos,
             )
 
     except Exception as exc:
