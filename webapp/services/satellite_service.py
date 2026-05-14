@@ -316,6 +316,42 @@ async def fetch_satellite_imagery(
 
 
 # ---------------------------------------------------------------------------
+# Satellite texture dimensions
+# ---------------------------------------------------------------------------
+
+# How many times larger the satellite texture is than the heightmap, per axis.
+# The diffuse texture is imported via the Terrain Tool > Import Satellite Map
+# step, independent of the heightmap vertex grid, so it can carry far more
+# detail. With high-resolution sources (e.g. Lantmäteriet STAC Bild at
+# 0.16 m/px) the previous heightmap-matched dimensions threw away ~15× the
+# source detail (#67).
+SATELLITE_RESOLUTION_MULTIPLIER = 4
+
+# Hard cap on satellite texture dimensions. 8192 is a safe modern texture
+# size; larger values risk Workbench import problems and big RAM/disk costs.
+SATELLITE_MAX_DIM = 8192
+
+
+def compute_satellite_target_dims(
+    heightmap_x: int, heightmap_z: int,
+) -> tuple[int, int]:
+    """
+    Compute the target satellite texture dimensions given the heightmap size.
+
+    Multiplies each axis by ``SATELLITE_RESOLUTION_MULTIPLIER`` and caps at
+    ``SATELLITE_MAX_DIM`` so we don't exceed the engine's texture limit or
+    blow up the export size.
+    """
+    # Never let the satellite be smaller than the heightmap, even at the
+    # 8193 vertex max where multiplier × dim exceeds the cap by a lot.
+    sat_x = min(SATELLITE_MAX_DIM, heightmap_x * SATELLITE_RESOLUTION_MULTIPLIER)
+    sat_z = min(SATELLITE_MAX_DIM, heightmap_z * SATELLITE_RESOLUTION_MULTIPLIER)
+    sat_x = max(sat_x, heightmap_x)
+    sat_z = max(sat_z, heightmap_z)
+    return int(sat_x), int(sat_z)
+
+
+# ---------------------------------------------------------------------------
 # Satellite reprojection (WGS84 → terrain CRS)
 # ---------------------------------------------------------------------------
 
@@ -392,7 +428,10 @@ def reproject_satellite_to_terrain_crs(
         # Allocate destination (rasterio expects bands × H × W)
         dst_raster = np.zeros((3, target_h, target_w), dtype=np.uint8)
 
-        # Reproject all three bands
+        # Reproject all three bands. Lanczos preserves more high-frequency
+        # detail than bilinear — important when the source is sub-metre
+        # imagery (Lantmäteriet STAC Bild at 0.16 m/px) being warped to a
+        # sub-metre output texture (see #67).
         for band in range(3):
             reproject(
                 source=src_raster[band],
@@ -401,7 +440,7 @@ def reproject_satellite_to_terrain_crs(
                 src_crs=src_crs,
                 dst_transform=dst_transform,
                 dst_crs=dst_crs_obj,
-                resampling=Resampling.bilinear,
+                resampling=Resampling.lanczos,
             )
 
         # Save reprojected image back to the same path

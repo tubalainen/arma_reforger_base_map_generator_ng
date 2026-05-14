@@ -963,13 +963,27 @@ async def run_generation(job: MapGenerationJob):
             terrain_size_m=terrain_size_m,
         )
 
+        # Render the satellite texture at higher resolution than the heightmap.
+        # The diffuse texture imported via Terrain Tool > Import Satellite Map
+        # is independent of the heightmap vertex grid, so we can preserve much
+        # more of the source detail (Lantmäteriet STAC Bild is 0.16 m/px, vs
+        # the heightmap's ~2.4 m/px at 2049 vertices on a 5 km map — fixes #67).
+        from services.satellite_service import (
+            SATELLITE_MAX_DIM,
+            compute_satellite_target_dims,
+        )
+
+        sat_target_x, sat_target_z = compute_satellite_target_dims(
+            target_size_x, target_size_z,
+        )
+
         # If the transformer uses a projected CRS, expand the WGS84 fetch box to
         # the envelope of the projected rectangle and scale the fetch dimensions
         # proportionally to keep the same pixel density. This fixes the diagonal
         # tilt / corner crop caused by source-extent mismatch in reprojection.
         sat_fetch_bbox = bbox
-        sat_fetch_w = target_size_x
-        sat_fetch_h = target_size_z
+        sat_fetch_w = sat_target_x
+        sat_fetch_h = sat_target_z
         if transformer._use_pyproj:
             env_w, env_s, env_e, env_n = transformer.wgs84_envelope_of_projected_extent()
             sat_fetch_bbox = {
@@ -983,8 +997,8 @@ async def run_generation(job: MapGenerationJob):
             if orig_lon_span > 0 and orig_lat_span > 0:
                 ratio_x = (env_e - env_w) / orig_lon_span
                 ratio_y = (env_n - env_s) / orig_lat_span
-                sat_fetch_w = int(math.ceil(target_size_x * ratio_x))
-                sat_fetch_h = int(math.ceil(target_size_z * ratio_y))
+                sat_fetch_w = min(SATELLITE_MAX_DIM, int(math.ceil(sat_target_x * ratio_x)))
+                sat_fetch_h = min(SATELLITE_MAX_DIM, int(math.ceil(sat_target_z * ratio_y)))
 
         job.current_step = "Downloading satellite imagery..."
         job.progress = 75
@@ -1068,7 +1082,7 @@ async def run_generation(job: MapGenerationJob):
                     ),
                     dst_crs=country_info["crs"],
                     dst_bounds=dst_bounds,
-                    target_size=(target_size_x, target_size_z),
+                    target_size=(sat_target_x, sat_target_z),
                 )
                 if reproject_ok:
                     job.add_log(
