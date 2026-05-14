@@ -14,10 +14,9 @@ import os
 from collections import defaultdict
 from datetime import datetime, timedelta
 
-from fastapi import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +79,31 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         cutoff = datetime.utcnow() - window
         return [t for t in timestamps if t > cutoff]
 
+    def _rate_limited_response(
+        self,
+        detail: str,
+        limit: int,
+        retry_after_seconds: int,
+    ) -> JSONResponse:
+        """
+        Build the 429 response.
+
+        Important: we MUST return a Response from a BaseHTTPMiddleware.dispatch
+        rather than `raise HTTPException(...)`. Exceptions raised inside a
+        BaseHTTPMiddleware do not flow through FastAPI's exception handlers —
+        Starlette wraps them in an anyio ExceptionGroup that surfaces as a
+        500 Internal Server Error, hiding the real 429 from the client.
+        """
+        return JSONResponse(
+            status_code=429,
+            content={"detail": detail},
+            headers={
+                "Retry-After": str(retry_after_seconds),
+                "X-RateLimit-Limit": str(limit),
+                "X-RateLimit-Remaining": "0",
+            },
+        )
+
     async def dispatch(self, request: Request, call_next) -> Response:
         path = request.url.path
 
@@ -104,9 +128,10 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         if len(self.request_counts[key]) >= REQUESTS_PER_MINUTE:
             logger.warning(f"Rate limit exceeded for {key}: general limit")
-            raise HTTPException(
-                status_code=429,
+            return self._rate_limited_response(
                 detail="Too many requests. Please slow down.",
+                limit=REQUESTS_PER_MINUTE,
+                retry_after_seconds=60,
             )
 
         # Special stricter rate limit for /api/generate
@@ -117,9 +142,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
             if len(self.generate_counts[key]) >= GENERATE_PER_HOUR:
                 logger.warning(f"Rate limit exceeded for {key}: generate limit")
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"Generation limit reached ({GENERATE_PER_HOUR}/hour). Please try again later.",
+                return self._rate_limited_response(
+                    detail=(
+                        f"Generation limit reached ({GENERATE_PER_HOUR}/hour). "
+                        f"Please try again later."
+                    ),
+                    limit=GENERATE_PER_HOUR,
+                    retry_after_seconds=3600,
                 )
 
             self.generate_counts[key].append(now)
