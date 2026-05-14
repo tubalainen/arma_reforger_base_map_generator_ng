@@ -19,6 +19,7 @@ The orchestrator (run_generation) coordinates them and tracks progress.
 import asyncio
 import json
 import logging
+import math
 import secrets
 import shutil
 import threading
@@ -945,7 +946,46 @@ async def run_generation(job: MapGenerationJob):
             "success"
         )
 
-        # Step 6: Fetch satellite imagery (75% -> 77%)
+        # Step 6: Coordinate transformer + satellite imagery (75% -> 77%)
+        # The transformer is needed BEFORE the satellite fetch so we can compute
+        # the WGS84 envelope of the projected terrain rectangle and fetch a region
+        # that fully covers it. Without this, the WGS84-axis-aligned fetch bbox
+        # leaves two corners of the projected destination uncovered (see #58).
+        from services.coordinate_transformer import CoordinateTransformer
+
+        terrain_size_m = (
+            float(heightmap_result["terrain_size_m"].split("x")[0]),
+            float(heightmap_result["terrain_size_m"].split("x")[1]),
+        )
+        transformer = CoordinateTransformer(
+            bbox=bbox,
+            crs=country_info["crs"],
+            terrain_size_m=terrain_size_m,
+        )
+
+        # If the transformer uses a projected CRS, expand the WGS84 fetch box to
+        # the envelope of the projected rectangle and scale the fetch dimensions
+        # proportionally to keep the same pixel density. This fixes the diagonal
+        # tilt / corner crop caused by source-extent mismatch in reprojection.
+        sat_fetch_bbox = bbox
+        sat_fetch_w = target_size_x
+        sat_fetch_h = target_size_z
+        if transformer._use_pyproj:
+            env_w, env_s, env_e, env_n = transformer.wgs84_envelope_of_projected_extent()
+            sat_fetch_bbox = {
+                "west": env_w,
+                "south": env_s,
+                "east": env_e,
+                "north": env_n,
+            }
+            orig_lon_span = bbox["east"] - bbox["west"]
+            orig_lat_span = bbox["north"] - bbox["south"]
+            if orig_lon_span > 0 and orig_lat_span > 0:
+                ratio_x = (env_e - env_w) / orig_lon_span
+                ratio_y = (env_n - env_s) / orig_lat_span
+                sat_fetch_w = int(math.ceil(target_size_x * ratio_x))
+                sat_fetch_h = int(math.ceil(target_size_z * ratio_y))
+
         job.current_step = "Downloading satellite imagery..."
         job.progress = 75
         logger.info(f"[{job.job_id}] Step 6: Satellite imagery")
@@ -955,9 +995,9 @@ async def run_generation(job: MapGenerationJob):
             job.add_log("Downloading satellite imagery from Sentinel-2 Cloudless...")
 
         satellite_result = await step_fetch_satellite_imagery(
-            bbox=bbox,
-            target_size_x=target_size_x,
-            target_size_z=target_size_z,
+            bbox=sat_fetch_bbox,
+            target_size_x=sat_fetch_w,
+            target_size_z=sat_fetch_h,
             output_dir=output_dir,
             country_codes=country_info.get("countries", []),
             job=job,
@@ -981,22 +1021,12 @@ async def run_generation(job: MapGenerationJob):
             logger.warning(f"[{job.job_id}] Satellite imagery download failed, continuing without it")
             job.add_log("Satellite imagery download failed (continuing without it)", "warning")
 
-        # Step 7: Coordinate transformation setup (77% -> 78%)
+        # Step 7: Coordinate transformation logging (77% -> 78%)
+        # (Transformer was created above, before the satellite fetch.)
         job.current_step = "Setting up coordinate transformation..."
         job.progress = 77
         logger.info(f"[{job.job_id}] Step 7: Coordinate transformation")
 
-        from services.coordinate_transformer import CoordinateTransformer
-
-        terrain_size_m = (
-            float(heightmap_result["terrain_size_m"].split("x")[0]),
-            float(heightmap_result["terrain_size_m"].split("x")[1]),
-        )
-        transformer = CoordinateTransformer(
-            bbox=bbox,
-            crs=country_info["crs"],
-            terrain_size_m=terrain_size_m,
-        )
         coord_verification = transformer.get_verification_data()
         job.add_log(
             f"Coordinate transform: {coord_verification['method']} ({country_info['crs']}), "
@@ -1030,7 +1060,12 @@ async def run_generation(job: MapGenerationJob):
                 )
                 reproject_ok = reproject_satellite_to_terrain_crs(
                     satellite_path=satellite_path,
-                    src_bbox=(bbox["west"], bbox["south"], bbox["east"], bbox["north"]),
+                    src_bbox=(
+                        sat_fetch_bbox["west"],
+                        sat_fetch_bbox["south"],
+                        sat_fetch_bbox["east"],
+                        sat_fetch_bbox["north"],
+                    ),
                     dst_crs=country_info["crs"],
                     dst_bounds=dst_bounds,
                     target_size=(target_size_x, target_size_z),

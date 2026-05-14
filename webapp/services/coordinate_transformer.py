@@ -133,6 +133,53 @@ class CoordinateTransformer:
             f"(center lat: {self.center_lat:.2f}°)"
         )
 
+    def wgs84_envelope_of_projected_extent(
+        self, samples_per_edge: int = 16
+    ) -> tuple[float, float, float, float]:
+        """
+        Return the WGS84 bbox that fully encloses the projected terrain rectangle.
+
+        The user picks a WGS84 lat/lon rectangle, but the terrain's pixel grid
+        (heightmap, roads, satellite reprojection) is an axis-aligned rectangle
+        in the projected CRS — and the two rectangles are *not* the same set of
+        points. At high latitudes the meridians converge enough that the four
+        corners of the projected rectangle, when unprojected, fall outside the
+        original WGS84 bbox by up to ~1 km on a 5 km map.
+
+        This method walks the perimeter of the projected rectangle, unprojects
+        each sample to WGS84, and returns the min/max envelope. Use this as the
+        WGS84 fetch bbox for satellite imagery so the reprojection step has
+        source pixels covering every destination pixel.
+
+        Returns:
+            (west, south, east, north) in WGS84 degrees. For non-projected
+            transformers this is the original bbox.
+        """
+        if not self._use_pyproj:
+            return (self.west, self.south, self.east, self.north)
+
+        sw_x, sw_y = self._sw_projected
+        ne_x, ne_y = self._ne_projected
+
+        xs = np.linspace(sw_x, ne_x, samples_per_edge)
+        ys = np.linspace(sw_y, ne_y, samples_per_edge)
+        edge_px = np.concatenate([
+            xs, xs,
+            np.full(samples_per_edge, sw_x), np.full(samples_per_edge, ne_x),
+        ])
+        edge_py = np.concatenate([
+            np.full(samples_per_edge, sw_y), np.full(samples_per_edge, ne_y),
+            ys, ys,
+        ])
+
+        lons, lats = self._transformer_to_wgs84.transform(edge_px, edge_py)
+        return (
+            float(np.min(lons)),
+            float(np.min(lats)),
+            float(np.max(lons)),
+            float(np.max(lats)),
+        )
+
     @property
     def projected_width(self) -> float:
         """Width of the projected terrain in metres."""
