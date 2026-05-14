@@ -334,40 +334,73 @@ def flatten_water_in_heightmap(
     elevation: np.ndarray,
     water_mask: np.ndarray,
     transition_px: int = 5,
+    pixel_size_m: float = 2.0,
+    max_depth_m: float = 8.0,
+    shore_slope_m_per_m: float = 0.3,
 ) -> np.ndarray:
     """
-    Flatten lake surfaces and carve river beds.
+    Set water-surface level per region and carve a depth bowl below it.
 
-    Labels connected water regions and sets each to its 10th percentile
-    elevation (water flows to lowest point). Smooths shoreline transitions.
+    For each connected water region we compute a single water-surface elevation
+    (10th percentile of the region's source-DEM elevations — robust against
+    DEM/OSM misalignment that leaves the odd peak inside a lake polygon). The
+    Lake Generator prefab in Enfusion later draws the water surface at this
+    level. To stop the bed being walkable (#66) we lower the terrain inside
+    the polygon as a function of distance to shore:
+
+        depth_m(pixel) = min(max_depth_m, dist_to_shore_m × shore_slope_m_per_m)
+
+    Shore pixels sit exactly at the water surface (depth = 0), so the
+    transition with surrounding land stays smooth, while interior pixels of a
+    sufficiently large lake reach `max_depth_m` below the surface.
     """
     if water_mask.sum() == 0:
         return elevation
 
     result = elevation.copy()
+    water_surface_field = elevation.copy()
 
-    labeled, n_features = ndimage.label(water_mask)
+    water_mask_bool = water_mask.astype(bool)
+    labeled, n_features = ndimage.label(water_mask_bool)
 
+    region_levels: dict[int, float] = {}
     for i in range(1, n_features + 1):
         region_mask = labeled == i
         region_elevations = elevation[region_mask]
         if region_elevations.size == 0:
             continue
-        water_level = np.percentile(region_elevations, 10)
-        result[region_mask] = water_level
+        water_level = float(np.percentile(region_elevations, 10))
+        region_levels[i] = water_level
+        water_surface_field[region_mask] = water_level
 
+    # Depth bowl: 0 at the shore, growing linearly with distance until clamped.
+    dist_px = ndimage.distance_transform_edt(water_mask_bool)
+    depth_m = np.clip(
+        dist_px * pixel_size_m * shore_slope_m_per_m,
+        0.0,
+        max_depth_m,
+    )
+
+    for region_id, water_level in region_levels.items():
+        region_mask = labeled == region_id
+        result[region_mask] = water_level - depth_m[region_mask]
+
+    # Shore blending: smooth land just outside water toward the water *surface*
+    # level — not the carved bed — so the bowl doesn't bleed into the terrain.
     if transition_px > 0:
         dilated = ndimage.binary_dilation(
-            water_mask.astype(bool), iterations=transition_px,
+            water_mask_bool, iterations=transition_px,
         )
-        transition_zone = dilated & ~water_mask.astype(bool)
+        transition_zone = dilated & ~water_mask_bool
 
         if transition_zone.any():
             blend = parallel_gaussian_filter(
                 water_mask.astype(np.float32), sigma=transition_px,
             )
             blend = np.clip(blend, 0, 1)
-            water_elev = parallel_gaussian_filter(result, sigma=transition_px)
+            water_elev = parallel_gaussian_filter(
+                water_surface_field, sigma=transition_px,
+            )
             result = np.where(
                 transition_zone,
                 elevation * (1 - blend) + water_elev * blend,
@@ -560,7 +593,10 @@ def generate_heightmap(
                 filter_tags={"natural": ["water"], "water_type": ["lake", "pond", "reservoir"]},
             )
             elevation = flatten_water_in_heightmap(
-                elevation, water_mask, transition_px=3,
+                elevation,
+                water_mask,
+                transition_px=3,
+                pixel_size_m=target_resolution_m,
             )
 
     # 5. Light smoothing pass
