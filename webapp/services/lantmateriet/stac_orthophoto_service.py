@@ -27,6 +27,7 @@ Workflow:
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 from typing import Optional
@@ -364,8 +365,14 @@ async def fetch_stac_orthophoto(
 
     # ------------------------------------------------------------------ #
     # 4. COG windowed merge (synchronous; rasterio issues HTTP range reqs)
+    #
+    # Run on a worker thread via asyncio.to_thread so the event loop stays
+    # responsive — otherwise the 30-300s blocking merge freezes the FastAPI
+    # /job/{id} polling endpoint and the web UI activity log can't update
+    # even though job.add_log entries are being appended in the background.
     # ------------------------------------------------------------------ #
-    merged_rgb, src_transform = _cog_merge_rgb(
+    merged_rgb, src_transform = await asyncio.to_thread(
+        _cog_merge_rgb,
         vsicurl_hrefs,
         epsg3006_bounds=(x_min, y_min, x_max, y_max),
         target_width=width,
@@ -411,9 +418,12 @@ async def fetch_stac_orthophoto(
                 f"(Lanczos, 3 bands)..."
             )
 
+        # Each band warp is ~9s blocking. Run each on a worker thread so the
+        # event loop unblocks between bands and the UI activity log can refresh.
         for band in range(3):
             band_start = _time.monotonic()
-            warp_reproject(
+            await asyncio.to_thread(
+                warp_reproject,
                 source=merged_rgb[band],
                 destination=dst_array[band],
                 src_transform=src_transform,
@@ -422,10 +432,14 @@ async def fetch_stac_orthophoto(
                 dst_crs=dst_crs,
                 resampling=Resampling.lanczos,
             )
+            band_elapsed = _time.monotonic() - band_start
             logger.info(
-                f"STAC Bild: warped band {band + 1}/3 in "
-                f"{_time.monotonic() - band_start:.1f}s"
+                f"STAC Bild: warped band {band + 1}/3 in {band_elapsed:.1f}s"
             )
+            if job:
+                job.add_log(
+                    f"Warped orthophoto band {band + 1}/3 in {band_elapsed:.1f}s"
+                )
 
         warp_elapsed = _time.monotonic() - warp_start
         logger.info(f"STAC Bild: warp complete in {warp_elapsed:.1f}s")
@@ -449,10 +463,13 @@ async def fetch_stac_orthophoto(
             job.add_log(
                 f"Encoding orthophoto to PNG ({width}×{height} px)..."
             )
-        img = Image.fromarray(dst_array.transpose(1, 2, 0))  # (H, W, 3)
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        png_bytes = buf.getvalue()
+        def _encode_png() -> bytes:
+            img = Image.fromarray(dst_array.transpose(1, 2, 0))  # (H, W, 3)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+
+        png_bytes = await asyncio.to_thread(_encode_png)
         enc_elapsed = _time.monotonic() - enc_start
 
         logger.info(
