@@ -46,6 +46,24 @@ _SEARCH_HEADERS = {
 }
 
 
+def _wgs84_bbox_to_epsg3006_envelope(
+    bbox_wgs84: tuple[float, float, float, float],
+) -> tuple[float, float, float, float]:
+    """
+    Convert a WGS84 (west, south, east, north) bbox to the EPSG:3006 envelope
+    that fully contains its four corners. See fetch_stac_orthophoto() for why
+    SW+NE-only is insufficient.
+    """
+    from pyproj import Transformer
+
+    w, s, e, n = bbox_wgs84
+    to_3006 = Transformer.from_crs("EPSG:4326", "EPSG:3006", always_xy=True)
+    corner_lons = [w, e, e, w]
+    corner_lats = [s, s, n, n]
+    xs, ys = to_3006.transform(corner_lons, corner_lats)
+    return (float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys)))
+
+
 def _gdal_vsicurl_env() -> dict:
     """
     Return GDAL environment variables for authenticated VSICURL access.
@@ -77,15 +95,24 @@ def _cog_merge_rgb(
     """
     Open COG tiles via VSICURL and merge the RGB bands over the target bbox.
 
-    Uses rasterio.merge() with a bounds + resolution constraint so that GDAL
-    issues HTTP range requests only for the pixels and overview level that
-    correspond to our target output size — typically a few MB rather than the
-    full 460 MB tile.
+    Uses rasterio.merge() with a bounds constraint so GDAL issues HTTP range
+    requests only for the pixels we need. The merged array preserves the
+    source COG's native resolution; the caller resamples to the final size
+    in the EPSG:3006 → WGS84 warp step.
+
+    Why no explicit `res=`: passing a target resolution computed as
+    `(x_max - x_min) / target_width` almost never matches the COG's native
+    pixel size, so rasterio resamples each source tile separately into the
+    target grid. Because each tile's pixel grid origin is independent, the
+    fractional offset can leave 1-pixel-wide unfilled columns between tiles —
+    which `nodata=0` then renders as the black streak in issue #65. Using
+    the source's native resolution keeps tile windows on a single shared
+    pixel grid and removes the seam.
 
     Args:
         vsicurl_hrefs: List of '/vsicurl/https://dl1.lantmateriet.se/...' paths.
         epsg3006_bounds: (x_min, y_min, x_max, y_max) in EPSG:3006 (metres).
-        target_width: Output pixel width.
+        target_width: Output pixel width (used only for the overview hint).
         target_height: Output pixel height.
 
     Returns:
@@ -98,10 +125,6 @@ def _cog_merge_rgb(
     from rasterio.merge import merge as rasterio_merge
 
     x_min, y_min, x_max, y_max = epsg3006_bounds
-    # Target resolution in metres/pixel — rasterio.merge selects the closest
-    # COG overview level automatically
-    res_x = (x_max - x_min) / target_width
-    res_y = (y_max - y_min) / target_height
 
     datasets = []
     with Env(**_gdal_vsicurl_env()):
@@ -116,20 +139,34 @@ def _cog_merge_rgb(
         if not datasets:
             return None, None
 
+        # Hint rasterio toward a coarse overview level when one would suffice:
+        # pick a target resolution that yields roughly `target_width` pixels at
+        # the requested bounds, but only as a hint — merge uses the *closest
+        # source overview* whose resolution is finer or equal to this value.
+        # The merged output keeps that overview's native resolution (no
+        # secondary resampling here), so tile windows stay grid-aligned.
+        approx_res = max(
+            (x_max - x_min) / max(target_width, 1),
+            (y_max - y_min) / max(target_height, 1),
+        )
+
         try:
-            # merge() with bounds + res triggers windowed COG reads:
-            # only pixels within epsg3006_bounds at ~res_x m/px are fetched.
             # indexes=[1, 2, 3] selects the RGB bands (band 4 is NIR — skip it).
+            # target_aligned_pixels=True snaps the output extent so pixels are
+            # integer multiples of `res` from the origin: every source tile
+            # resamples into the *same* shared grid, so adjacent tiles can no
+            # longer leave a sub-pixel sliver between them.
             merged, transform = rasterio_merge(
                 datasets,
                 bounds=(x_min, y_min, x_max, y_max),
-                res=(res_x, res_y),
+                target_aligned_pixels=True,
+                res=approx_res,
                 resampling=Resampling.bilinear,
                 indexes=[1, 2, 3],
                 nodata=0,
             )
-            # merged shape: (3, H, W) — may differ slightly from target due to
-            # COG overview snapping; caller resamples to exact size
+            # merged shape: (3, H, W) — exact pixel count depends on the
+            # overview rasterio picked, the caller warps to the final size.
         except Exception as exc:
             logger.error(f"rasterio.merge failed for STAC Bild COGs: {exc}")
             return None, None
@@ -236,14 +273,19 @@ async def fetch_stac_orthophoto(
         return None
 
     # ------------------------------------------------------------------ #
-    # 3. Convert WGS84 bbox to EPSG:3006 for the COG bounds query
+    # 3. Convert WGS84 bbox to EPSG:3006 for the COG bounds query.
+    #
+    # A WGS84 lat/lon rectangle is *not* an axis-aligned rectangle in
+    # EPSG:3006 — its four corners project to a trapezoid because the
+    # meridians converge. Transforming only the SW and NE corners (the
+    # pre-v1.3.4 behaviour) loses the wings of the trapezoid: tiles that
+    # actually cover the eastern and western edges of the WGS84 area fall
+    # outside the merge bounds and the resulting orthophoto has missing
+    # strips near those edges. We project all four corners and take the
+    # axis-aligned envelope so every WGS84 corner is inside the merge bbox.
     # ------------------------------------------------------------------ #
     try:
-        from pyproj import Transformer
-
-        to_3006 = Transformer.from_crs("EPSG:4326", "EPSG:3006", always_xy=True)
-        x_min, y_min = to_3006.transform(w, s)
-        x_max, y_max = to_3006.transform(e, n)
+        x_min, y_min, x_max, y_max = _wgs84_bbox_to_epsg3006_envelope((w, s, e, n))
     except Exception as exc:
         logger.error(f"STAC Bild: EPSG:4326 → EPSG:3006 transform failed: {exc}")
         return None
