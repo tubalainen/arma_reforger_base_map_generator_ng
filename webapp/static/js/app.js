@@ -21,19 +21,26 @@ const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png
     maxZoom: 19,
 });
 
+// Sentinel-2 cloudless mosaic via EOX. Native pixel resolution is ~10 m
+// (≈ z14), but EOX serves overzoom tiles up to z21, so we let Leaflet
+// render up to maxZoom and only stop fetching new tiles past
+// maxNativeZoom — past that point tiles are upscaled rather than blank.
+// Without this, switching to satellite while zoomed in (the common case
+// for picking a small bbox) shows nothing. (Issue #2.)
 const satelliteLayer = L.tileLayer(
-    'https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2021_3857/default/GoogleMapsCompatible/{z}/{y}/{x}.jpg', {
-    attribution: '&copy; <a href="https://s2maps.eu">Sentinel-2 cloudless by EOX</a>',
-    maxZoom: 15,
+    'https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2024_3857/default/GoogleMapsCompatible/{z}/{y}/{x}.jpg', {
+    attribution: '&copy; <a href="https://s2maps.eu">Sentinel-2 cloudless 2024 by EOX</a>',
+    maxZoom: 19,
+    maxNativeZoom: 18,
 });
 
-// Add default layer
-osmLayer.addTo(map);
+// Default to satellite — most users are picking a real-world area to map.
+satelliteLayer.addTo(map);
 
 // Layer control
 L.control.layers({
-    'OpenStreetMap': osmLayer,
     'Satellite (Sentinel-2)': satelliteLayer,
+    'OpenStreetMap': osmLayer,
 }, null, { position: 'topright' }).addTo(map);
 
 // ===========================================================================
