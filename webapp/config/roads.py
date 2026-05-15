@@ -84,6 +84,50 @@ PREFAB_SURFACE: dict[str, str] = {
     "RG_TrailGravel_01": "gravel",
 }
 
+# Per-prefab GUIDs sourced from the Atlas 2 SCR_SHPPrefabDataList block
+# (docs/Atlas2.pdf, p. 12 — the shapefile-import prefab table). These are
+# the GUIDs Workbench uses when resolving the prefab in roads.layer.
+# Used by the setup guide to emit fully-qualified `${guid}path.et` strings
+# the editor user can paste into the RoadGeneratorEntity Prefab field.
+PREFAB_GUIDS: dict[str, str] = {
+    "RG_Road_Asphalt_E_01":            "02AF8C5A31EC3A53",
+    "RG_Road_Asphalt_E_01_DashedLine": "5E336AEB0923963F",
+    "RG_Road_Asphalt_E_01_Narrow":     "31086BE1AF790FC5",
+    "RG_Road_Asphalt_E_02":            "6EFBB8BA8D28B57D",
+    "RG_Road_Asphalt_E_03":            "8B67F44381CD2216",
+    "RG_Road_Cobblestone_01":          "ABC15429070F8391",
+    "RG_Road_Dirt_01":                 "2D9AEF10F5FEA98B",
+    "RG_Road_Dirt_02":                 "41CEDBF0493A26A5",
+    "RG_Road_Forest_01":               "6C770E9E60A49C05",
+    "RG_TrailDirt_01":                 "47E7068FE332800D",
+    "RG_TrailGravel_01":               "98DF2267CDD17758",
+}
+
+
+def fully_qualified_road_prefab(prefab_name: str) -> str | None:
+    """
+    Return the fully-qualified `{<guid>}PrefabLibrary/Generators/Roads/<sub>/<prefab>.et`
+    string for a known Atlas 2 road prefab, or None if the name isn't catalogued.
+
+    Subdirectory mapping (from Atlas 2 SCR_SHPPrefabDataList):
+      Asphalt/    → all RG_Road_Asphalt_E_*.et
+      Cobblestone/→ RG_Road_Cobblestone_01.et
+      Dirt/       → RG_Road_Dirt_01..02.et, RG_Road_Forest_01.et,
+                    RG_TrailDirt_01.et, RG_TrailGravel_01.et
+    """
+    guid = PREFAB_GUIDS.get(prefab_name)
+    if guid is None:
+        return None
+    surface = PREFAB_SURFACE.get(prefab_name, "asphalt")
+    # All non-asphalt non-cobblestone names live under Dirt/ per Atlas 2.
+    if surface == "asphalt":
+        subdir = "Asphalt"
+    elif surface == "cobblestone":
+        subdir = "Cobblestone"
+    else:
+        subdir = "Dirt"
+    return f"{{{guid}}}PrefabLibrary/Generators/Roads/{subdir}/{prefab_name}.et"
+
 # Single source of truth for OSM highway → Enfusion road mapping.
 # Each row picks the closest Atlas 2 prefab for the OSM tag's typical
 # width and surface.

@@ -478,16 +478,21 @@ coordinates and following terrain elevation.
 panel tells you what each road is at a glance:
 
 ```
-SplineShapeEntity Road_E4_Asphalt   {{ // E4 | prefab: RG_Road_Asphalt_E_03 | paints: asphalt
-SplineShapeEntity Road_Storgatan_Asphalt {{ // Storgatan | prefab: RG_Road_Asphalt_E_01_DashedLine | paints: asphalt
-SplineShapeEntity Road_Asphalt_NE_001 {{ // prefab: RG_Road_Asphalt_E_01_Narrow | paints: asphalt
+SplineShapeEntity Road_E4_Asphalt   {{ // E4 | prefab: RG_Road_Asphalt_E_03 | paints: asphalt | fq: {{8B67F44381CD2216}}PrefabLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_03.et
+SplineShapeEntity Road_Storgatan_Asphalt {{ // Storgatan | prefab: RG_Road_Asphalt_E_01_DashedLine | paints: asphalt | fq: {{5E336AEB0923963F}}PrefabLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_01_DashedLine.et
+SplineShapeEntity Road_Asphalt_NE_001 {{ // prefab: RG_Road_Asphalt_E_01_Narrow | paints: asphalt | fq: {{31086BE1AF790FC5}}PrefabLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_01_Narrow.et
 ```
 
-Prefab names are now the **Atlas 2 canonical set** (`RG_Road_Asphalt_E_01..03`,
+The `fq:` token in each comment is the fully-qualified `{{guid}}path.et`
+string you can paste directly into the **RoadGeneratorEntity > Prefab**
+field, taking the GUID from Atlas 2's `SCR_SHPPrefabDataList` (the
+canonical source — see [`docs/Atlas2.pdf`](../docs/Atlas2.pdf) p. 12).
+
+Prefab names are the **Atlas 2 canonical set** (`RG_Road_Asphalt_E_01..03`,
 `RG_Road_Asphalt_E_01_DashedLine`, `RG_Road_Asphalt_E_01_Narrow`,
 `RG_Road_Dirt_01`, `RG_Road_Dirt_02`, `RG_Road_Forest_01`,
 `RG_Road_Cobblestone_01`, `RG_TrailDirt_01`, `RG_TrailGravel_01`) —
-replacing the fabricated `RG_Road_<Surface>_<W>m` scheme used in v1.3.x.
+all under `PrefabLibrary/Generators/Roads/{{Asphalt|Cobblestone|Dirt}}/`.
 
 Splines are emitted **without** an attached `RoadGeneratorEntity` child —
 v1.1.0 attempted to auto-attach the generator but the resulting nested
@@ -538,9 +543,17 @@ that behaviour. Attach the generator manually as described below.
 > `Forest_<species>_<quadrant>_<NNN>` (`Forest_Pine_NE_001`,
 > `Forest_Deciduous_SW_004`). Lakes use the OSM name when present
 > (`Lake_Vanern`, `Lake_Storsjon`) and fall back to `Lake_<quadrant>_<NNN>`.
-> Rivers use the OSM name (`River_Dalalven`) or `River_River_<quadrant>_<NNN>`
-> for anonymous waterways. Atlas 2 names its example river generator
-> prefab `R_RiverMedium_01.et`.
+> Rivers use the OSM name (`River_Dalalven`) or `River_<quadrant>_<NNN>`
+> for anonymous waterways.
+>
+> Reference prefabs Atlas 2 calls out by name
+> ([`docs/Atlas2.pdf`](../docs/Atlas2.pdf)):
+>
+> - Rivers: drag `R_RiverMedium_01.et` onto the river spline (Resource
+>   Browser → search "RiverMedium" or navigate
+>   `ArmaReforger > Prefabs > World > Water > River`).
+> - Forests: `FG_Forest_Spruce1.et`, `FG_Forest_Pine1.et` (note the
+>   trailing `1`, no underscore separator).
 
 The vegetation and water layers contain pre-drawn splines projected to
 Enfusion local coordinates and clipped to the terrain. When a Forest or

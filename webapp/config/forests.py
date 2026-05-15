@@ -14,10 +14,19 @@ from __future__ import annotations
 # Keys are produced by forest_type_from_osm() from raw OSM feature properties.
 # Valid keys: "coniferous", "deciduous", "mixed", "scrub", "heath"
 #
-# Example (confirm paths against your Reforger install before committing):
-#   "coniferous": "Prefabs/WEGenerators/Forest/FG_PineForest_01.et",
-#   "deciduous":  "Prefabs/WEGenerators/Forest/FG_DeciduousForest_01.et",
-#   "mixed":      "Prefabs/WEGenerators/Forest/FG_MixedForest_01.et",
+# Atlas 2 (docs/Atlas2.pdf, p. 19 — "Import Shapes with Forest Generators")
+# names two specific Forest Generator prefabs by example:
+#   FG_Forest_Spruce1.et   (ID 1 in the SCR_SHPPrefabDataList)
+#   FG_Forest_Pine1.et     (ID 2)
+# Note the trailing `1` with no underscore separator. The doc doesn't pin
+# the directory path; search the Resource Browser for "FG_Forest" to find
+# the actual location in your Reforger install. The catalogue below ships
+# empty so we never fabricate a path that fails to resolve in Workbench.
+#
+# Example (confirm against your install before committing):
+#   "coniferous": "<dir>/FG_Forest_Pine1.et",
+#   "deciduous":  "<dir>/FG_Forest_Deciduous1.et",
+#   "mixed":      "<dir>/FG_Forest_Spruce1.et",
 KNOWN_FOREST_PREFABS: dict[str, str] = {}
 
 

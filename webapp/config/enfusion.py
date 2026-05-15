@@ -130,7 +130,7 @@ WORLD_PREFABS = {
     "camera": "Prefabs/World/Game/SCR_CameraManager.et",
     "time_weather": "Prefabs/World/Game/TimeAndWeatherManager.et",
     "projectile_sounds": "Prefabs/World/Game/ProjectileSoundsManager.et",
-    "map_entity": "Prefabs/World/Game/MapEntity.et",
+    "map_entity": "Prefabs/World/Game/MapEntity_Default.et",
     "sound_world": "Prefabs/World/Game/SoundWorld_Base.et",
     "forest_sync": "Prefabs/World/Game/ForestSyncManager.et",
     "destruction": "Prefabs/World/Game/DestructionManager.et",
@@ -195,7 +195,25 @@ def resolve_ambient_prefab(country_codes: list[str] | None) -> str:
 # Generator prefab base paths (verified from wiki Directory Structure)
 # ---------------------------------------------------------------------------
 
-ROAD_PREFAB_BASE = "Prefabs/WEGenerators/Roads"
+# Atlas 2 (Jakerod) cross-reference (docs/Atlas2.pdf, p. 12 — the
+# SCR_SHPPrefabDataList block) documents the canonical paths:
+#   PrefabLibrary/Generators/Roads/<Asphalt|Cobblestone|Dirt>/<prefab>.et
+# The legacy `Prefabs/WEGenerators/Roads/` path used in v1.3.x and earlier
+# was a guess; Atlas 2's PDF (committed to the repo at docs/Atlas2.pdf)
+# is the source of truth.
+ROAD_PREFAB_BASE = "PrefabLibrary/Generators/Roads"
+# Per-surface subdirectories — used when the SETUP_GUIDE quotes a
+# fully-qualified path for the editor user to drag.
+ROAD_PREFAB_SUBDIRS: dict[str, str] = {
+    "asphalt": "Asphalt",
+    "cobblestone": "Cobblestone",
+    "dirt": "Dirt",       # also hosts gravel trail prefabs
+    "gravel": "Dirt",     # RG_TrailGravel_01 / RG_Road_Forest_01 live here
+}
+# Forest / Lake generator base paths remain unverified against Atlas 2
+# (the doc doesn't list them in a SCR_*PrefabDataList form). The
+# KNOWN_FOREST_PREFABS / KNOWN_LAKE_PREFABS catalogues ship empty so we
+# never fabricate unverified paths.
 FOREST_PREFAB_BASE = "Prefabs/WEGenerators/Forest"
 LAKE_PREFAB_BASE = "Prefabs/WEGenerators/Water/Lake"
 

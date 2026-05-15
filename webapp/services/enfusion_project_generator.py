@@ -37,7 +37,7 @@ from config.enfusion import (
     resolve_ambient_prefab,
     compute_height_scale,
 )
-from config.roads import validate_road_prefab
+from config.roads import validate_road_prefab, fully_qualified_road_prefab
 from config.forests import validate_forest_prefab, forest_type_from_osm
 from config.lakes import validate_lake_prefab
 from services.entity_naming import EntityNamer, expected_surface
@@ -711,6 +711,13 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['env_probe']} {{
             comment_parts.append(f"prefab: {prefab_name}")
             if paints:
                 comment_parts.append(f"paints: {paints}")
+            # When the prefab is in the Atlas 2 catalogue, also surface its
+            # fully-qualified `{guid}path.et` form so the editor user can
+            # paste it directly into the RoadGeneratorEntity Prefab field
+            # (saves a Resource Browser search).
+            fq = fully_qualified_road_prefab(prefab_name)
+            if fq:
+                comment_parts.append(f"fq: {fq}")
             comment = " // " + " | ".join(comment_parts)
 
             entity = (

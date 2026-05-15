@@ -96,10 +96,13 @@ class TestRoadsLayerSplineOnly:
 
         # v1.4.0 — entities are now named from the OSM ref/name.
         assert "SplineShapeEntity Road_E39_Asphalt {" in out
-        # Comment still surfaces the road name, prefab, and `paints:` surface.
+        # Comment surfaces the road name, prefab name, paints, and the
+        # fully-qualified `{guid}path.et` form (the latter sourced from
+        # Atlas 2's SCR_SHPPrefabDataList, p. 12).
         assert "// E39" in out
         assert "prefab: RG_Road_Asphalt_E_01" in out
         assert "paints: asphalt" in out
+        assert "fq: {02AF8C5A31EC3A53}PrefabLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_01.et" in out
 
     def test_unknown_prefab_is_normalized_in_comment(self, make_generator):
         from config.roads import KNOWN_ROAD_PREFABS

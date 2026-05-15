@@ -91,6 +91,33 @@ class TestAtlas2RoadCatalog:
         from config.roads import validate_road_prefab
         assert validate_road_prefab("RG_Road_Asphalt_E_03") == "RG_Road_Asphalt_E_03"
 
+    def test_fully_qualified_road_prefab_includes_atlas2_guid_and_subdir(self):
+        """The fq: form must use the exact GUID + path from Atlas 2 p. 12."""
+        from config.roads import fully_qualified_road_prefab
+        # Asphalt prefab → Asphalt/ subdirectory + verified GUID.
+        assert fully_qualified_road_prefab("RG_Road_Asphalt_E_03") == (
+            "{8B67F44381CD2216}PrefabLibrary/Generators/Roads/Asphalt/"
+            "RG_Road_Asphalt_E_03.et"
+        )
+        # Cobblestone prefab → Cobblestone/ subdirectory.
+        assert fully_qualified_road_prefab("RG_Road_Cobblestone_01") == (
+            "{ABC15429070F8391}PrefabLibrary/Generators/Roads/Cobblestone/"
+            "RG_Road_Cobblestone_01.et"
+        )
+        # Forest/trail prefabs live under Dirt/ per Atlas 2 SCR_SHPPrefabDataList.
+        assert fully_qualified_road_prefab("RG_Road_Forest_01") == (
+            "{6C770E9E60A49C05}PrefabLibrary/Generators/Roads/Dirt/"
+            "RG_Road_Forest_01.et"
+        )
+        assert fully_qualified_road_prefab("RG_TrailGravel_01") == (
+            "{98DF2267CDD17758}PrefabLibrary/Generators/Roads/Dirt/"
+            "RG_TrailGravel_01.et"
+        )
+
+    def test_fully_qualified_road_prefab_returns_none_for_unknown(self):
+        from config.roads import fully_qualified_road_prefab
+        assert fully_qualified_road_prefab("RG_Road_Asphalt_8m") is None
+
 
 # ---------------------------------------------------------------------------
 # Bootstrap entities (issue #81)
@@ -125,6 +152,11 @@ class TestBootstrapEntities:
             assert path in out, (
                 f"Bootstrap entity {key!r} ({path}) is not in the managers layer"
             )
+
+    def test_map_entity_uses_atlas2_default_suffix(self):
+        """Atlas 2 p. 16 names MapEntity_Default.et, not MapEntity.et."""
+        from config.enfusion import WORLD_PREFABS
+        assert WORLD_PREFABS["map_entity"].endswith("MapEntity_Default.et")
 
     def test_ambient_prefab_is_in_managers_layer(self):
         from services.enfusion_project_generator import EnfusionProjectGenerator
