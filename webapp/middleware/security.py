@@ -44,7 +44,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "default-src 'self'; "
             "script-src 'self' https://unpkg.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
             "style-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
-            "img-src 'self' data: blob: https://*.tile.openstreetmap.org https://server.arcgisonline.com; "
+            "img-src 'self' data: blob: https://*.tile.openstreetmap.org https://server.arcgisonline.com https://tiles.maps.eox.at; "
             "connect-src 'self'; "
             "font-src 'self' https://cdn.jsdelivr.net; "
             "frame-ancestors 'self'; "
