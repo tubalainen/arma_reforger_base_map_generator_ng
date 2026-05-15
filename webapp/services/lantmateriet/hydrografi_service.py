@@ -31,36 +31,35 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # localType → water_type mapping
 # ---------------------------------------------------------------------------
-# These are INSPIRE localType values used by Lantmäteriet.
-# Unknown values are logged at INFO and assigned a default.
+# These are the localType values documented in the Lantmäteriet Hydrografi
+# product description (e_pb_hydrografi_nedladdning v1.1, 2023-03-03).
+# The API emits Swedish terms in lowercase; lookups are normalised via
+# .lower() so any future casing drift still matches.
+#
+# Canal detection is NOT done via localType — Lantmäteriet exposes a separate
+# `origin: "natural" | "manMade"` field on watercourses for that. See
+# _watercourse_water_type() below.
 
 _STANDING_WATER_TYPE_MAP: dict[str, str] = {
-    # Swedish localType values (may appear in Swedish or English)
-    "Sjö": "lake",
-    "Lake": "lake",
-    "Damm": "pond",
-    "Pond": "pond",
-    "Reservoar": "reservoir",
-    "Reservoir": "reservoir",
-    "Magasin": "reservoir",
-    "Bassäng": "pond",
+    "sjö": "lake",
 }
 
 _WATERCOURSE_TYPE_MAP: dict[str, str] = {
-    # Rivers (larger watercourses)
-    "Flod": "river",
-    "River": "river",
-    "Å": "river",
-    "Älv": "river",
-    # Canals
-    "Kanal": "canal",
-    "Canal": "canal",
-    # Streams (smaller watercourses) — default
-    "Bäck": "stream",
-    "Stream": "stream",
-    "Dike": "ditch",
-    "Ditch": "ditch",
+    "vattendrag": "stream",
+    # Synthetic centre lines drawn through lake/watercourse polygons. Mapped
+    # so they don't trigger the "unknown" log; downstream filtering is a
+    # separate concern (they duplicate the polygon geometry).
+    "stomlinje": "stream",
+    "stomlinje, otydlig": "stream",
 }
+
+
+def _watercourse_water_type(props: dict) -> str:
+    """Pick a water_type for a WatercourseLine, honouring origin=manMade."""
+    if (props.get("origin") or "").strip().lower() == "manmade":
+        return "canal"
+    local_type = (props.get("localType") or "").strip().lower()
+    return _WATERCOURSE_TYPE_MAP.get(local_type, "stream")
 
 
 def _extract_name(feature: dict) -> str:
@@ -140,9 +139,9 @@ def _translate_standing_water(features: list[dict]) -> list[dict]:
 
     for f in features:
         props = f.get("properties", {})
-        local_type = props.get("localType", "")
+        local_type = (props.get("localType") or "").strip().lower()
 
-        water_type = _STANDING_WATER_TYPE_MAP.get(local_type, None)
+        water_type = _STANDING_WATER_TYPE_MAP.get(local_type)
         if water_type is None:
             water_type = "lake"  # Default for standing water
             if local_type:
@@ -177,13 +176,11 @@ def _translate_watercourse_line(features: list[dict]) -> list[dict]:
 
     for f in features:
         props = f.get("properties", {})
-        local_type = props.get("localType", "")
+        local_type = (props.get("localType") or "").strip().lower()
+        water_type = _watercourse_water_type(props)
 
-        water_type = _WATERCOURSE_TYPE_MAP.get(local_type, None)
-        if water_type is None:
-            water_type = "stream"  # Default for watercourse lines
-            if local_type:
-                unknown_types[local_type] = unknown_types.get(local_type, 0) + 1
+        if water_type == "stream" and local_type and local_type not in _WATERCOURSE_TYPE_MAP:
+            unknown_types[local_type] = unknown_types.get(local_type, 0) + 1
 
         translated.append({
             "type": "Feature",
