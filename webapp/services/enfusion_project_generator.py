@@ -33,11 +33,14 @@ from config.enfusion import (
     PROJECT_NAME_ALLOWED_CHARS,
     PROJECT_NAME_MAX_LENGTH,
     MAX_SPLINE_POINTS,
+    MANDATORY_BOOTSTRAP_KEYS,
+    resolve_ambient_prefab,
     compute_height_scale,
 )
-from config.roads import validate_road_prefab
+from config.roads import validate_road_prefab, fully_qualified_road_prefab
 from config.forests import validate_forest_prefab, forest_type_from_osm
 from config.lakes import validate_lake_prefab
+from services.entity_naming import EntityNamer, expected_surface
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +135,7 @@ class EnfusionProjectGenerator:
         forest_features: Optional[dict] = None,
         water_features: Optional[dict] = None,
         building_data: Optional[dict] = None,
+        country_codes: Optional[list[str]] = None,
     ):
         """
         Initialize the project generator.
@@ -166,22 +170,45 @@ class EnfusionProjectGenerator:
         self.forest_features = forest_features
         self.water_features = water_features
         self.building_data = building_data
+        # Pick the AmbientSounds_*.et variant from the detected country list,
+        # falling back to the metadata's input.countries if not passed directly.
+        if country_codes is None:
+            country_codes = (
+                self.metadata.get("input", {}).get("countries", []) or []
+            )
+        self.country_codes = list(country_codes)
+        self.ambient_prefab = resolve_ambient_prefab(self.country_codes)
+        # surface_assignments accumulated as splines are emitted, then written
+        # to surface_assignments.json by the map_generator pipeline.
+        self.surface_assignments: dict[str, str] = {}
+        # Reset on each `generate_all` so a generator reused across requests
+        # never carries naming state forward — see _reset_naming_state().
+        self._namer: Optional[EntityNamer] = None
 
-        # Addon GUID — identifies this project in addon.gproj and dependency lists
+        # Addon GUID — identifies this project in addon.gproj and dependency
+        # lists. The world.ent and mission.conf each need their own unique
+        # GUID; reusing project_guid for both caused "duplicate GUID"
+        # registration errors in Workbench (issue #61).
         self.project_guid = generate_guid(self.map_name)
-        # Per-resource GUIDs — each file registered in Enfusion's resource system
-        # must have its own unique GUID; reusing project_guid for both .ent and .conf
-        # caused "duplicate GUID" registration errors in Workbench (issue #61).
         self.world_ent_guid = generate_guid(self.map_name + ":world.ent")
         self.mission_conf_guid = generate_guid(self.map_name + ":mission.conf")
 
-        # Extract key values from metadata
+        # Extract key values from metadata (terrain dims, elevation, location).
         self._extract_terrain_params()
 
         logger.info(
             f"EnfusionProjectGenerator initialized: name={self.map_name}, "
             f"guid={self.project_guid}, faces={self.face_count_x}x{self.face_count_z}"
         )
+
+    def _reset_naming_state(self) -> None:
+        """Re-create the EntityNamer + clear surface assignments."""
+        self._namer = EntityNamer(self.terrain_width, self.terrain_depth)
+        self.surface_assignments = {}
+
+    def _record_surface(self, entity_name: str, surface: Optional[str]) -> None:
+        if surface:
+            self.surface_assignments[entity_name] = surface
 
     def _extract_terrain_params(self):
         """Extract terrain parameters from metadata."""
@@ -248,6 +275,10 @@ class EnfusionProjectGenerator:
         missions_dir = output_dir / "Missions"
         worlds_dir.mkdir(parents=True, exist_ok=True)
         missions_dir.mkdir(parents=True, exist_ok=True)
+
+        # Fresh per-call naming state so two consecutive generations from the
+        # same generator never share name counters / collision tracking.
+        self._reset_naming_state()
 
         if job:
             job.add_log("Generating addon project file...")
@@ -488,37 +519,71 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['env_probe']} {{
         return content
 
     def _generate_managers_layer(self) -> str:
-        """Generate the managers layer with camera, weather, audio, etc."""
+        """
+        Generate the managers layer with the full Atlas 2 bootstrap entity set.
+
+        Emits every key from MANDATORY_BOOTSTRAP_KEYS (camera, weather, audio,
+        destruction, MP destruction, preload, radio, music, forest sync,
+        projectile sounds, map entity) plus the country-resolved AmbientSounds
+        prefab. v1.4.0 added the four MP / music / preload / radio entries to
+        close the gap against the manual "Atlas 2" workflow (issue #81).
+        """
         center_x = self.terrain_width / 2
         center_z = self.terrain_depth / 2
         camera_y = self.max_elevation + 200
 
-        content = f'''${{58D0FB3206B6F859}}{WORLD_PREFABS['camera']} {{
- coords {center_x:.1f} {camera_y:.1f} {center_z:.1f}
- PlayFromCameraPosition 1
-}}
-${{58D0FB3206B6F859}}{WORLD_PREFABS['time_weather']} {{
- coords 0 0 0
- Latitude {self.center_lat:.4f}
- Longitude {self.center_lon:.4f}
-}}
-${{58D0FB3206B6F859}}{WORLD_PREFABS['projectile_sounds']} {{
- coords 0 0 0
-}}
-${{58D0FB3206B6F859}}{WORLD_PREFABS['map_entity']} {{
- coords 0 0 0
-}}
-${{58D0FB3206B6F859}}{WORLD_PREFABS['sound_world']} {{
- coords 0 0 0
-}}
-${{58D0FB3206B6F859}}{WORLD_PREFABS['forest_sync']} {{
- coords 0 0 0
-}}
-${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
- coords 0 0 0
-}}
-'''
-        return content
+        header = (
+            f"// Managers layer — bootstrap entities required for a fully\n"
+            f"// functional Reforger world (Atlas 2 alignment, v1.4.0).\n"
+            f"// Entries: {', '.join(MANDATORY_BOOTSTRAP_KEYS)}\n"
+            f"// Ambient sounds: resolved to {self.ambient_prefab}\n"
+            f"//   (countries detected: {', '.join(self.country_codes) or 'none'})\n"
+        )
+
+        guid = ARMA_REFORGER_GUID
+        parts = [
+            f'${{{guid}}}{WORLD_PREFABS["camera"]} {{\n'
+            f' coords {center_x:.1f} {camera_y:.1f} {center_z:.1f}\n'
+            f' PlayFromCameraPosition 1\n'
+            f'}}',
+            f'${{{guid}}}{WORLD_PREFABS["time_weather"]} {{\n'
+            f' coords 0 0 0\n'
+            f' Latitude {self.center_lat:.4f}\n'
+            f' Longitude {self.center_lon:.4f}\n'
+            f'}}',
+            f'${{{guid}}}{WORLD_PREFABS["projectile_sounds"]} {{\n'
+            f' coords 0 0 0\n'
+            f'}}',
+            f'${{{guid}}}{WORLD_PREFABS["map_entity"]} {{\n'
+            f' coords 0 0 0\n'
+            f'}}',
+            f'${{{guid}}}{WORLD_PREFABS["sound_world"]} {{\n'
+            f' coords 0 0 0\n'
+            f'}}',
+            f'${{{guid}}}{WORLD_PREFABS["forest_sync"]} {{\n'
+            f' coords 0 0 0\n'
+            f'}}',
+            f'${{{guid}}}{WORLD_PREFABS["destruction"]} {{\n'
+            f' coords 0 0 0\n'
+            f'}}',
+            f'${{{guid}}}{WORLD_PREFABS["mp_destruction"]} {{\n'
+            f' coords 0 0 0\n'
+            f'}}',
+            f'${{{guid}}}{WORLD_PREFABS["preload"]} {{\n'
+            f' coords 0 0 0\n'
+            f'}}',
+            f'${{{guid}}}{WORLD_PREFABS["radio_broadcast"]} {{\n'
+            f' coords 0 0 0\n'
+            f'}}',
+            f'${{{guid}}}{WORLD_PREFABS["music_manager"]} {{\n'
+            f' coords 0 0 0\n'
+            f'}}',
+            f'${{{guid}}}{self.ambient_prefab} {{ // biome-matched ambient sound\n'
+            f' coords 0 0 0\n'
+            f'}}',
+        ]
+
+        return header + "\n".join(parts) + "\n"
 
     def _generate_gamemode_layer(self) -> str:
         """Generate the game mode layer with Game Master mode for instant playability."""
@@ -622,15 +687,41 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
 
             road_name = road.get("name", "").replace('"', "'")
             prefab_name = validate_road_prefab(
-                road.get("enfusion_prefab", "RG_Road_Asphalt_4m")
+                road.get("enfusion_prefab", "")
             )
+
+            # Descriptive entity name (v1.4.0 — Atlas 2 alignment).
+            namer_props = {
+                "ref": road.get("ref", ""),
+                "name": road_name,
+                "surface": road.get("surface", "asphalt"),
+            }
+            entity_name = self._namer.make_name(
+                "Road",
+                properties=namer_props,
+                x_local=origin["x"],
+                z_local=origin["z"],
+            )
+            paints = expected_surface("Road", namer_props)
+            self._record_surface(entity_name, paints)
+
+            comment_parts = []
             if road_name:
-                comment = f' // {road_name} | prefab: {prefab_name}'
-            else:
-                comment = f' // prefab: {prefab_name}'
+                comment_parts.append(road_name)
+            comment_parts.append(f"prefab: {prefab_name}")
+            if paints:
+                comment_parts.append(f"paints: {paints}")
+            # When the prefab is in the Atlas 2 catalogue, also surface its
+            # fully-qualified `{guid}path.et` form so the editor user can
+            # paste it directly into the RoadGeneratorEntity Prefab field
+            # (saves a Resource Browser search).
+            fq = fully_qualified_road_prefab(prefab_name)
+            if fq:
+                comment_parts.append(f"fq: {fq}")
+            comment = " // " + " | ".join(comment_parts)
 
             entity = (
-                f'SplineShapeEntity Road_{i} {{{comment}\n'
+                f'SplineShapeEntity {entity_name} {{{comment}\n'
                 f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
                 f' Points {{\n'
                 + "\n".join(point_defs) + "\n"
@@ -682,11 +773,21 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             path = validate_forest_prefab(ft)
             return path  # None → spline-only fallback
 
+        # v1.4.0 — naming_kind="Forest" tells the namer to produce
+        # `Forest_Pine_NE_001` / `Forest_Deciduous_SW_004` style names
+        # instead of the legacy `ForestArea_<idx>` sequence. The OSM
+        # `forest_type` property is added to feature properties below.
+        for feature in (self.forest_features or {}).get("features", []) or []:
+            props = feature.setdefault("properties", {})
+            if "forest_type" not in props:
+                props["forest_type"] = forest_type_from_osm(props)
+
         body = self._polygon_features_to_splines(
             self.forest_features,
             entity_prefix="ForestArea",
             empty_message="// No forest polygons found in this area.\n",
             child_prefab_fn=_forest_child,
+            naming_kind="Forest",
         )
         return header + body
 
@@ -725,6 +826,7 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             filter_values=("lake", "pond", "reservoir", "water"),
             empty_message="// No standing-water polygons found in this area.\n",
             child_prefab_fn=_lake_child,
+            naming_kind="Lake",
         )
         river_body = self._generate_river_splines()
         return header + lake_body + river_body
@@ -803,13 +905,25 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             water_type = props.get("water_type", "river")
             width_m = _RIVER_WIDTH_M.get(water_type, 5.0)
             name = props.get("name", "") or ""
-            comment = (
-                f' // {name} (~{width_m:.0f}m)' if name
-                else f' // {water_type} (~{width_m:.0f}m)'
+
+            namer_props = {"name": name, "water_type": water_type}
+            entity_name = self._namer.make_name(
+                "River",
+                properties=namer_props,
+                x_local=origin["x"],
+                z_local=origin["z"],
             )
+            paints = expected_surface("River", namer_props)
+            self._record_surface(entity_name, paints)
+
+            label = name if name else water_type
+            comment_parts = [f"{label} (~{width_m:.0f}m)"]
+            if paints:
+                comment_parts.append(f"paints: {paints}")
+            comment = " // " + " | ".join(comment_parts)
 
             entities.append(
-                f'SplineShapeEntity River_{i} {{{comment}\n'
+                f'SplineShapeEntity {entity_name} {{{comment}\n'
                 f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
                 f' Points {{\n'
                 + "\n".join(point_defs) + "\n"
@@ -917,10 +1031,18 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             building_name_raw = building.get("name", "") or ""
             building_name = building_name_raw.replace('"', "'")
             building_type = building.get("building_type", "yes")
+
+            namer_props = {"name": building_name, "building_type": building_type}
+            entity_name = self._namer.make_name(
+                "Building",
+                properties=namer_props,
+                x_local=origin["x"],
+                z_local=origin["z"],
+            )
             comment = (
-                f' // {building_name} ({building_type})'
+                f' // {entity_name} | {building_name} ({building_type})'
                 if building_name
-                else f' // {building_type}'
+                else f' // {entity_name} | {building_type}'
             )
 
             if prefab_path:
@@ -946,12 +1068,21 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
                         [lon - 0.00001, lat + 0.00001],
                         [lon - 0.00001, lat - 0.00001],
                     ]
+                # The ring writer normally suffixes its prefix with `_<index>`.
+                # We pass our pre-allocated descriptive name as the prefix and
+                # then rewrite the `_0` suffix it adds back to the literal
+                # name. naming_kind is None here because we already allocated.
                 entity = self._closed_spline_entity_from_ring(
-                    ring, "Building", len(entities), comment_suffix=comment
+                    ring, entity_name, 0, comment_suffix=comment,
                 )
                 if entity is None:
                     skipped_out_of_bounds += 1
                     continue
+                entity = entity.replace(
+                    f"SplineShapeEntity {entity_name}_0 ",
+                    f"SplineShapeEntity {entity_name} ",
+                    1,
+                )
                 entities.append(entity)
                 marker_count += 1
 
@@ -1140,10 +1271,18 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             building_name_raw = building.get("name", "") or ""
             building_name = building_name_raw.replace('"', "'")
             building_type = building.get("building_type", "yes")
+
+            namer_props = {"name": building_name, "building_type": building_type}
+            entity_name = self._namer.make_name(
+                "Building",
+                properties=namer_props,
+                x_local=origin["x"],
+                z_local=origin["z"],
+            )
             comment = (
-                f' // {building_name} ({building_type})'
+                f' // {entity_name} | {building_name} ({building_type})'
                 if building_name
-                else f' // {building_type}'
+                else f' // {entity_name} | {building_type}'
             )
 
             if prefab_path:
@@ -1169,12 +1308,21 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
                         [lon - 0.00001, lat + 0.00001],
                         [lon - 0.00001, lat - 0.00001],
                     ]
+                # The ring writer normally suffixes its prefix with `_<index>`.
+                # We pass our pre-allocated descriptive name as the prefix and
+                # then rewrite the `_0` suffix it adds back to the literal
+                # name. naming_kind is None here because we already allocated.
                 entity = self._closed_spline_entity_from_ring(
-                    ring, "Building", len(entities), comment_suffix=comment
+                    ring, entity_name, 0, comment_suffix=comment,
                 )
                 if entity is None:
                     skipped_out_of_bounds += 1
                     continue
+                entity = entity.replace(
+                    f"SplineShapeEntity {entity_name}_0 ",
+                    f"SplineShapeEntity {entity_name} ",
+                    1,
+                )
                 entities.append(entity)
                 marker_count += 1
 
@@ -1282,6 +1430,7 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
         filter_property: Optional[str] = None,
         filter_values: tuple[str, ...] = (),
         child_prefab_fn=None,
+        naming_kind: Optional[str] = None,
     ) -> str:
         """
         Convert GeoJSON polygon features into closed SplineShapeEntity blocks.
@@ -1342,10 +1491,13 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
             else:
                 continue  # Lines / points etc. — not handled here
 
+            feature_props = feature.get("properties", {}) or {}
             for ring in exterior_rings:
                 entity = self._closed_spline_entity_from_ring(
                     ring, entity_prefix, len(entities),
                     child_prefab=child_prefab,
+                    naming_kind=naming_kind,
+                    feature_properties=feature_props,
                 )
                 if entity is None:
                     skipped_clipped += 1
@@ -1525,6 +1677,8 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
         index: int,
         comment_suffix: str = "",
         child_prefab: Optional[str] = None,
+        naming_kind: Optional[str] = None,
+        feature_properties: Optional[dict] = None,
     ) -> Optional[str]:
         """
         Project a single GeoJSON ring (list of [lon, lat] pairs) to a closed
@@ -1596,8 +1750,30 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['destruction']} {{
                 f' }}\n'
             )
 
+        # Pick a descriptive entity name when the caller has supplied a
+        # naming_kind. Otherwise fall back to the legacy sequential ID
+        # so callers that haven't migrated still get a valid file.
+        comment_extra = comment_suffix or ""
+        if naming_kind and self._namer is not None:
+            entity_name = self._namer.make_name(
+                naming_kind,
+                properties=feature_properties or {},
+                x_local=origin["x"],
+                z_local=origin["z"],
+            )
+            paints = expected_surface(naming_kind, feature_properties or {})
+            if paints:
+                self._record_surface(entity_name, paints)
+                paints_token = f" // paints: {paints}"
+                comment_extra = (
+                    comment_extra + paints_token if comment_extra
+                    else paints_token
+                )
+        else:
+            entity_name = f"{entity_prefix}_{index}"
+
         return (
-            f'SplineShapeEntity {entity_prefix}_{index} {{{comment_suffix}\n'
+            f'SplineShapeEntity {entity_name} {{{comment_extra}\n'
             f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
             f' Points {{\n'
             + "\n".join(point_defs) + "\n"

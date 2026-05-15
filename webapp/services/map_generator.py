@@ -1193,8 +1193,41 @@ async def run_generation(job: MapGenerationJob):
             forest_features=osm_data.get("forests"),
             water_features=osm_data.get("water"),
             building_data=features.get("buildings"),
+            country_codes=country_info.get("countries", []),
         )
         enfusion_files = enfusion_gen.generate_all(output_dir, job=job)
+
+        # Emit surface_assignments.json sidecar (Atlas 2 / v1.4.0).
+        # Maps every emitted spline name to the surface mask it is expected
+        # to ride on. The Setup Guide references this file; an automation /
+        # future surface-painting tool can read it to attach masks to the
+        # right entities without re-deriving the mapping.
+        import json as _json
+        from config.enfusion import SURFACE_IMPORT_ORDER as _SURFACE_ORDER
+        surface_assignments_path = output_dir / "surface_assignments.json"
+        with open(surface_assignments_path, "w", encoding="utf-8") as _sa:
+            _json.dump(
+                {
+                    "splines_to_surfaces": enfusion_gen.surface_assignments,
+                    "surface_import_order": list(_SURFACE_ORDER),
+                    "atlas2_rule": (
+                        "Import dirt-type surfaces (forest_floor, pine_floor, "
+                        "asphalt, gravel, dirt, water_edge, sand) before grass "
+                        "so the parallax map composites correctly."
+                    ),
+                    "ambient_prefab": enfusion_gen.ambient_prefab,
+                    "country_codes": enfusion_gen.country_codes,
+                    "bootstrap_entity_count": 12,
+                },
+                _sa,
+                indent=2,
+                ensure_ascii=False,
+            )
+        job.add_log(
+            f"Wrote surface_assignments.json "
+            f"({len(enfusion_gen.surface_assignments)} spline→surface mappings)",
+            "success",
+        )
 
         job.progress = 92
         job.add_log(
@@ -1205,6 +1238,9 @@ async def run_generation(job: MapGenerationJob):
             "step": "enfusion_project",
             "map_name": sanitized_name,
             "files_created": len(enfusion_files),
+            "bootstrap_entities": 12,
+            "ambient_prefab": enfusion_gen.ambient_prefab,
+            "surface_assignments": len(enfusion_gen.surface_assignments),
         })
 
         # Step 12: Generate SETUP_GUIDE.md (92% -> 93%)

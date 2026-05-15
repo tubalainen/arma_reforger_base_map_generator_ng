@@ -37,6 +37,9 @@ new-generation.md
 lantmateriet.md
 api-expansion.md
 
+# Local-only reference material (third-party docs, PDFs, etc.) — never push
+docs/
+
 # Claude Code project memory
 .claude/
 

@@ -22,6 +22,9 @@ from config.enfusion import (
     SURFACE_MATERIAL_ALTERNATIVES,
     SURFACE_IMPORT_ORDER,
     DEFAULT_ADDON_DIR,
+    MANDATORY_BOOTSTRAP_KEYS,
+    WORLD_PREFABS,
+    resolve_ambient_prefab,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,6 +92,7 @@ class SetupGuideGenerator:
             self._prerequisites(),
             self._phase_project_setup(),
             self._phase_terrain_creation(),
+            self._phase_bootstrap_entities(),
             self._phase_surface_painting(),
             self._phase_satellite_map(),
             self._phase_roads(),
@@ -126,11 +130,13 @@ class SetupGuideGenerator:
         height_scale = self.elev.get("height_scale", 0.03125)
         mask_count = self.surf.get("count", 5)
         road_count = self.roads.get("total_segments", 0)
-        countries = ", ".join(self.input_data.get("countries", ["Unknown"]))
+        country_codes = self.input_data.get("countries", []) or []
+        countries = ", ".join(country_codes) or "Unknown"
         crs = self.input_data.get("crs", "Unknown")
 
         block_violations = self.surf.get("block_saturation", {}).get("violations", 0)
         total_blocks = self.surf.get("block_saturation", {}).get("total_blocks", 0)
+        ambient_prefab = resolve_ambient_prefab(country_codes).split("/")[-1]
 
         return f"""## Quick Reference Card
 
@@ -146,7 +152,9 @@ class SetupGuideGenerator:
 | **Block Violations** | {block_violations}/{total_blocks} blocks |
 | **Road Segments** | {road_count} |
 | **Region** | {countries} ({crs}) |
-| **Estimated Setup Time** | ~30-45 minutes |"""
+| **Bootstrap Entities** | {len(MANDATORY_BOOTSTRAP_KEYS)} + 1 ambient auto-wired |
+| **Ambient Sound** | {ambient_prefab} |
+| **Estimated Setup Time** | ~20-30 minutes |"""
 
     def _prerequisites(self) -> str:
         return """## Prerequisites
@@ -257,8 +265,55 @@ After reopening, you should see your terrain with real-world elevation:
 > **Note**: If a **"Set normal map options"** dialog appears, click **OK** to accept
 > the defaults."""
 
+    def _phase_bootstrap_entities(self) -> str:
+        """
+        Phase 3: Bootstrap entities — explains what the generator pre-wired
+        in the managers layer and what (if anything) the user still has to
+        add manually. v1.4.0 — Atlas 2 alignment, addresses issue #81.
+        """
+        countries = self.input_data.get("countries", []) or []
+        ambient = resolve_ambient_prefab(countries)
+        rows = []
+        for key in MANDATORY_BOOTSTRAP_KEYS:
+            path = WORLD_PREFABS.get(key, "(unknown)")
+            short = path.split("/")[-1]
+            rows.append(f"| `{key}` | `{short}` | auto-wired in managers layer |")
+        rows.append(
+            f"| `ambient_sounds` | `{ambient.split('/')[-1]}` | "
+            f"auto-wired (biome-matched for {', '.join(countries) or 'default'}) |"
+        )
+        table = "\n".join(rows)
+
+        return f"""## Phase 3: Bootstrap Entities (v1.4.0 — Atlas 2 alignment)
+
+These entities make the world load to a fully functional Game-Master-ready
+state. The generator now writes them into `Worlds/{self.map_name}_managers.layer`
+automatically, so a freshly-imported world plays without any manual entity
+drags — resolving issue #81. The list below is for verification only.
+
+| Entity key | Prefab | Status |
+|------------|--------|--------|
+{table}
+
+> **What if one is missing in Workbench?** A handful of paths may differ
+> between Reforger versions. If Workbench logs "resource not registered"
+> for a specific entry, open the Resource Browser, search for the short
+> name in the table above, and drag the result into the managers layer.
+> Then update `webapp/config/enfusion.py::WORLD_PREFABS` so subsequent
+> generations use the correct path.
+
+> **Critical**: never rename the `default` layer. Several Reforger
+> subsystems hard-code its name (this is the only naming rule Atlas 2
+> explicitly calls out)."""
+
     def _phase_surface_painting(self) -> str:
-        lines = [f"""## Phase 3: Surface Painting (15 minutes)
+        lines = [f"""## Phase 4: Surface Painting (15 minutes)
+
+> **Atlas 2 rule:** import **dirt-type surfaces first**, then **grass-type**
+> surfaces. The parallax map composites in the order the masks are applied,
+> so reversing this washes out the rougher textures. The
+> `surface_assignments.json` file at the project root lists the exact
+> import order (`surface_import_order` array).
 
 This is the most important phase. Your terrain currently has a default grey surface.
 We'll import pre-generated surface masks to paint it with realistic materials.
@@ -373,12 +428,12 @@ To check manually:
 
     def _phase_satellite_map(self) -> str:
         if not self.satellite.get("file"):
-            return """## Phase 4: Satellite Map (Skipped)
+            return """## Phase 5: Satellite Map (Skipped)
 
 No satellite imagery was available for this region. You can add satellite imagery
 manually later via Terrain Tool (Ctrl+T) > Manage tab > Import Satellite Map."""
 
-        return f"""## Phase 4: Satellite Map (5 minutes)
+        return f"""## Phase 5: Satellite Map (5 minutes)
 
 ### Step 4.1: Import Satellite Image
 
@@ -402,26 +457,42 @@ The satellite image should align with your terrain features:
         road_count = self.roads.get("total_segments", 0)
 
         if road_count == 0:
-            return """## Phase 5: Roads (Skipped)
+            return """## Phase 6: Roads (Skipped)
 
 No roads were found in the selected area."""
 
         by_surface = self.roads.get("by_surface", {})
         surface_str = ", ".join(f"{k}: {v}" for k, v in by_surface.items())
 
-        return f"""## Phase 5: Roads (manual generator attach)
+        return f"""## Phase 6: Roads (manual generator attach)
 
 Your terrain has **{road_count}** road segments ({surface_str}).
 
 The roads layer (`{self.map_name}_roads.layer`) carries one
 **SplineShapeEntity** per road segment, projected to Enfusion local
-coordinates and following terrain elevation. Each spline's `//` comment
-shows the road name and the **suggested prefab** chosen from the
-known-good Reforger road set, e.g.:
+coordinates and following terrain elevation.
+
+**v1.4.0 — Atlas 2 alignment:** splines are no longer named
+`Road_0..N`. The generator now derives a descriptive name from OSM tags
+(falling back to surface + quadrant for anonymous ways) so the hierarchy
+panel tells you what each road is at a glance:
 
 ```
-SplineShapeEntity Road_12 {{ // E18 | prefab: RG_Road_Asphalt_8m
+SplineShapeEntity Road_E4_Asphalt   {{ // E4 | prefab: RG_Road_Asphalt_E_03 | paints: asphalt | fq: {{8B67F44381CD2216}}PrefabLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_03.et
+SplineShapeEntity Road_Storgatan_Asphalt {{ // Storgatan | prefab: RG_Road_Asphalt_E_01_DashedLine | paints: asphalt | fq: {{5E336AEB0923963F}}PrefabLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_01_DashedLine.et
+SplineShapeEntity Road_Asphalt_NE_001 {{ // prefab: RG_Road_Asphalt_E_01_Narrow | paints: asphalt | fq: {{31086BE1AF790FC5}}PrefabLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_01_Narrow.et
 ```
+
+The `fq:` token in each comment is the fully-qualified `{{guid}}path.et`
+string you can paste directly into the **RoadGeneratorEntity > Prefab**
+field, taking the GUID from Atlas 2's `SCR_SHPPrefabDataList` (the
+canonical source — see [`docs/Atlas2.pdf`](../docs/Atlas2.pdf) p. 12).
+
+Prefab names are the **Atlas 2 canonical set** (`RG_Road_Asphalt_E_01..03`,
+`RG_Road_Asphalt_E_01_DashedLine`, `RG_Road_Asphalt_E_01_Narrow`,
+`RG_Road_Dirt_01`, `RG_Road_Dirt_02`, `RG_Road_Forest_01`,
+`RG_Road_Cobblestone_01`, `RG_TrailDirt_01`, `RG_TrailGravel_01`) —
+all under `PrefabLibrary/Generators/Roads/{{Asphalt|Cobblestone|Dirt}}/`.
 
 Splines are emitted **without** an attached `RoadGeneratorEntity` child —
 v1.1.0 attempted to auto-attach the generator but the resulting nested
@@ -465,7 +536,24 @@ that behaviour. Attach the generator manually as described below.
         rivers = self.features.get("rivers", 0)
         forests = self.features.get("forest_areas", 0)
 
-        return f"""## Phase 6: Vegetation & Water (Generators)
+        return f"""## Phase 7: Vegetation & Water (Generators)
+
+> **v1.4.0 — Atlas 2 alignment:** vegetation and water splines now use
+> descriptive names derived from OSM tags. Forests are
+> `Forest_<species>_<quadrant>_<NNN>` (`Forest_Pine_NE_001`,
+> `Forest_Deciduous_SW_004`). Lakes use the OSM name when present
+> (`Lake_Vanern`, `Lake_Storsjon`) and fall back to `Lake_<quadrant>_<NNN>`.
+> Rivers use the OSM name (`River_Dalalven`) or `River_<quadrant>_<NNN>`
+> for anonymous waterways.
+>
+> Reference prefabs Atlas 2 calls out by name
+> ([`docs/Atlas2.pdf`](../docs/Atlas2.pdf)):
+>
+> - Rivers: drag `R_RiverMedium_01.et` onto the river spline (Resource
+>   Browser → search "RiverMedium" or navigate
+>   `ArmaReforger > Prefabs > World > Water > River`).
+> - Forests: `FG_Forest_Spruce1.et`, `FG_Forest_Pine1.et` (note the
+>   trailing `1`, no underscore separator).
 
 The vegetation and water layers contain pre-drawn splines projected to
 Enfusion local coordinates and clipped to the terrain. When a Forest or
@@ -557,7 +645,7 @@ been dropped automatically (so traffic/pathing isn't broken).
 > (look for the `buildings` array)."""
 
     def _phase_testing(self) -> str:
-        return f"""## Phase 7: Testing (5 minutes)
+        return f"""## Phase 8: Testing (5 minutes)
 
 ### Step 7.1: Save Everything
 
@@ -667,7 +755,8 @@ been dropped automatically (so traffic/pathing isn't broken).
 | `Reference/roads_reference.csv` | Road type/surface/width for manual prefab setup |
 | `Reference/features.json` | Lakes, rivers, forests, buildings |
 | `Reference/metadata.json` | Full generation metadata |
-| `Reference/osm_*.geojson` | Raw OpenStreetMap data |"""
+| `Reference/osm_*.geojson` | Raw OpenStreetMap data |
+| `surface_assignments.json` | Spline → surface mask mapping + Atlas 2 import order (v1.4.0) |"""
 
     def _appendix_parameters(self) -> str:
         settings = self.settings

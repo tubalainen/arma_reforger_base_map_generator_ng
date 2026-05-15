@@ -125,7 +125,8 @@ class TestRoadsPhaseGuide:
         from services.setup_guide_generator import SetupGuideGenerator
         meta = _metadata(["grass"], {"grass": {"percentage": 100.0}}, road_count=0)
         guide = SetupGuideGenerator("TestMap", meta)._phase_roads()
-        assert "Phase 5: Roads (Skipped)" in guide
+        # v1.4.0 — bootstrap-entities phase was inserted, so Roads is now Phase 6.
+        assert "Phase 6: Roads (Skipped)" in guide
 
     def test_with_roads_describes_manual_attach(self):
         from services.setup_guide_generator import SetupGuideGenerator

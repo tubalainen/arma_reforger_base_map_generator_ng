@@ -74,35 +74,45 @@ def make_generator():
     from services.enfusion_project_generator import EnfusionProjectGenerator
 
     def _make(roads):
-        return EnfusionProjectGenerator(
+        gen = EnfusionProjectGenerator(
             map_name="TestMap",
             metadata=_metadata_for_4km_terrain(),
             road_data={"roads": roads},
             transformer=_IdentityTransformer(),
             elevation_array=None,
         )
+        # In production the namer is initialised inside generate_all; tests
+        # call _generate_roads_layer directly, so seed the state manually.
+        gen._reset_naming_state()
+        return gen
 
     return _make
 
 
 class TestRoadsLayerSplineOnly:
     def test_road_emits_spline_with_prefab_in_comment(self, make_generator):
-        gen = make_generator([_road(0, "RG_Road_Asphalt_6m", name="E39")])
+        gen = make_generator([_road(0, "RG_Road_Asphalt_E_01", name="E39")])
         out = gen._generate_roads_layer()
 
-        # Spline parent entity exists with road name + prefab in the comment.
-        assert "SplineShapeEntity Road_0 {" in out
-        assert "// E39 | prefab: RG_Road_Asphalt_6m" in out
+        # v1.4.0 — entities are now named from the OSM ref/name.
+        assert "SplineShapeEntity Road_E39_Asphalt {" in out
+        # Comment surfaces the road name, prefab name, paints, and the
+        # fully-qualified `{guid}path.et` form (the latter sourced from
+        # Atlas 2's SCR_SHPPrefabDataList, p. 12).
+        assert "// E39" in out
+        assert "prefab: RG_Road_Asphalt_E_01" in out
+        assert "paints: asphalt" in out
+        assert "fq: {02AF8C5A31EC3A53}PrefabLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_01.et" in out
 
     def test_unknown_prefab_is_normalized_in_comment(self, make_generator):
         from config.roads import KNOWN_ROAD_PREFABS
 
+        # Legacy fabricated name from v1.3.x — must be snapped to a canonical
+        # Atlas 2 prefab before reaching the .layer file.
         gen = make_generator([_road(0, "RG_Road_Asphalt_99m")])
         out = gen._generate_roads_layer()
 
-        # The fabricated 99m name must NOT reach the layer file.
         assert "RG_Road_Asphalt_99m" not in out
-        # Whatever prefab name DID land in the comment must be a known-good one.
         matched = [p for p in KNOWN_ROAD_PREFABS if f"prefab: {p}" in out]
         assert len(matched) == 1, (
             f"Expected exactly one known prefab in comment; found {matched}"
@@ -114,9 +124,9 @@ class TestRoadsLayerSplineOnly:
         may appear inside any ``SplineShapeEntity Road_*`` body.
         """
         gen = make_generator([
-            _road(0, "RG_Road_Asphalt_6m"),
-            _road(1, "RG_Road_Gravel_4m"),
-            _road(2, "RG_Road_Dirt_2m"),
+            _road(0, "RG_Road_Asphalt_E_01"),
+            _road(1, "RG_TrailGravel_01"),
+            _road(2, "RG_TrailDirt_01"),
         ])
         out = gen._generate_roads_layer()
 
@@ -133,12 +143,15 @@ class TestRoadsLayerSplineOnly:
             road_data=None,
             transformer=_IdentityTransformer(),
         )
+        # Roads layer is generated as part of generate_all; reset the namer
+        # state manually for the standalone-call path the test uses.
+        gen._reset_naming_state()
         out = gen._generate_roads_layer()
         assert "SplineShapeEntity" not in out
         assert "no road data" in out.lower()
 
     def test_road_with_too_few_points_skipped(self, make_generator):
-        bad = _road(0, "RG_Road_Asphalt_6m")
+        bad = _road(0, "RG_Road_Asphalt_E_01")
         bad["spline_points"] = [{"x": 1.0, "y": 1.0, "z": 0}]  # only 1 point
         gen = make_generator([bad])
         out = gen._generate_roads_layer()
@@ -154,7 +167,7 @@ class TestRoadsLayerVertexCap:
 
         # 3000 collinear points across a 4 km terrain — RDP collapses easy.
         n = 3000
-        long_road = _road(0, "RG_Road_Asphalt_6m", name="LongRoad")
+        long_road = _road(0, "RG_Road_Asphalt_E_01", name="LongRoad")
         long_road["spline_points"] = [
             {"x": 0.001 + (i / (n - 1)) * 3.998, "y": 1.0, "z": 0}
             for i in range(n)
@@ -164,17 +177,15 @@ class TestRoadsLayerVertexCap:
         gen = make_generator([long_road])
         out = gen._generate_roads_layer()
 
-        # Count ShapePoint sp_ entries inside the single Road_0 block.
         sp_count = out.count("ShapePoint sp_")
         assert sp_count <= MAX_SPLINE_POINTS, (
             f"Road spline emitted {sp_count} points; "
             f"expected <= MAX_SPLINE_POINTS ({MAX_SPLINE_POINTS})"
         )
-        # Sanity: still at least 2 points so the spline is valid.
         assert sp_count >= 2
 
     def test_short_road_passes_through_unchanged(self, make_generator):
-        gen = make_generator([_road(0, "RG_Road_Asphalt_6m")])
+        gen = make_generator([_road(0, "RG_Road_Asphalt_E_01")])
         out = gen._generate_roads_layer()
         # Fixture has 3 points, well under the cap.
         assert out.count("ShapePoint sp_") == 3

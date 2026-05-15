@@ -107,7 +107,7 @@ def make_generator():
             building_data = None
         else:
             building_data = {"buildings": list(buildings)}
-        return EnfusionProjectGenerator(
+        gen = EnfusionProjectGenerator(
             map_name="TestMap",
             metadata=_metadata_for_4km_terrain(),
             road_data={"roads": roads or []},
@@ -115,6 +115,8 @@ def make_generator():
             elevation_array=None,
             building_data=building_data,
         )
+        gen._reset_naming_state()
+        return gen
     return _make
 
 
@@ -188,8 +190,9 @@ class TestBuildingsLayerEmission:
         ])
         out = gen._generate_buildings_layer()
 
-        # Footprint marker mode: closed spline named Building_0
-        assert "SplineShapeEntity Building_0 {" in out
+        # v1.4.0 — footprint markers now use descriptive names derived from OSM
+        # tags (Building_House_TestHouse), no longer Building_<index>.
+        assert "SplineShapeEntity Building_House_TestHouse {" in out
         # Comment carries the human-readable name + type
         assert "Test House" in out
         # No actual ${guid}prefab.et reference was emitted for this building.
@@ -208,8 +211,9 @@ class TestBuildingsLayerEmission:
             "Prefabs/Structures/Civilian/Test_House.et"
         )
         assert expected_ref in out
-        # Prefab-instance mode does NOT emit a SplineShapeEntity for this building.
-        assert "SplineShapeEntity Building_0 {" not in out
+        # Prefab-instance mode does NOT emit a SplineShapeEntity at all
+        # for this building (no Building_* spline header).
+        assert "SplineShapeEntity Building_" not in out
 
     def test_building_outside_terrain_skipped(self, make_generator):
         # Identity ×1000: lon=10 → x=10000m, terrain only 4096m wide.
@@ -217,8 +221,12 @@ class TestBuildingsLayerEmission:
             _building(0, lon=10.0, lat=10.0, building_type="house"),
         ])
         out = gen._generate_buildings_layer()
-        # No entity for this building.
-        assert "Building_0" not in out
+        # The header text mentions `Building_*.et` — strip that before
+        # checking that no real entity was emitted.
+        body = out.split("// Source data:")[-1]
+        assert "SplineShapeEntity" not in body
+        # Counter is empty: no entity carrying a Building_<something> name.
+        assert "SplineShapeEntity Building_" not in out
 
     def test_each_building_gets_one_entity(self, make_generator):
         gen = make_generator(buildings=[
@@ -227,7 +235,9 @@ class TestBuildingsLayerEmission:
             _building(2, lon=1.5, lat=1.5),
         ])
         out = gen._generate_buildings_layer()
-        # Three footprint markers (none have validated prefabs).
+        # Three footprint markers (none have validated prefabs). Names are now
+        # descriptive (Building_<category>_<quadrant>_NNN) rather than
+        # Building_<idx> — count by the SplineShapeEntity Building_ prefix.
         assert out.count("SplineShapeEntity Building_") == 3
 
 

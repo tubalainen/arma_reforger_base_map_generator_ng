@@ -318,6 +318,10 @@ The generated ZIP includes a pre-configured Enfusion project and a detailed **SE
 
 See the **SETUP_GUIDE.md** inside the ZIP for exact step-by-step instructions with pre-computed values for your terrain.
 
+### Reference: "The Atlas 2" workflow
+
+The generator is aligned with **The Atlas 2: Arma Reforger Terrain Creation Guide** by Jakerod (the community-standard manual workflow). A copy of the PDF lives at [`docs/Atlas2.pdf`](docs/Atlas2.pdf) and is the source of truth for canonical entity names, prefab paths, surface paint ordering, and required bootstrap entities.
+
 ## Security & Multi-User Support
 
 The application includes built-in security features for safe deployment:
@@ -429,7 +433,7 @@ The application is published to GitHub Container Registry and automatically buil
 docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest
 
 # Or use a specific version tag
-docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:v1.3.11
+docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:v1.4.0
 ```
 
 The `docker-compose.yml` is pre-configured to use the GHCR.io image. See the [Quick Start Guide](#quick-start-guide) for setup instructions.
