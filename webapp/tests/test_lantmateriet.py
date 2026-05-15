@@ -355,8 +355,8 @@ class TestHydrografiTranslation:
         assert result[0]["properties"]["natural"] == "water"
         assert result[0]["properties"]["intermittent"] == "no"
 
-    def test_standing_water_pond(self):
-        """StandingWater with localType=Damm maps to pond."""
+    def test_standing_water_sjo(self):
+        """StandingWater with localType='sjö' (the only documented value) maps to lake."""
         from services.lantmateriet.hydrografi_service import (
             _translate_standing_water,
         )
@@ -365,14 +365,30 @@ class TestHydrografiTranslation:
             {
                 "id": 2,
                 "geometry": {"type": "Polygon", "coordinates": [[[11, 57], [12, 57], [12, 58], [11, 57]]]},
-                "properties": {"localType": "Damm"},
+                "properties": {"localType": "sjö"},
             }
         ]
         result = _translate_standing_water(features)
-        assert result[0]["properties"]["water_type"] == "pond"
+        assert result[0]["properties"]["water_type"] == "lake"
 
-    def test_watercourse_line_to_river(self):
-        """WatercourseLine with localType=Älv maps to river."""
+    def test_standing_water_lookup_is_case_insensitive(self):
+        """Casing drift in the API ('Sjö' vs 'sjö') still resolves to lake."""
+        from services.lantmateriet.hydrografi_service import (
+            _translate_standing_water,
+        )
+
+        features = [
+            {
+                "id": 3,
+                "geometry": {"type": "Polygon", "coordinates": [[[11, 57], [12, 57], [12, 58], [11, 57]]]},
+                "properties": {"localType": "Sjö"},
+            }
+        ]
+        result = _translate_standing_water(features)
+        assert result[0]["properties"]["water_type"] == "lake"
+
+    def test_watercourse_line_vattendrag_to_stream(self):
+        """WatercourseLine with localType='vattendrag' maps to stream (default natural watercourse)."""
         from services.lantmateriet.hydrografi_service import (
             _translate_watercourse_line,
         )
@@ -381,14 +397,14 @@ class TestHydrografiTranslation:
             {
                 "id": 10,
                 "geometry": {"type": "LineString", "coordinates": [[11, 57], [12, 58]]},
-                "properties": {"localType": "Älv", "persistence": "Perennial"},
+                "properties": {"localType": "vattendrag", "origin": "natural", "persistence": "Perennial"},
             }
         ]
         result = _translate_watercourse_line(features)
 
         assert len(result) == 1
-        assert result[0]["properties"]["water_type"] == "river"
-        assert result[0]["properties"]["waterway"] == "river"
+        assert result[0]["properties"]["water_type"] == "stream"
+        assert result[0]["properties"]["waterway"] == "stream"
         assert result[0]["properties"]["natural"] == ""
 
     def test_watercourse_line_to_stream_default(self):
@@ -401,14 +417,14 @@ class TestHydrografiTranslation:
             {
                 "id": 11,
                 "geometry": {"type": "LineString", "coordinates": [[11, 57], [12, 58]]},
-                "properties": {"localType": "OkändTyp"},
+                "properties": {"localType": "okändtyp"},
             }
         ]
         result = _translate_watercourse_line(features)
         assert result[0]["properties"]["water_type"] == "stream"
 
-    def test_watercourse_line_canal(self):
-        """WatercourseLine with localType=Kanal maps to canal."""
+    def test_watercourse_line_canal_via_origin(self):
+        """Canals are detected via origin='manMade', not localType (per Lantmäteriet spec)."""
         from services.lantmateriet.hydrografi_service import (
             _translate_watercourse_line,
         )
@@ -417,12 +433,28 @@ class TestHydrografiTranslation:
             {
                 "id": 12,
                 "geometry": {"type": "LineString", "coordinates": [[11, 57], [12, 58]]},
-                "properties": {"localType": "Kanal"},
+                "properties": {"localType": "vattendrag", "origin": "manMade"},
             }
         ]
         result = _translate_watercourse_line(features)
         assert result[0]["properties"]["water_type"] == "canal"
         assert result[0]["properties"]["waterway"] == "canal"
+
+    def test_watercourse_line_stomlinje_is_known(self):
+        """Synthetic centre lines ('stomlinje') are mapped without warning."""
+        from services.lantmateriet.hydrografi_service import (
+            _translate_watercourse_line,
+        )
+
+        features = [
+            {
+                "id": 13,
+                "geometry": {"type": "LineString", "coordinates": [[11, 57], [12, 58]]},
+                "properties": {"localType": "stomlinje, otydlig"},
+            }
+        ]
+        result = _translate_watercourse_line(features)
+        assert result[0]["properties"]["water_type"] == "stream"
 
     def test_wetland_translation(self):
         """Wetland features map to water_type=wetland."""
