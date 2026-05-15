@@ -61,13 +61,15 @@ def _line_feature(coords, **props):
 
 def _make_gen(**kwargs):
     from services.enfusion_project_generator import EnfusionProjectGenerator
-    return EnfusionProjectGenerator(
+    gen = EnfusionProjectGenerator(
         map_name="TestMap",
         metadata=_metadata(),
         transformer=_IdentityTransformer(),
         elevation_array=None,
         **kwargs,
     )
+    gen._reset_naming_state()
+    return gen
 
 
 _RING = [[0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5], [0.5, 0.5]]
@@ -87,7 +89,8 @@ class TestForestGeneratorChild:
             "features": [_poly_feature([_RING], leaf_type="needleleaved")],
         })
         out = gen._generate_vegetation_layer()
-        assert "SplineShapeEntity ForestArea_0 {" in out
+        # v1.4.0 — needleleaved → coniferous → "Pine" category token.
+        assert "SplineShapeEntity Forest_Pine_" in out
         assert f"${{{_ARMA_GUID}}}" not in out
 
     def test_populated_catalog_emits_child_prefab(self):
@@ -100,7 +103,7 @@ class TestForestGeneratorChild:
             })
             out = gen._generate_vegetation_layer()
 
-        assert "SplineShapeEntity ForestArea_0 {" in out
+        assert "SplineShapeEntity Forest_Pine_" in out
         assert f"${{{_ARMA_GUID}}}{fake_prefab}" in out
         assert "coords 0 0 0" in out
 
@@ -162,7 +165,8 @@ class TestLakeGeneratorChild:
             "features": [_poly_feature([_RING], water_type="lake")],
         })
         out = gen._generate_water_layer()
-        assert "SplineShapeEntity Water_0 {" in out
+        # v1.4.0 — anonymous lake → Lake_<quadrant>_NNN.
+        assert "SplineShapeEntity Lake_" in out
         assert f"${{{_ARMA_GUID}}}" not in out
 
     def test_populated_catalog_emits_child_prefab(self):
@@ -174,7 +178,7 @@ class TestLakeGeneratorChild:
             })
             out = gen._generate_water_layer()
 
-        assert "SplineShapeEntity Water_0 {" in out
+        assert "SplineShapeEntity Lake_" in out
         assert f"${{{_ARMA_GUID}}}{fake_prefab}" in out
         assert "coords 0 0 0" in out
 
@@ -227,7 +231,8 @@ class TestRiverSplines:
             "features": [_line_feature(_RIVER_LINE, water_type="river", name="Test River")],
         })
         out = gen._generate_water_layer()
-        assert "SplineShapeEntity River_0 {" in out
+        # v1.4.0 — named river uses the OSM name as the descriptor.
+        assert "SplineShapeEntity River_TestRiver" in out
         assert "Test River" in out
         assert "~15m" in out  # river default width
 
@@ -268,8 +273,9 @@ class TestRiverSplines:
             ],
         })
         out = gen._generate_water_layer()
-        assert "SplineShapeEntity Water_0 {" in out
-        assert "SplineShapeEntity River_0 {" in out
+        # v1.4.0 — anonymous lake → Lake_<quadrant>_NNN, named river → River_OrRiver.
+        assert "SplineShapeEntity Lake_" in out
+        assert "SplineShapeEntity River_OrRiver" in out
         assert "Ör River" in out
 
     def test_non_water_linestring_not_emitted(self):

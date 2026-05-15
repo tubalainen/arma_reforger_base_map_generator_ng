@@ -124,7 +124,10 @@ class TestProcessRoads:
     def test_empty_input(self):
         from services.road_processor import process_roads
         result = process_roads(None, "NO")
-        assert result == {"roads": [], "stats": {}}
+        assert result["roads"] == []
+        # Empty stats are zeroed out per category (added in v1.4.0 to keep
+        # downstream consumers from needing key-presence checks).
+        assert result["stats"]["total"] == 0
 
     def test_empty_features(self):
         from services.road_processor import process_roads
@@ -173,31 +176,39 @@ class TestExportRoadsSplineCsv:
 
 
 class TestValidateRoadPrefab:
-    """The Phase 1 / L10 fix: never emit a fabricated prefab name."""
+    """v1.4.0 — Atlas 2 canonical names. validate_road_prefab snaps any
+    fabricated `_<width>m` name to the closest canonical prefab on the same
+    surface, and falls back to RG_Road_Asphalt_E_01_Narrow for anything we
+    can't infer a surface for."""
 
-    def test_known_prefab_passes_through(self):
+    def test_atlas2_canonical_prefab_passes_through(self):
         from config.roads import validate_road_prefab
-        assert validate_road_prefab("RG_Road_Asphalt_6m") == "RG_Road_Asphalt_6m"
+        assert validate_road_prefab("RG_Road_Asphalt_E_01") == "RG_Road_Asphalt_E_01"
+        assert validate_road_prefab("RG_Road_Asphalt_E_03") == "RG_Road_Asphalt_E_03"
+        assert validate_road_prefab("RG_TrailGravel_01") == "RG_TrailGravel_01"
 
-    def test_unknown_falls_back_to_nearest_on_same_surface(self):
-        from config.roads import validate_road_prefab
-        # 5.5m asphalt isn't shipped — closest known is the 5m or 6m variant.
+    def test_legacy_width_suffix_snaps_to_asphalt_family(self):
+        from config.roads import validate_road_prefab, KNOWN_ROAD_PREFABS
+        # Legacy v1.3.x name → should land somewhere in the asphalt family.
         out = validate_road_prefab("RG_Road_Asphalt_5.5m")
-        assert out in {"RG_Road_Asphalt_5m", "RG_Road_Asphalt_6m"}
+        assert out in KNOWN_ROAD_PREFABS
+        assert "Asphalt" in out
 
-    def test_fabricated_unusual_width_snaps_to_known(self):
-        from config.roads import validate_road_prefab
-        # 11m asphalt — closest known is 10m or 14m, picker should pick 10m.
-        assert validate_road_prefab("RG_Road_Asphalt_11m") == "RG_Road_Asphalt_10m"
+    def test_legacy_wide_asphalt_lands_in_asphalt_family(self):
+        from config.roads import validate_road_prefab, KNOWN_ROAD_PREFABS
+        # Legacy 11m asphalt → still asphalt, picker uses preference list.
+        out = validate_road_prefab("RG_Road_Asphalt_11m")
+        assert out in KNOWN_ROAD_PREFABS
+        assert "Asphalt" in out
 
     def test_unknown_surface_falls_back_to_default(self):
         from config.roads import validate_road_prefab
-        # Made-up "Mud" surface — no known prefabs to match against.
-        assert validate_road_prefab("RG_Road_Mud_5m") == "RG_Road_Asphalt_4m"
+        # Made-up "Mud" surface — no surface inference possible.
+        assert validate_road_prefab("RG_Road_Mud_5m") == "RG_Road_Asphalt_E_01_Narrow"
 
     def test_garbage_input_falls_back_to_default(self):
         from config.roads import validate_road_prefab
-        assert validate_road_prefab("totally bogus") == "RG_Road_Asphalt_4m"
+        assert validate_road_prefab("totally bogus") == "RG_Road_Asphalt_E_01_Narrow"
 
     def test_process_roads_only_emits_known_prefabs(self, sample_road_features):
         from config.roads import KNOWN_ROAD_PREFABS

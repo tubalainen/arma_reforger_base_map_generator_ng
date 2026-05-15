@@ -135,7 +135,61 @@ WORLD_PREFABS = {
     "forest_sync": "Prefabs/World/Game/ForestSyncManager.et",
     "destruction": "Prefabs/World/Game/DestructionManager.et",
     "gamemode_editor": "Prefabs/MP/Modes/GameMaster/GameMode_Editor_Full.et",
+    # Atlas 2 alignment (v1.4.0): bootstrap entities every world needs
+    # in order to load to a fully functional Game-Master-ready state.
+    # Listed in "The Atlas 2: Arma Reforger Terrain Creation Guide" (Jakerod).
+    "mp_destruction":      "Prefabs/MP/Game/MPDestructionManager.et",
+    "preload":             "Prefabs/World/Game/PreloadManager.et",
+    "radio_broadcast":     "Prefabs/MP/Game/RadioBroadcastManager.et",
+    "music_manager":       "Prefabs/MP/Modes/GameMaster/MusicManager_Base.et",
 }
+
+# Country code → biome-specific AmbientSounds prefab. Resolved at emit time
+# in EnfusionProjectGenerator via _resolve_ambient_prefab(country_code).
+# Falls back to AmbientSounds_Everon for any country not explicitly mapped.
+AMBIENT_SOUND_PREFABS: dict[str, str] = {
+    "default": "Prefabs/Sound/AmbientSounds_Everon.et",
+    # Nordic / boreal countries use the Arland (forested boreal) ambient
+    # which matches their dominant biome better than Everon's mediterranean.
+    "NO": "Prefabs/Sound/AmbientSounds_Arland.et",
+    "SE": "Prefabs/Sound/AmbientSounds_Arland.et",
+    "FI": "Prefabs/Sound/AmbientSounds_Arland.et",
+    "DK": "Prefabs/Sound/AmbientSounds_Arland.et",
+    "EE": "Prefabs/Sound/AmbientSounds_Arland.et",
+    "LV": "Prefabs/Sound/AmbientSounds_Arland.et",
+    "LT": "Prefabs/Sound/AmbientSounds_Arland.et",
+}
+
+# Keys from WORLD_PREFABS that are emitted into the managers layer.
+# Used by SETUP_GUIDE generator to render the "Bootstrap entities" status
+# table and by tests to assert layer completeness.
+MANDATORY_BOOTSTRAP_KEYS: tuple[str, ...] = (
+    "camera",
+    "time_weather",
+    "projectile_sounds",
+    "map_entity",
+    "sound_world",
+    "forest_sync",
+    "destruction",
+    # Added in v1.4.0 (Atlas 2 alignment)
+    "mp_destruction",
+    "preload",
+    "radio_broadcast",
+    "music_manager",
+)
+
+
+def resolve_ambient_prefab(country_codes: list[str] | None) -> str:
+    """
+    Pick the biome-appropriate AmbientSounds_*.et prefab for a given set of
+    country codes detected for the terrain. First matching country wins.
+    Falls back to AmbientSounds_Everon.
+    """
+    if country_codes:
+        for code in country_codes:
+            if code in AMBIENT_SOUND_PREFABS:
+                return AMBIENT_SOUND_PREFABS[code]
+    return AMBIENT_SOUND_PREFABS["default"]
 
 # ---------------------------------------------------------------------------
 # Generator prefab base paths (verified from wiki Directory Structure)

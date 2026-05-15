@@ -75,7 +75,7 @@ def generator_factory():
     from services.enfusion_project_generator import EnfusionProjectGenerator
 
     def _make(forest_features=None, water_features=None):
-        return EnfusionProjectGenerator(
+        gen = EnfusionProjectGenerator(
             map_name="TestMap",
             metadata=_metadata_for_4km_terrain(),
             transformer=_IdentityTransformer(),
@@ -83,6 +83,8 @@ def generator_factory():
             forest_features=forest_features,
             water_features=water_features,
         )
+        gen._reset_naming_state()
+        return gen
     return _make
 
 
@@ -109,8 +111,10 @@ class TestVegetationLayer:
         })
         out = gen._generate_vegetation_layer()
 
-        # One entity with the expected name prefix
-        assert out.count("SplineShapeEntity ForestArea_0 {") == 1
+        # v1.4.0 — descriptive names (Forest_<type>_<quadrant>_NNN).
+        # Fixture has no leaf_type → forest_type defaults to "mixed" → token "Mixed".
+        assert out.count("SplineShapeEntity Forest_") == 1
+        assert "SplineShapeEntity Forest_Mixed_" in out
         # 4 unique points + 1 repeat for the close = 5 ShapePoint blocks
         assert out.count("ShapePoint sp_") == 5
         assert "ShapePoint sp_0" in out and "ShapePoint sp_4" in out
@@ -126,8 +130,9 @@ class TestVegetationLayer:
             "features": [_multipolygon_feature([[ring_a], [ring_b]], type="forest")],
         })
         out = gen._generate_vegetation_layer()
-        assert "SplineShapeEntity ForestArea_0 {" in out
-        assert "SplineShapeEntity ForestArea_1 {" in out
+        # v1.4.0 — two anonymous mixed forest polygons get two
+        # Forest_Mixed_<quadrant>_NNN entries.
+        assert out.count("SplineShapeEntity Forest_") == 2
 
     def test_polygon_with_holes_uses_only_exterior_ring(self, generator_factory):
         # Outer square + inner hole — hole must be ignored (splines can't have holes)
@@ -139,7 +144,7 @@ class TestVegetationLayer:
         })
         out = gen._generate_vegetation_layer()
         # One spline entity (not two — the hole is dropped)
-        assert out.count("SplineShapeEntity ForestArea_") == 1
+        assert out.count("SplineShapeEntity Forest_") == 1
         # And it has 5 ShapePoints (4 outer + 1 close), not 9 or more
         assert out.count("ShapePoint sp_") == 5
 
@@ -186,7 +191,8 @@ class TestWaterLayer:
             "features": [_polygon_feature([ring], water_type="lake")],
         })
         out = gen._generate_water_layer()
-        assert "SplineShapeEntity Water_0 {" in out
+        # v1.4.0 — anonymous lake gets Lake_<quadrant>_NNN.
+        assert out.count("SplineShapeEntity Lake_") == 1
 
     def test_river_polygon_is_filtered_out(self, generator_factory):
         # water_type=river is excluded — only standing-water types qualify
@@ -212,9 +218,10 @@ class TestWaterLayer:
             ],
         })
         out = gen._generate_water_layer()
-        assert "SplineShapeEntity Water_0 {" in out
-        assert "SplineShapeEntity Water_1 {" in out
-        assert "SplineShapeEntity Water_2 {" not in out
+        # v1.4.0 — two anonymous lake/pond polygons → two Lake_* / Pond_*
+        # entries; river polygon is still filtered out (Lake naming kind
+        # applies because filter_values keeps standing-water only).
+        assert out.count("SplineShapeEntity Lake_") + out.count("SplineShapeEntity Pond_") == 2
 
     def test_no_water_features_emits_empty_message(self, generator_factory):
         gen = generator_factory(water_features=None)

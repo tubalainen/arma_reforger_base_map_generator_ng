@@ -19,6 +19,7 @@ from config import (
     ROAD_ENFUSION_PREFAB,
     validate_road_prefab,
 )
+from config.roads import ROAD_PREFAB_BY_CLASS
 
 logger = logging.getLogger(__name__)
 
@@ -30,18 +31,10 @@ DEFAULT_ROAD_RULES = {
     "forest_road_surface": "gravel",
 }
 
-# Enfusion road prefab mapping by (surface, width_class)
-ENFUSION_ROAD_PREFABS = {
-    ("asphalt", "wide"): "RG_Road_Asphalt_8m",
-    ("asphalt", "medium"): "RG_Road_Asphalt_6m",
-    ("asphalt", "narrow"): "RG_Road_Asphalt_4m",
-    ("gravel", "wide"): "RG_Road_Gravel_6m",
-    ("gravel", "medium"): "RG_Road_Gravel_4m",
-    ("gravel", "narrow"): "RG_Road_Gravel_3m",
-    ("dirt", "wide"): "RG_Road_Dirt_4m",
-    ("dirt", "medium"): "RG_Road_Dirt_3m",
-    ("dirt", "narrow"): "RG_Road_Dirt_2m",
-}
+# Enfusion road prefab mapping by (surface, width_class).
+# v1.4.0 — Atlas 2 canonical names sourced from config.roads.ROAD_PREFAB_BY_CLASS.
+# Kept as a module-level alias so existing imports keep working.
+ENFUSION_ROAD_PREFABS = ROAD_PREFAB_BY_CLASS
 
 
 def infer_road_surface(
@@ -219,16 +212,14 @@ def process_roads(
         width = infer_road_width(highway_type, osm_width, osm_lanes, surface)
         width_class = get_width_class(width)
 
-        # Get Enfusion prefab (try config first, then local mapping)
+        # Get Enfusion prefab (try config first, then (surface, width-class)
+        # lookup against the Atlas 2 catalogue in config.roads).
         prefab = ROAD_ENFUSION_PREFAB.get(highway_type)
         if not prefab:
-            prefab = ENFUSION_ROAD_PREFABS.get(
-                (surface, width_class),
-                f"RG_Road_{surface.capitalize()}_{int(width)}m"
-            )
-        # Snap to a known-good prefab so we never write a fabricated name
-        # that fails to resolve in Workbench.
-        prefab = validate_road_prefab(prefab)
+            prefab = ENFUSION_ROAD_PREFABS.get((surface, width_class))
+        # Snap to a known-good Atlas 2 prefab so we never write a fabricated
+        # name that fails to resolve in Workbench.
+        prefab = validate_road_prefab(prefab or "")
 
         # Convert coordinates to spline control points
         spline_points = []
