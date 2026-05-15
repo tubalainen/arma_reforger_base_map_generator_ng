@@ -619,27 +619,40 @@ river generator child manually if your project uses one.
 ### Step 6.3: Buildings
 
 Your terrain has **{self.features.get('buildings', 0)}** building footprints
-extracted from OpenStreetMap. The buildings layer (`{self.map_name}_buildings.layer`)
-emits one entity per building, in one of two modes depending on whether the
-generator has a confirmed Enfusion prefab path for the building's category:
+extracted from OpenStreetMap. As of v1.4.1, the buildings layer
+(`{self.map_name}_buildings.layer`) auto-places every building as a
+positioned `Prefabs/Structures/.../Building_*.et` instance — no manual
+prefab-dropping needed.
 
-- **Auto-placed** (when a verified prefab is configured for the category):
-  the entity is a positioned `Building_*.et` prefab instance — appears in
-  the editor at the correct position with no further wiring needed.
-- **Footprint marker** (default until prefab paths are confirmed): the
-  entity is a closed `SplineShapeEntity` tracing the building's exterior
-  ring. You can right-click the spline > Add Child Entity > **BuildingEntity**
-  and set the prefab from `Prefabs/Structures/`.
+OSM `building=<type>` tags are mapped to verified stock Reforger prefabs:
+
+| OSM building type        | Reforger prefab |
+|--------------------------|-----------------|
+| `house` / `detached`     | `House_Village_E_1I01` (single-storey village house) |
+| `residential`            | `House_Town_E_2I01` (two-storey town house) |
+| `apartments`             | `Villa_E_2I01` |
+| `church` / `chapel`      | `Church_01` |
+| `commercial` / `retail` / `school` / `hospital` / `office` | `ShopModern_E_01` |
+| `industrial` / `warehouse` | `Office_E_01` |
+| `garage` / `garages`     | `HouseAddon_Garage_E_01` |
+| `barn` / `farm`          | `Barn_E_03_closed` |
+| `farm_auxiliary` / `shed` | `Shed_01` |
+| `yes` (no detail)        | `House_Village_E_1I01` (fallback) |
+
+Every path was harvested from public Reforger mod source on GitHub and
+verified to load successfully in stock Workbench — see the docstring at
+[`webapp/config/buildings.py`](../webapp/config/buildings.py) for the
+sourcing methodology.
 
 Buildings whose centroid would have fallen on top of an asphalt road have
-been dropped automatically (so traffic/pathing isn't broken).
+been dropped automatically (so traffic/pathing isn't broken — known as the
+"L12 de-conflict" step).
 
-> **To enable auto-placement for your install**: edit
-> `webapp/config/buildings.py::KNOWN_BUILDING_PREFABS` and add entries
-> mapping the category labels (e.g. `Building_House`,
-> `Building_Apartments`) to the actual `.et` paths from your stock
-> Reforger install. No code changes required — the layer generator will
-> pick up the catalog on the next map generation.
+**To swap a variant** (e.g. use a wooden house instead of `House_Village_E_1I01`
+for `Building_House`): edit
+`webapp/config/buildings.py::KNOWN_BUILDING_PREFABS` and change the path.
+The next generation picks up the change automatically. **To go back to
+footprint-marker mode** for a category: remove its entry from the catalogue.
 
 > Source data: `Reference/osm_buildings.geojson` and `features.json`
 > (look for the `buildings` array)."""

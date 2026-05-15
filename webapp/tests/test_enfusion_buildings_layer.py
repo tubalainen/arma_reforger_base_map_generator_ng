@@ -142,25 +142,50 @@ requires_shapely = pytest.mark.skipif(
 class TestValidateBuildingPrefab:
     def test_unknown_category_returns_none(self):
         from config.buildings import validate_building_prefab
-        # Default catalog ships empty so every category is unknown.
-        assert validate_building_prefab("Building_House") is None
+        # An unmapped category (e.g. a hypothetical future "Building_Lighthouse")
+        # falls back to footprint-marker mode by returning None. Categories
+        # currently in the catalog all resolve — see test_known_category_resolves.
+        assert validate_building_prefab("Building_DoesNotExist_42") is None
 
     def test_none_input_returns_none(self):
         from config.buildings import validate_building_prefab
         assert validate_building_prefab(None) is None
         assert validate_building_prefab("") is None
 
-    def test_known_category_returns_path(self, monkeypatch):
-        # Simulate a future expansion of the catalog.
-        from config import buildings as buildings_config
-        monkeypatch.setitem(
-            buildings_config.KNOWN_BUILDING_PREFABS,
+    def test_known_category_resolves_to_atlas_verified_path(self):
+        """v1.4.1 — KNOWN_BUILDING_PREFABS is populated. Every category the
+        feature_extractor produces must now resolve to a Prefabs/Structures
+        path that has been verified against community mod source."""
+        from config.buildings import validate_building_prefab
+        path = validate_building_prefab("Building_House")
+        assert path is not None
+        assert path.startswith("Prefabs/Structures/")
+        assert path.endswith(".et")
+
+    def test_catalog_covers_every_feature_extractor_category(self):
+        """Regression guard: if feature_extractor adds a new category label
+        without a matching catalogue entry, every building of that type would
+        silently fall back to footprint markers. Pin the contract."""
+        from config.buildings import KNOWN_BUILDING_PREFABS
+        # These are the exact category labels produced by
+        # services.feature_extractor.extract_building_features().
+        expected_categories = {
             "Building_House",
-            "Prefabs/Structures/Civilian/Test_House.et",
-        )
-        assert (
-            buildings_config.validate_building_prefab("Building_House")
-            == "Prefabs/Structures/Civilian/Test_House.et"
+            "Building_Residential",
+            "Building_Apartments",
+            "Building_Church",
+            "Building_Commercial",
+            "Building_Industrial",
+            "Building_Garage",
+            "Building_Barn",
+            "Building_Shed",
+            "Building_Generic",
+        }
+        missing = expected_categories - KNOWN_BUILDING_PREFABS.keys()
+        assert not missing, (
+            f"feature_extractor emits categor(y/ies) {missing} that aren't in "
+            f"KNOWN_BUILDING_PREFABS — buildings of that type will fall back "
+            f"to footprint markers."
         )
 
 
