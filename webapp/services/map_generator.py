@@ -915,10 +915,13 @@ async def run_generation(job: MapGenerationJob):
         logger.info(f"[{job.job_id}] Step 5: Surface mask generation")
         job.add_log("Generating surface masks (9 types: grass, forest, pine, asphalt, gravel, dirt, rock, sand, water edge)...")
 
-        # Pass heightmap dimensions so masks are generated at matching size
+        # Heightmap is at vertex resolution (N+1); surface weight masks must be
+        # at face resolution (N). At vertex resolution, Workbench's NVTT bake
+        # crashes in nvtt::CubeSurface::toGamma on the first manual paint
+        # stroke after import. (Issue #100)
         hm_dims_str = heightmap_result["dimensions"]
-        hm_dims_parts = hm_dims_str.split("x")
-        heightmap_dims = (int(hm_dims_parts[0]), int(hm_dims_parts[1]))
+        hm_w, hm_h = (int(p) for p in hm_dims_str.split("x"))
+        mask_dims = (hm_w - 1, hm_h - 1)
 
         surface_result = step_generate_surface_masks(
             elevation_array=heightmap_result["_elevation_array"],
@@ -927,7 +930,7 @@ async def run_generation(job: MapGenerationJob):
             target_resolution=target_resolution,
             output_dir=output_dir,
             primary_country=primary_country,
-            heightmap_dimensions=heightmap_dims,
+            heightmap_dimensions=mask_dims,
             job=job,
         )
 

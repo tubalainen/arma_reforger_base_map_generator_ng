@@ -21,7 +21,10 @@ WEBAPP_DIR = Path(__file__).parent.parent
 if str(WEBAPP_DIR) not in sys.path:
     sys.path.insert(0, str(WEBAPP_DIR))
 
-from services.surface_mask_generator import generate_surface_masks  # noqa: E402
+from services.surface_mask_generator import (  # noqa: E402
+    check_block_saturation,
+    generate_surface_masks,
+)
 
 
 # Small Swedish bbox at ~1m/pixel — 512×512 is enough for the rasterization
@@ -251,4 +254,86 @@ class TestAsphaltUsesPerFeatureWidth:
             f"Wider road must produce a thicker asphalt stripe; "
             f"narrow(4m)={narrow_count}, wide(14m)={wide_count}. "
             f"Pre-v1.2.5 both used a fixed 6m buffer regardless of OSM width."
+        )
+
+
+class TestSurfaceMasksSaveAtRequestedDimensions:
+    """Issue #100: Workbench crashes in nvtt::CubeSurface::toGamma when surface
+    weight masks are at vertex resolution (N+1) instead of face resolution (N).
+    The caller in map_generator.py now passes (vertex - 1) as the target dims;
+    this test pins the contract that the saved PNGs match what we request."""
+
+    def test_masks_are_saved_at_face_resolution(self, tmp_path: Path):
+        # Elevation at vertex resolution (N+1 = 257), masks requested at face
+        # resolution (N = 256) — mirrors the production call site.
+        vertex = 257
+        face = vertex - 1
+        elevation = np.full((vertex, vertex), 100.0, dtype=np.float32)
+
+        # Minimum viable OSM data — a single short motorway so an asphalt mask
+        # gets saved and we have at least one non-default mask file to check.
+        osm = {
+            "roads": {
+                "type": "FeatureCollection",
+                "features": [_road_feature(15.001, 58.0015, 15.004, "motorway")],
+            },
+            "water": _empty_collection(),
+            "forests": _empty_collection(),
+            "buildings": _empty_collection(),
+            "land_use": _empty_collection(),
+        }
+
+        generate_surface_masks(
+            elevation=elevation,
+            osm_data=osm,
+            bounds=BBOX,
+            cell_size_m=1.0,
+            output_dir=tmp_path,
+            country_code="SE",
+            heightmap_dimensions=(face, face),
+        )
+
+        saved = list(tmp_path.glob("surface_*.png"))
+        assert saved, "Expected at least one surface_*.png to be written"
+        for png_path in saved:
+            with Image.open(png_path) as img:
+                assert img.size == (face, face), (
+                    f"{png_path.name} is {img.size}, expected ({face}, {face}). "
+                    f"Vertex-resolution masks crash Workbench's NVTT bake on the "
+                    f"first manual paint stroke (issue #100)."
+                )
+
+
+class TestBlockSaturationUsesFaceCellSize:
+    """The block-saturation check must iterate with step = BLOCK_FACE_SIZE (32),
+    not BLOCK_VERTEX_SIZE (33). Stepping by 33 misaligns the analysis windows
+    against the Enfusion block grid (which tiles by 32 faces) and produces
+    block coordinates that don't match what Workbench actually sees."""
+
+    def test_six_surfaces_in_a_single_face_block_is_detected(self):
+        # A 64×64 face-resolution canvas = exactly 4 Enfusion blocks (2×2 of
+        # 32×32). Paint 6 distinct surfaces inside the top-left block only.
+        h = w = 64
+        masks = {}
+        for i, name in enumerate(["a", "b", "c", "d", "e", "f"]):
+            m = np.zeros((h, w), dtype=np.uint8)
+            # Each surface gets a small strip inside block (0..32, 0..32).
+            y0 = i * 4
+            m[y0:y0 + 3, 4:28] = 200
+            masks[name] = m
+
+        result = check_block_saturation(masks)
+
+        assert result["violations"] >= 1, (
+            "6 surfaces inside a single 32-cell block must register as a "
+            "saturation violation."
+        )
+        # And the reported block coordinates must be face-cell block coords —
+        # i.e. block (0, 0), not the 33-stride coord (0, 0) which would also
+        # falsely flag adjacent blocks.
+        offending = [
+            (d["block_x"], d["block_y"]) for d in result["details"]
+        ]
+        assert (0, 0) in offending, (
+            f"Expected the (0,0) block to be flagged; got {offending}"
         )

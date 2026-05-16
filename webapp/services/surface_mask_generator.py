@@ -28,6 +28,7 @@ from scipy import ndimage
 
 from config import TREELINE_ELEVATION
 from config.enfusion import (
+    BLOCK_FACE_SIZE,
     BLOCK_VERTEX_SIZE,
     MAX_SURFACES_PER_BLOCK,
     BLOCK_SURFACE_THRESHOLD,
@@ -110,18 +111,23 @@ def slope_ramp_mask(
 
 def check_block_saturation(
     masks: dict[str, np.ndarray],
-    block_size: int = BLOCK_VERTEX_SIZE,
+    block_size: int = BLOCK_FACE_SIZE,
     threshold: int = BLOCK_SURFACE_THRESHOLD,
 ) -> dict:
     """
     Check if any terrain block exceeds the max surface limit.
 
-    Each block (33x33 vertices) supports at most 5 surfaces.
-    A surface is counted if any pixel in the block exceeds the threshold.
+    Each Enfusion block covers 32x32 faces (33x33 vertices, with adjacent
+    blocks sharing the boundary vertex row/column) and supports at most 5
+    surfaces. Surface masks are stored at *face* resolution, so we iterate
+    with a 32-pixel step over a 32-pixel window — perfectly tiling the
+    block grid. A surface is counted if any pixel in the block exceeds the
+    threshold.
 
     Args:
-        masks: Dict mapping surface name to uint8 mask array.
-        block_size: Block size in pixels (default 33 for Enfusion).
+        masks: Dict mapping surface name to uint8 mask array, sized at
+            face resolution (N for an N-cell terrain).
+        block_size: Block size in pixels (default 32 = face-cell block).
         threshold: Minimum pixel value to count as "meaningful coverage".
 
     Returns:
@@ -165,7 +171,7 @@ def check_block_saturation(
 
 def auto_merge_violations(
     masks: dict[str, np.ndarray],
-    block_size: int = BLOCK_VERTEX_SIZE,
+    block_size: int = BLOCK_FACE_SIZE,
     threshold: int = BLOCK_SURFACE_THRESHOLD,
     default_surface: str = "grass",
 ) -> dict[str, np.ndarray]:
@@ -380,7 +386,11 @@ def generate_surface_masks(
         cell_size_m: Grid cell size in metres.
         output_dir: Output directory for mask PNGs.
         country_code: ISO country code for country-specific rules.
-        heightmap_dimensions: (width, height) to ensure masks match heightmap.
+        heightmap_dimensions: (width, height) target size for the saved
+            masks. Pass at *face* resolution (= heightmap vertex count − 1)
+            so the masks line up with Enfusion's 32-face block grid. Passing
+            vertex resolution (N+1) ships PNGs that crash Workbench's NVTT
+            bake on the first manual paint stroke (issue #100).
         job: Optional MapGenerationJob for logging.
 
     Returns:
