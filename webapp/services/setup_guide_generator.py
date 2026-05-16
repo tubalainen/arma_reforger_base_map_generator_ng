@@ -61,6 +61,7 @@ class SetupGuideGenerator:
         self.enfusion = metadata.get("enfusion_import", {})
         self.settings = self.enfusion.get("recommended_settings", {})
         self.coord_info = metadata.get("coordinate_transform", {})
+        self.feature_sources = metadata.get("feature_sources", {})
 
         # Coverage data
         self.coverage = self.surf.get("coverage", {})
@@ -103,6 +104,7 @@ class SetupGuideGenerator:
             self._appendix_files(),
             self._appendix_parameters(),
             self._appendix_troubleshooting(),
+            self._appendix_data_sources(),
             self._appendix_next_steps(),
         ]
 
@@ -869,8 +871,151 @@ about any file it does not recognise. You can safely ignore these warnings.
 - Close unnecessary panels
 - Consider working with a smaller terrain first"""
 
+    def _appendix_data_sources(self) -> str:
+        """Appendix D — concrete record of which APIs/datasets supplied
+        this specific generation (issue #75). Pulls live source strings out
+        of metadata for elevation, satellite, and per-feature-category vector
+        providers, then renders fixed attribution lines."""
+        elev_source = self.elev.get("source", "Unknown")
+        elev_res = self.elev.get("resolution_m")
+        elev_line = f"- **Elevation:** {elev_source}"
+        if elev_res is not None:
+            elev_line += f" ({elev_res} m resolution)"
+
+        sat_lines = []
+        if self.satellite:
+            sat_source = self.satellite.get("source", "Sentinel-2 Cloudless (EOX)")
+            sat_dims = self.satellite.get("dimensions", "")
+            sat_line = f"- **Satellite imagery:** {sat_source}"
+            if sat_dims:
+                sat_line += f" ({sat_dims})"
+            sat_lines.append(sat_line)
+        else:
+            sat_lines.append("- **Satellite imagery:** not generated")
+
+        countries = self.input_data.get("countries") or []
+        if not countries:
+            countries = [self.input_data.get("primary_country", "UNKNOWN")]
+
+        feature_rows = []
+        if self.feature_sources:
+            for category in ("roads", "buildings", "water", "forests", "land_use"):
+                src = self.feature_sources.get(category)
+                if src:
+                    feature_rows.append(f"| {category.replace('_', ' ').title():<10} | {src} |")
+        if not feature_rows:
+            feature_rows.append("| (no per-category source info recorded) | |")
+        feature_table = "\n".join(feature_rows)
+
+        attribution_lines = []
+        sources_seen = set()
+        sources_seen.add(elev_source)
+        if self.satellite:
+            sources_seen.add(self.satellite.get("source", ""))
+        for v in self.feature_sources.values():
+            sources_seen.add(v)
+
+        def _matches(needle: str) -> bool:
+            return any(needle.lower() in s.lower() for s in sources_seen if s)
+
+        if _matches("OpenStreetMap"):
+            attribution_lines.append(
+                "- **OpenStreetMap:** © OpenStreetMap contributors, "
+                "licensed under the [Open Database License (ODbL)]"
+                "(https://www.openstreetmap.org/copyright)."
+            )
+        if _matches("Lantmäteriet") or _matches("Hydrografi") or _matches("Marktäcke") or _matches("STAC"):
+            attribution_lines.append(
+                "- **Lantmäteriet** (STAC Höjd / STAC Bild / Hydrografi / Marktäcke): "
+                "open data under [CC0 1.0]"
+                "(https://creativecommons.org/publicdomain/zero/1.0/) "
+                "via the Lantmäteriet open data programme."
+            )
+        if _matches("Sentinel-2") or _matches("EOX"):
+            attribution_lines.append(
+                "- **Sentinel-2 Cloudless** (EOX): Contains modified Copernicus "
+                "Sentinel data 2024, processed by EOX IT Services GmbH."
+            )
+        if _matches("Copernicus DEM") or _matches("COP30") or _matches("AWS"):
+            attribution_lines.append(
+                "- **Copernicus DEM GLO-30:** © DLR e.V. 2010-2014 and "
+                "© Airbus Defence and Space GmbH 2014-2018, provided under "
+                "the [Copernicus Data License]"
+                "(https://spacedata.copernicus.eu/web/cscda/data-access/cop-dem)."
+            )
+        if _matches("OpenTopography"):
+            attribution_lines.append(
+                "- **OpenTopography:** SRTM / COP30 access via "
+                "[OpenTopography.org](https://opentopography.org/)."
+            )
+        if _matches("ALOS"):
+            attribution_lines.append(
+                "- **ALOS World 3D 30 m (AW3D30):** © JAXA, distributed via the "
+                "[JAXA Earth Observation Research Center]"
+                "(https://www.eorc.jaxa.jp/ALOS/en/dataset/aw3d30/aw3d30_e.htm)."
+            )
+        if _matches("Kartverket"):
+            attribution_lines.append(
+                "- **Kartverket** (Norway): open data under "
+                "[NLOD 2.0](https://data.norge.no/nlod/en/2.0/)."
+            )
+        if _matches("Maa-amet"):
+            attribution_lines.append(
+                "- **Maa-amet** (Estonia): open data, "
+                "[Maa-amet open data terms](https://geoportaal.maaamet.ee/eng/)."
+            )
+        if _matches("NLS"):
+            attribution_lines.append(
+                "- **NLS Finland:** open data under the "
+                "[NLS open data licence]"
+                "(https://www.maanmittauslaitos.fi/en/opendata-licence-version1)."
+            )
+        if _matches("Dataforsyningen"):
+            attribution_lines.append(
+                "- **Dataforsyningen** (Denmark): open data via "
+                "[Dataforsyningen](https://dataforsyningen.dk/)."
+            )
+        if _matches("GUGiK"):
+            attribution_lines.append(
+                "- **GUGiK** (Poland): open data via "
+                "[GUGiK Geoportal](https://www.geoportal.gov.pl/)."
+            )
+        # Country detection is always Natural Earth.
+        attribution_lines.append(
+            "- **Country detection:** [Natural Earth 10m Admin 0 Countries]"
+            "(https://www.naturalearthdata.com/) — public domain."
+        )
+
+        attribution_block = "\n".join(attribution_lines)
+        country_str = ", ".join(countries)
+
+        return f"""## Appendix D: Data Sources
+
+This map was generated using the following sources. Source selection is
+automatic per area — the table below records exactly what was used for
+**this** generation.
+
+### Per-layer providers
+
+{elev_line}
+{chr(10).join(sat_lines)}
+- **Country detection:** Natural Earth 10m Admin 0 Countries (public domain)
+- **Covered countries:** {country_str}
+
+| Feature    | Provider |
+|------------|----------|
+{feature_table}
+
+### Attribution & licences
+
+{attribution_block}
+
+If you republish or redistribute the generated map (e.g. as a Workshop
+upload), please preserve the attribution above so each upstream dataset
+is properly credited."""
+
     def _appendix_next_steps(self) -> str:
-        return f"""## Appendix D: Next Steps
+        return f"""## Appendix E: Next Steps
 
 Once your basic terrain is set up, consider:
 

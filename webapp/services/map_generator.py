@@ -56,6 +56,11 @@ class MapGenerationJob:
         self.result = None
         self.created_at = datetime.utcnow().isoformat()
         self.completed_at = None
+        # Per-feature-category data source, populated by step_fetch_features.
+        # Maps "roads"/"buildings"/"water"/"forests"/"land_use" → display name
+        # (e.g. "OpenStreetMap (Overpass)", "Lantmäteriet Hydrografi"). Surfaced
+        # in metadata.json + the Data Sources appendix of SETUP_GUIDE.md.
+        self.feature_sources: dict[str, str] = {}
 
     def add_log(self, message: str, level: str = "info"):
         """
@@ -200,6 +205,11 @@ async def step_fetch_osm(
         with open(output_dir / f"osm_{name}.geojson", "w") as f:
             json.dump(data, f)
 
+    if job is not None:
+        osm_label = "OpenStreetMap (Overpass)"
+        for category in ("roads", "buildings", "water", "forests", "land_use"):
+            job.feature_sources[category] = osm_label
+
     return osm_data
 
 
@@ -304,12 +314,16 @@ async def _fetch_features_sweden(
     )
 
     result = {}
+    sources: dict[str, str] = {}
+    osm_label = "OpenStreetMap (Overpass)"
 
     # --- Roads: always OSM ---
     result["roads"] = _safe_result(osm_roads, "roads", job)
+    sources["roads"] = osm_label
 
     # --- Buildings: always OSM ---
     result["buildings"] = _safe_result(osm_buildings, "buildings", job)
+    sources["buildings"] = osm_label
 
     # --- Water: Lantmäteriet Hydrografi primary, OSM fallback ---
     if isinstance(lm_water, Exception) or lm_water is None:
@@ -322,8 +336,10 @@ async def _fetch_features_sweden(
             )
         osm_water = await fetch_water(bbox, job)
         result["water"] = _safe_result(osm_water, "water", job)
+        sources["water"] = f"{osm_label} (Lantmäteriet Hydrografi unavailable)"
     else:
         result["water"] = lm_water
+        sources["water"] = "Lantmäteriet Hydrografi"
 
     # --- Forests + Land use: Lantmäteriet Marktäcke primary, OSM fallback ---
     if isinstance(lm_land_cover, Exception) or lm_land_cover is None:
@@ -338,9 +354,13 @@ async def _fetch_features_sweden(
         osm_land_use = await fetch_land_use(bbox, job)
         result["forests"] = _safe_result(osm_forests, "forests", job)
         result["land_use"] = _safe_result(osm_land_use, "land_use", job)
+        sources["forests"] = f"{osm_label} (Lantmäteriet Marktäcke unavailable)"
+        sources["land_use"] = sources["forests"]
     else:
         result["forests"] = lm_land_cover.get("forests", _empty_fc())
         result["land_use"] = lm_land_cover.get("land_use", _empty_fc())
+        sources["forests"] = "Lantmäteriet Marktäcke"
+        sources["land_use"] = "Lantmäteriet Marktäcke"
 
         # Merge Marktäcke supplementary water (Hav, Sjö, etc.) into water
         marktacke_water = lm_land_cover.get("water", {})
@@ -348,11 +368,17 @@ async def _fetch_features_sweden(
             result["water"] = _merge_feature_collections(
                 result["water"], marktacke_water
             )
+            # If Hydrografi already gave us water, note the supplement.
+            if sources["water"] == "Lantmäteriet Hydrografi":
+                sources["water"] = "Lantmäteriet Hydrografi + Marktäcke"
 
     # Save GeoJSON files (same naming as OSM path for downstream compatibility)
     for name, data in result.items():
         with open(output_dir / f"osm_{name}.geojson", "w") as f:
             json.dump(data, f)
+
+    if job is not None:
+        job.feature_sources = sources
 
     return result
 
@@ -564,6 +590,7 @@ def build_metadata(
     satellite_result: dict = None,
     coordinate_transform: dict = None,
     map_name: str = None,
+    feature_sources: dict = None,
 ) -> dict:
     """Assemble the output metadata.json content."""
     metadata = {
@@ -641,6 +668,12 @@ def build_metadata(
     # Add map name
     if map_name:
         metadata["map_name"] = map_name
+
+    # Per-category vector feature sources (issue #75). Elevation + satellite
+    # sources already live under metadata["elevation"]/["satellite"]; this
+    # block records who provided the OSM/Lantmäteriet vectors for THIS run.
+    if feature_sources:
+        metadata["feature_sources"] = dict(feature_sources)
 
     return metadata
 
@@ -1173,6 +1206,7 @@ async def run_generation(job: MapGenerationJob):
             satellite_result=satellite_result,
             coordinate_transform=coord_verification,
             map_name=map_name,
+            feature_sources=job.feature_sources,
         )
 
         with open(output_dir / "metadata.json", "w") as f:
