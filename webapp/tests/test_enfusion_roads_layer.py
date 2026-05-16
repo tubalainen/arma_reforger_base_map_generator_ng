@@ -185,7 +185,19 @@ class TestRoadsLayerVertexCap:
         assert sp_count >= 2
 
     def test_short_road_passes_through_unchanged(self, make_generator):
-        gen = make_generator([_road(0, "RG_Road_Asphalt_E_01")])
+        # v1.4.4 — simplification now ALWAYS runs (previously gated on
+        # len > MAX_SPLINE_POINTS), so collinear points get collapsed.
+        # The default fixture has 3 collinear points → use a road with a
+        # genuine corner to confirm meaningful geometry survives.
+        road = _road(0, "RG_Road_Asphalt_E_01")
+        road["spline_points"] = [
+            {"x": 1.0, "y": 1.0, "z": 0},
+            {"x": 2.0, "y": 1.0, "z": 0},  # corner — 90° turn
+            {"x": 2.0, "y": 2.0, "z": 0},
+        ]
+        road["point_count"] = 3
+        gen = make_generator([road])
         out = gen._generate_roads_layer()
-        # Fixture has 3 points, well under the cap.
+        # All 3 points survive because the middle vertex is a true corner,
+        # not a collinear filler. Confirms simplification doesn't over-cull.
         assert out.count("ShapePoint sp_") == 3
