@@ -262,6 +262,13 @@ MAX_SURFACES_PER_BLOCK = 5
 # exceeds this limit is simplified with Ramer-Douglas-Peucker before emission.
 MAX_SPLINE_POINTS = 200
 
+# Tighter cap for "natural" splines (forests, lakes, rivers, wetlands).
+# Atlas 2's manual workflow shows humans hand-clicking ~5–20 vertices for
+# typical features — over-detailed splines look unnatural and make the World
+# Editor sluggish.  Roads keep the looser MAX_SPLINE_POINTS because their
+# shapes are dictated by real-world geometry and tested at that cap.
+MAX_SPLINE_POINTS_NATURAL = 120
+
 # Recommended max externally-generated masks (leave room for manual refinement)
 RECOMMENDED_MAX_EXTERNAL_MASKS = 3
 

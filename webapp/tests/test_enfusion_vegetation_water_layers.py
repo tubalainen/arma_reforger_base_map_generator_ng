@@ -229,3 +229,56 @@ class TestWaterLayer:
         assert "// Water layer" in out
         assert "// No standing-water polygons" in out
         assert "SplineShapeEntity" not in out
+
+
+# ---------------------------------------------------------------------------
+# Dedup / cleanup integration (issues #93, #88 — v1.4.4)
+# ---------------------------------------------------------------------------
+
+class TestSplineCleanupIntegration:
+    """
+    End-to-end: confirm that duplicate / overlapping inputs collapse to a
+    single spline entity once they pass through the new normalize_polygons
+    step in the vegetation and water layers.
+    """
+
+    pytest.importorskip("shapely")
+
+    def test_duplicate_forests_collapse_to_one_spline(self, generator_factory):
+        # Same square submitted twice (e.g. OSM way + relation duplicate).
+        ring = [[0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5], [0.5, 0.5]]
+        gen = generator_factory(forest_features={
+            "type": "FeatureCollection",
+            "features": [
+                _polygon_feature([ring], type="forest"),
+                _polygon_feature([ring], type="forest"),
+            ],
+        })
+        out = gen._generate_vegetation_layer()
+        # Despite 2 input features, only 1 spline survives.
+        assert out.count("SplineShapeEntity Forest_") == 1
+
+    def test_touching_forests_merge_into_one_spline(self, generator_factory):
+        a = [[0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5], [0.5, 0.5]]
+        b = [[1.5, 0.5], [2.5, 0.5], [2.5, 1.5], [1.5, 1.5], [1.5, 0.5]]
+        gen = generator_factory(forest_features={
+            "type": "FeatureCollection",
+            "features": [
+                _polygon_feature([a], type="forest"),
+                _polygon_feature([b], type="forest"),
+            ],
+        })
+        out = gen._generate_vegetation_layer()
+        assert out.count("SplineShapeEntity Forest_") == 1
+
+    def test_duplicate_lakes_collapse_to_one_spline(self, generator_factory):
+        ring = [[0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5], [0.5, 0.5]]
+        gen = generator_factory(water_features={
+            "type": "FeatureCollection",
+            "features": [
+                _polygon_feature([ring], water_type="lake"),
+                _polygon_feature([ring], water_type="lake"),
+            ],
+        })
+        out = gen._generate_water_layer()
+        assert out.count("SplineShapeEntity Lake_") == 1
