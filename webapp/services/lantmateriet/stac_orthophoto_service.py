@@ -125,27 +125,50 @@ def _cog_merge_rgb(
     import time
 
     import rasterio
+    from rasterio.crs import CRS
     from rasterio.env import Env
     from rasterio.enums import Resampling
     from rasterio.merge import merge as rasterio_merge
+    from rasterio.vrt import WarpedVRT
 
     x_min, y_min, x_max, y_max = epsg3006_bounds
     n_hrefs = len(vsicurl_hrefs)
+    target_crs = CRS.from_epsg(3006)
 
+    # Datasets and the underlying file handles are tracked separately because
+    # WarpedVRT wrappers must be closed before the wrapped DatasetReader.
     datasets = []
+    source_handles = []
     open_start = time.monotonic()
     with Env(**_gdal_vsicurl_env()):
         # Open all COG files (only the header is fetched at this point)
         for idx, href in enumerate(vsicurl_hrefs, 1):
             try:
                 ds = rasterio.open(href)
-                datasets.append(ds)
-                # Header-only open should be quick; log every tile so the user
-                # can see the loop progressing (one of ~50 lines per request).
-                logger.info(
-                    f"STAC Bild: opened COG {idx}/{n_hrefs} "
-                    f"({ds.width}×{ds.height} px native)"
-                )
+                source_handles.append(ds)
+                # STAC Bild's primary collection is EPSG:3006, but sibling
+                # collections (e.g. se1g) occasionally surface in the same
+                # search result in a different CRS. rasterio.merge() requires
+                # a homogeneous CRS, so wrap mismatched tiles in a WarpedVRT
+                # that lazily reprojects them on read.
+                if ds.crs != target_crs:
+                    vrt = WarpedVRT(
+                        ds,
+                        crs=target_crs,
+                        resampling=Resampling.bilinear,
+                    )
+                    datasets.append(vrt)
+                    logger.info(
+                        f"STAC Bild: opened COG {idx}/{n_hrefs} "
+                        f"({ds.width}×{ds.height} px native, "
+                        f"reprojecting {ds.crs.to_string()} → EPSG:3006)"
+                    )
+                else:
+                    datasets.append(ds)
+                    logger.info(
+                        f"STAC Bild: opened COG {idx}/{n_hrefs} "
+                        f"({ds.width}×{ds.height} px native)"
+                    )
             except Exception as exc:
                 logger.warning(f"Could not open COG {href}: {exc}")
         open_elapsed = time.monotonic() - open_start
@@ -232,7 +255,15 @@ def _cog_merge_rgb(
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=1.0)
+            # Close VRT wrappers before the underlying DatasetReaders they wrap.
             for ds in datasets:
+                if ds in source_handles:
+                    continue
+                try:
+                    ds.close()
+                except Exception:
+                    pass
+            for ds in source_handles:
                 try:
                     ds.close()
                 except Exception:
