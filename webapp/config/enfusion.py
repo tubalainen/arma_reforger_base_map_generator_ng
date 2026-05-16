@@ -9,6 +9,15 @@ Community Wiki (community.bistudio.com) as of 2025-02-09.
 """
 
 # ---------------------------------------------------------------------------
+# Generator version
+# ---------------------------------------------------------------------------
+# Single source of truth — imported by main.py for the web UI and by
+# enfusion_project_generator.py to stamp into every generated file header.
+# Bump here on every release; the README Docker tag pin should match.
+
+APP_VERSION = "1.4.7"
+
+# ---------------------------------------------------------------------------
 # Base game dependency
 # ---------------------------------------------------------------------------
 
