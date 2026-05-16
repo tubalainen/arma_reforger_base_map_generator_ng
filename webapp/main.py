@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from config import OUTPUT_DIR
+from config.enfusion import APP_VERSION
 from middleware.session import SessionMiddleware
 from middleware.security import SecurityHeadersMiddleware
 from middleware.rate_limit import RateLimitMiddleware
@@ -44,10 +45,11 @@ install_job_log_handler()
 configure_gdal_threading()
 
 # ===========================================================================
-# Application version (for cache busting)
+# Application version
 # ===========================================================================
-
-APP_VERSION = "1.4.6"  # Increment when static files change OR a new release ships
+# APP_VERSION is imported from config.enfusion (single source of truth).
+# Bump it there — the value is reused for cache busting here AND stamped
+# into every generated Enfusion file header (issue #99).
 
 # ===========================================================================
 # FastAPI app
