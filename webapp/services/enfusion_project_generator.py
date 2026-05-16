@@ -1000,13 +1000,15 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['env_probe']} {{
         Z-fighting and block traffic.
         """
         header = (
-            "// Buildings layer — one entity per extracted OSM building.\n"
-            "// Buildings with a verified Enfusion prefab in\n"
+            "// Buildings layer — one positioned prefab instance per OSM building.\n"
+            "// Each entity references a verified Building_*.et from\n"
             "//   config/buildings.py::KNOWN_BUILDING_PREFABS\n"
-            "// are emitted as auto-positioned prefab instances. Buildings\n"
-            "// whose category has no verified prefab are emitted as closed\n"
-            "// footprint splines — drag a Building_*.et prefab from\n"
-            "// Prefabs/Structures/ onto each spline to wire it up.\n"
+            "// and is rotated by `angles 0 <yaw> 0` to align the building's\n"
+            "// longest wall with the OSM footprint orientation. Buildings\n"
+            "// with an uncatalogued category are logged and skipped (the\n"
+            "// previous spline-footprint fallback was removed in v1.4.6\n"
+            "// because nested-child syntax inside SplineShapeEntity has\n"
+            "// hung Workbench at 4% on world load — see issue #85).\n"
             "// Buildings overlapping asphalt roads are dropped (L12).\n"
             "// Source data: Reference/osm_buildings.geojson and features.json.\n"
         )
@@ -1079,44 +1081,38 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['env_probe']} {{
 
             if prefab_path:
                 prefab_ref = f"${{{ARMA_REFORGER_GUID}}}{prefab_path}"
+                rotation_deg = float(building.get("rotation_deg", 0.0) or 0.0)
+                body_lines = [
+                    f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}',
+                ]
+                # `angles 0 <yaw> 0` form verified against shipped community
+                # building layers (DarcMods town01.layer, Overthrow, Coalition).
+                # Skip the line for cardinal-aligned buildings to match the
+                # convention in those files — keeps the output diff-friendly.
+                if abs(rotation_deg) > 0.05:
+                    body_lines.append(f' angles 0 {rotation_deg:.2f} 0')
                 entities.append(
                     f'{prefab_ref} {{{comment}\n'
-                    f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
-                    f'}}'
+                    + '\n'.join(body_lines)
+                    + '\n}'
                 )
                 prefab_count += 1
             else:
-                # Footprint marker: emit the exterior ring as a closed spline
-                # the user can right-click → Add Child Entity → BuildingEntity.
-                geom = building.get("geometry") or {}
-                ring = self._building_exterior_ring(geom)
-                if ring is None:
-                    # Fall back to a tiny spline at the centroid so the
-                    # building still appears in the editor hierarchy.
-                    ring = [
-                        [lon - 0.00001, lat - 0.00001],
-                        [lon + 0.00001, lat - 0.00001],
-                        [lon + 0.00001, lat + 0.00001],
-                        [lon - 0.00001, lat + 0.00001],
-                        [lon - 0.00001, lat - 0.00001],
-                    ]
-                # The ring writer normally suffixes its prefix with `_<index>`.
-                # We pass our pre-allocated descriptive name as the prefix and
-                # then rewrite the `_0` suffix it adds back to the literal
-                # name. naming_kind is None here because we already allocated.
-                entity = self._closed_spline_entity_from_ring(
-                    ring, entity_name, 0, comment_suffix=comment,
+                # Should be unreachable: every category extractor produces has
+                # a KNOWN_BUILDING_PREFABS entry, and Building_Generic catches
+                # building=yes. If this fires, the catalog and extractor have
+                # diverged — fix config/buildings.py rather than emit a
+                # SplineShapeEntity. Nested-child syntax inside one caused
+                # Workbench to hang at 4% on world load in v1.1.0 (reverted
+                # in v1.2.3) so we never re-arm that footgun.
+                logger.warning(
+                    f"Building category {building.get('prefab_category')!r} "
+                    f"has no entry in KNOWN_BUILDING_PREFABS — skipping "
+                    f"osm_id={building.get('osm_id')}. Add the category to "
+                    f"config/buildings.py to fix."
                 )
-                if entity is None:
-                    skipped_out_of_bounds += 1
-                    continue
-                entity = entity.replace(
-                    f"SplineShapeEntity {entity_name}_0 ",
-                    f"SplineShapeEntity {entity_name} ",
-                    1,
-                )
-                entities.append(entity)
                 marker_count += 1
+                continue
 
         if skipped_road_overlap:
             logger.info(
@@ -1240,13 +1236,15 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['env_probe']} {{
         Z-fighting and block traffic.
         """
         header = (
-            "// Buildings layer — one entity per extracted OSM building.\n"
-            "// Buildings with a verified Enfusion prefab in\n"
+            "// Buildings layer — one positioned prefab instance per OSM building.\n"
+            "// Each entity references a verified Building_*.et from\n"
             "//   config/buildings.py::KNOWN_BUILDING_PREFABS\n"
-            "// are emitted as auto-positioned prefab instances. Buildings\n"
-            "// whose category has no verified prefab are emitted as closed\n"
-            "// footprint splines — drag a Building_*.et prefab from\n"
-            "// Prefabs/Structures/ onto each spline to wire it up.\n"
+            "// and is rotated by `angles 0 <yaw> 0` to align the building's\n"
+            "// longest wall with the OSM footprint orientation. Buildings\n"
+            "// with an uncatalogued category are logged and skipped (the\n"
+            "// previous spline-footprint fallback was removed in v1.4.6\n"
+            "// because nested-child syntax inside SplineShapeEntity has\n"
+            "// hung Workbench at 4% on world load — see issue #85).\n"
             "// Buildings overlapping asphalt roads are dropped (L12).\n"
             "// Source data: Reference/osm_buildings.geojson and features.json.\n"
         )
@@ -1319,44 +1317,38 @@ ${{58D0FB3206B6F859}}{WORLD_PREFABS['env_probe']} {{
 
             if prefab_path:
                 prefab_ref = f"${{{ARMA_REFORGER_GUID}}}{prefab_path}"
+                rotation_deg = float(building.get("rotation_deg", 0.0) or 0.0)
+                body_lines = [
+                    f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}',
+                ]
+                # `angles 0 <yaw> 0` form verified against shipped community
+                # building layers (DarcMods town01.layer, Overthrow, Coalition).
+                # Skip the line for cardinal-aligned buildings to match the
+                # convention in those files — keeps the output diff-friendly.
+                if abs(rotation_deg) > 0.05:
+                    body_lines.append(f' angles 0 {rotation_deg:.2f} 0')
                 entities.append(
                     f'{prefab_ref} {{{comment}\n'
-                    f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
-                    f'}}'
+                    + '\n'.join(body_lines)
+                    + '\n}'
                 )
                 prefab_count += 1
             else:
-                # Footprint marker: emit the exterior ring as a closed spline
-                # the user can right-click → Add Child Entity → BuildingEntity.
-                geom = building.get("geometry") or {}
-                ring = self._building_exterior_ring(geom)
-                if ring is None:
-                    # Fall back to a tiny spline at the centroid so the
-                    # building still appears in the editor hierarchy.
-                    ring = [
-                        [lon - 0.00001, lat - 0.00001],
-                        [lon + 0.00001, lat - 0.00001],
-                        [lon + 0.00001, lat + 0.00001],
-                        [lon - 0.00001, lat + 0.00001],
-                        [lon - 0.00001, lat - 0.00001],
-                    ]
-                # The ring writer normally suffixes its prefix with `_<index>`.
-                # We pass our pre-allocated descriptive name as the prefix and
-                # then rewrite the `_0` suffix it adds back to the literal
-                # name. naming_kind is None here because we already allocated.
-                entity = self._closed_spline_entity_from_ring(
-                    ring, entity_name, 0, comment_suffix=comment,
+                # Should be unreachable: every category extractor produces has
+                # a KNOWN_BUILDING_PREFABS entry, and Building_Generic catches
+                # building=yes. If this fires, the catalog and extractor have
+                # diverged — fix config/buildings.py rather than emit a
+                # SplineShapeEntity. Nested-child syntax inside one caused
+                # Workbench to hang at 4% on world load in v1.1.0 (reverted
+                # in v1.2.3) so we never re-arm that footgun.
+                logger.warning(
+                    f"Building category {building.get('prefab_category')!r} "
+                    f"has no entry in KNOWN_BUILDING_PREFABS — skipping "
+                    f"osm_id={building.get('osm_id')}. Add the category to "
+                    f"config/buildings.py to fix."
                 )
-                if entity is None:
-                    skipped_out_of_bounds += 1
-                    continue
-                entity = entity.replace(
-                    f"SplineShapeEntity {entity_name}_0 ",
-                    f"SplineShapeEntity {entity_name} ",
-                    1,
-                )
-                entities.append(entity)
                 marker_count += 1
+                continue
 
         if skipped_road_overlap:
             logger.info(
