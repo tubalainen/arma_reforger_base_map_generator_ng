@@ -1,14 +1,20 @@
 """
 Tests for the Phase 2 buildings layer (audit task A2 + L12).
 
-The buildings layer emits one entity per OSM building, in one of two modes:
+The buildings layer emits one entity per OSM building as a positioned
+prefab instance:
 
-* **Auto-placed prefab instance** when ``config.buildings.KNOWN_BUILDING_PREFABS``
-  has a verified path for the building's category. Uses the
-  ``${guid}path/to/prefab.et { coords X Y Z }`` syntax.
-* **Footprint-spline marker** when the catalog has no entry — emits a closed
-  ``SplineShapeEntity`` over the exterior ring so the user can manually wire
-  a building prefab as a child entity.
+    ${guid}path/to/Building_*.et { coords X Y Z; angles 0 yaw 0 }
+
+The ``angles`` line is omitted for cardinal-aligned buildings (yaw ≈ 0)
+to match shipped community convention.
+
+Buildings whose category isn't in ``config.buildings.KNOWN_BUILDING_PREFABS``
+are logged-and-skipped (v1.4.6, closes #85). The catalog now covers every
+category the feature_extractor produces, so this path is a regression guard
+rather than a runtime fallback — the previous spline-footprint fallback
+was removed because nested-child syntax inside SplineShapeEntity has
+hung Workbench at 4% on world load (the v1.1.0 → v1.2.3 incident).
 
 Buildings whose centroid falls inside an asphalt-road exclusion zone (half
 road width + 1.5 m safety) are dropped (L12).
@@ -49,7 +55,17 @@ def _metadata_for_4km_terrain() -> dict:
     }
 
 
-def _building(idx, lon, lat, building_type="house", prefab=None, name=""):
+# Default catalog path used when callers don't supply one — matches
+# Building_Generic in config.buildings.KNOWN_BUILDING_PREFABS. Tests that
+# want the skip-with-warning path pass prefab=None explicitly.
+_DEFAULT_TEST_PREFAB = (
+    "Prefabs/Structures/Houses/Village/"
+    "House_Village_E_1I01/House_Village_E_1I01.et"
+)
+
+
+def _building(idx, lon, lat, building_type="house",
+              prefab=_DEFAULT_TEST_PREFAB, name="", rotation_deg=0):
     """Synthetic building dict matching extract_building_features output."""
     # Tiny 0.0001-degree square footprint around (lon, lat)
     d = 0.0001
@@ -59,7 +75,7 @@ def _building(idx, lon, lat, building_type="house", prefab=None, name=""):
         "building_type": building_type,
         "height_m": 6,
         "center": [lon, lat],
-        "rotation_deg": 0,
+        "rotation_deg": rotation_deg,
         "footprint_area_m2": 100,
         "prefab_category": f"Building_{building_type.capitalize()}",
         "enfusion_prefab": prefab,
@@ -200,29 +216,38 @@ class TestBuildingsLayerEmission:
         out = gen._generate_buildings_layer()
         assert "// Buildings layer" in out
         assert "No building data available" in out
-        assert "SplineShapeEntity" not in out
+        # No actual SplineShapeEntity emission. The header's explanatory
+        # text *mentions* the term, so we check for the emitted form
+        # `SplineShapeEntity Building_` rather than the bare word.
+        assert "SplineShapeEntity Building_" not in out
 
     def test_empty_building_list_emits_friendly_comment(self, make_generator):
         gen = make_generator(buildings=[])
         out = gen._generate_buildings_layer()
         assert "No buildings found" in out
-        assert "SplineShapeEntity" not in out
+        assert "SplineShapeEntity Building_" not in out
 
-    def test_unvalidated_building_emits_footprint_spline(self, make_generator):
+    def test_uncatalogued_category_is_skipped_with_warning(self, make_generator, caplog):
+        """v1.4.6 (closes #85): the spline-footprint fallback was removed.
+        Categories without a KNOWN_BUILDING_PREFABS entry now warn-and-skip
+        rather than emit a dangerous nested-child SplineShapeEntity."""
+        import logging
         gen = make_generator(buildings=[
             _building(0, lon=1.0, lat=1.0, building_type="house", prefab=None,
-                      name="Test House")
+                      name="Uncatalogued")
         ])
-        out = gen._generate_buildings_layer()
+        with caplog.at_level(logging.WARNING):
+            out = gen._generate_buildings_layer()
 
-        # v1.4.0 — footprint markers now use descriptive names derived from OSM
-        # tags (Building_House_TestHouse), no longer Building_<index>.
-        assert "SplineShapeEntity Building_House_TestHouse {" in out
-        # Comment carries the human-readable name + type
-        assert "Test House" in out
-        # No actual ${guid}prefab.et reference was emitted for this building.
+        # No spline emission for the skipped building.
+        assert "SplineShapeEntity Building_" not in out
+        # No prefab reference either — building was dropped.
         from config.enfusion import ARMA_REFORGER_GUID
         assert f"${{{ARMA_REFORGER_GUID}}}" not in out
+        # Warning was logged pointing at the catalog.
+        assert any(
+            "KNOWN_BUILDING_PREFABS" in r.message for r in caplog.records
+        ), "Expected a catalog-divergence warning."
 
     def test_validated_building_emits_prefab_instance(self, make_generator):
         from config.enfusion import ARMA_REFORGER_GUID
@@ -240,30 +265,53 @@ class TestBuildingsLayerEmission:
         # for this building (no Building_* spline header).
         assert "SplineShapeEntity Building_" not in out
 
+    def test_rotated_building_emits_angles_line(self, make_generator):
+        """Y-axis rotation from _estimate_building_rotation flows through to
+        an `angles 0 <yaw> 0` line — verified against community .layer
+        files (DarcMods town01.layer, Overthrow). #85."""
+        b = _building(0, lon=1.0, lat=1.0, building_type="house",
+                      rotation_deg=42.5)
+        gen = make_generator(buildings=[b])
+        out = gen._generate_buildings_layer()
+
+        # Three-component form, not bare `angleY`.
+        assert "angles 0 42.50 0" in out
+
+    def test_cardinal_aligned_building_omits_angles_line(self, make_generator):
+        """rotation_deg ≈ 0 → no `angles` line, matching community .layer
+        convention (keeps the file diff-friendly and less noisy)."""
+        b = _building(0, lon=1.0, lat=1.0, building_type="house",
+                      rotation_deg=0.0)
+        gen = make_generator(buildings=[b])
+        out = gen._generate_buildings_layer()
+
+        # The header explains the `angles 0 <yaw> 0` convention, so check
+        # only the emission body after the last header line.
+        body = out.split("// Source data:")[-1]
+        assert "coords " in body
+        assert "angles" not in body
+
     def test_building_outside_terrain_skipped(self, make_generator):
         # Identity ×1000: lon=10 → x=10000m, terrain only 4096m wide.
         gen = make_generator(buildings=[
             _building(0, lon=10.0, lat=10.0, building_type="house"),
         ])
         out = gen._generate_buildings_layer()
-        # The header text mentions `Building_*.et` — strip that before
-        # checking that no real entity was emitted.
-        body = out.split("// Source data:")[-1]
-        assert "SplineShapeEntity" not in body
-        # Counter is empty: no entity carrying a Building_<something> name.
-        assert "SplineShapeEntity Building_" not in out
+        # No prefab reference was emitted for the out-of-bounds building.
+        from config.enfusion import ARMA_REFORGER_GUID
+        assert f"${{{ARMA_REFORGER_GUID}}}" not in out
 
     def test_each_building_gets_one_entity(self, make_generator):
+        from config.enfusion import ARMA_REFORGER_GUID
         gen = make_generator(buildings=[
             _building(0, lon=0.5, lat=0.5),
             _building(1, lon=1.0, lat=1.0),
             _building(2, lon=1.5, lat=1.5),
         ])
         out = gen._generate_buildings_layer()
-        # Three footprint markers (none have validated prefabs). Names are now
-        # descriptive (Building_<category>_<quadrant>_NNN) rather than
-        # Building_<idx> — count by the SplineShapeEntity Building_ prefix.
-        assert out.count("SplineShapeEntity Building_") == 3
+        # Three positioned prefab instances. Count by the GUID reference
+        # since each building emits one ${guid}path { ... } block.
+        assert out.count(f"${{{ARMA_REFORGER_GUID}}}") == 3
 
 
 # ---------------------------------------------------------------------------

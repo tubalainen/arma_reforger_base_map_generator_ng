@@ -48,7 +48,7 @@ Instead of manually sourcing elevation data, painting surface masks by hand, pla
 - **GeoJSON export** with structured metadata
 
 ### Building & Vegetation Data
-- **Building footprints** with height estimation and rotation
+- **Building footprints** mapped to real `Building_*.et` prefab instances (rotation-aligned to OSM longest-wall) — one positioned entity per OSM building, not a spline outline
 - **Forest areas** with species classification (coniferous/deciduous/mixed)
 - **Sweden**: Lantmäteriet Marktäcke OGC API for landcover and wetlands
 - **Auto-emitted closed splines** in `*_vegetation.layer` — one per forest polygon, ready to drop a Forest Generator prefab onto
@@ -265,6 +265,7 @@ The generated ZIP package is organized into an Enfusion-ready project structure:
 | `*_roads.layer` | Enfusion layer | Road spline entities (one `SplineShapeEntity` per road segment) |
 | `*_vegetation.layer` | Enfusion layer | One closed `SplineShapeEntity` per forest polygon — drag a Forest Generator (`FG_*`) prefab onto each |
 | `*_water.layer` | Enfusion layer | One closed `SplineShapeEntity` per lake/pond/reservoir — drag a Lake Generator (`LG_*`) prefab onto each |
+| `*_buildings.layer` | Enfusion layer | One positioned `Building_*.et` prefab instance per OSM building (rotation-aligned to longest wall) — no spline wiring needed |
 | `*.conf` | Enfusion config | Mission configuration |
 | `*.meta` | Enfusion metadata | Resource metadata for each asset |
 | `SETUP_GUIDE.md` | Markdown | Personalized step-by-step Workbench import guide |
@@ -433,7 +434,7 @@ The application is published to GitHub Container Registry and automatically buil
 docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest
 
 # Or use a specific version tag
-docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:v1.4.5
+docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:v1.4.6
 ```
 
 The `docker-compose.yml` is pre-configured to use the GHCR.io image. See the [Quick Start Guide](#quick-start-guide) for setup instructions.
