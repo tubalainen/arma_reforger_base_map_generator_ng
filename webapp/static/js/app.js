@@ -34,14 +34,40 @@ const satelliteLayer = L.tileLayer(
     maxNativeZoom: 18,
 });
 
+// Transparent labels + drawn admin borders overlay (Esri Reference). This is
+// the purpose-built companion to Esri's World Imagery — it ships place names
+// AND actual country/state border lines in a single tile, so users can orient
+// themselves over Sentinel-2 imagery. CARTO's voyager_only_labels was tried
+// first but turned out to be labels-only with no drawn lines.
+const labelsLayer = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+    attribution: 'Boundaries &copy; <a href="https://www.esri.com/">Esri</a>',
+    maxZoom: 19,
+    maxNativeZoom: 16,
+});
+
 // Default to satellite — most users are picking a real-world area to map.
 satelliteLayer.addTo(map);
+labelsLayer.addTo(map);
 
 // Layer control
 L.control.layers({
     'Satellite (Sentinel-2)': satelliteLayer,
     'OpenStreetMap': osmLayer,
-}, null, { position: 'topright' }).addTo(map);
+}, {
+    'Labels & borders': labelsLayer,
+}, { position: 'topright' }).addTo(map);
+
+// Auto-hide labels on OSM (already has its own); auto-show on Satellite.
+// Manual toggles via the overlay checkbox still work — this only fires on
+// basemap switches.
+map.on('baselayerchange', (e) => {
+    if (e.layer === satelliteLayer && !map.hasLayer(labelsLayer)) {
+        labelsLayer.addTo(map);
+    } else if (e.layer === osmLayer && map.hasLayer(labelsLayer)) {
+        map.removeLayer(labelsLayer);
+    }
+});
 
 // ===========================================================================
 // Area drawing
