@@ -215,6 +215,8 @@ You should see this structure inside:
         face_z = vertex_z - 1
         cell_size = self.hm.get("grid_cell_size_m", 2.0)
         height_scale = self.elev.get("height_scale", 0.03125)
+        min_elev = self.elev.get("min_elevation_m", 0.0)
+        max_elev = self.elev.get("max_elevation_m", 1.0)
 
         return f"""## Phase 2: Terrain Creation (10 minutes)
 
@@ -245,13 +247,22 @@ You should see this structure inside:
 2. Go to the **Manage** tab
 3. Click **Import Height Map...**
 4. Navigate to: `{self.map_name}/Sourcefiles/heightmap.asc`
-5. Settings:
-   - **Invert X Axis**: No
-   - **Invert Z Axis**: Yes
+5. Settings — **use these exact values, do not accept the dialog defaults**:
+
+   | Field | Value |
+   |-------|-------|
+   | **Invert X Axis** | No |
+   | **Invert Z Axis** | Yes |
+   | **Resample to specified range** | **UNCHECK** (use the raw metres from the .asc file) |
+   | **Min Height** | **{min_elev:.3f}** |
+   | **Max Height** | **{max_elev:.3f}** |
+
+   > **Why this matters:** the dialog defaults are `Resample = ON`, `Min = 0`, `Max = 1`. Accepting them flattens the entire terrain into a 0–1 m strip, which can both produce a paper-flat map *and* leave the world in an inconsistent state that has crashed Workbench on the subsequent reload (issue #120). The `Min`/`Max` numbers above are this map's real elevation range from `Reference/metadata.json` — Workbench uses them as the absolute height bounds for the imported grid.
+
 6. Click **Import**
 
-> **CRITICAL**: After import, you **MUST** save and reopen the world:
-> 1. **File > Save World** (Ctrl+S)
+> **CRITICAL**: After import, you **MUST** save the *world* (not just the terrain) and reopen it:
+> 1. **File > Save World** (Ctrl+S) — *not* the Terrain Tool's Save button, which only writes the .terr file
 > 2. Wait for the save to complete (watch the progress bar in the upper right corner)
 > 3. Close and reopen the world (double-click the .ent file again in the Resource Browser)
 

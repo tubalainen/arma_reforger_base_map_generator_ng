@@ -131,3 +131,22 @@ class TestNonApiPathsAreExempt:
         for _ in range(20):
             resp = client.get("/static-asset")
             assert resp.status_code == 200
+
+    def test_preview_endpoints_are_not_rate_limited(self, app_with_low_limits):
+        """Issue #119: the results-page <img> retry loop was tripping the
+        general /api/* limit and starving previews into permanent 429s.
+        Preview fetches must be exempt — session ownership is already
+        enforced inside the route handler."""
+
+        @app_with_low_limits.get("/api/job/{job_id}/preview/{image_type}")
+        def preview(job_id: str, image_type: str):
+            return {"ok": True}
+
+        client = TestClient(app_with_low_limits)
+        # Far more than REQUESTS_PER_MINUTE (=3 in this fixture) — none
+        # should be throttled.
+        for _ in range(20):
+            resp = client.get("/api/job/abc/preview/heightmap")
+            assert resp.status_code == 200
+            resp = client.get("/api/job/abc/preview/surface")
+            assert resp.status_code == 200
