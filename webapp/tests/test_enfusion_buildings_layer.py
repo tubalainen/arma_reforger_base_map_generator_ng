@@ -358,10 +358,14 @@ class TestL12RoadDeconflict:
 # ---------------------------------------------------------------------------
 
 class TestBuildingsLayerWiring:
-    def test_world_ent_includes_buildings_layer(self, make_generator):
+    def test_world_ent_is_empty_in_v150(self, make_generator):
+        """v1.5.0: the world .ent file is empty — Workbench rebuilds the
+        BSP/bounds/layer-index block on first save. The pre-1.5 hand-built
+        `Layer buildings { Index 6 }` block was never read back by anything
+        and the editor overwrote it anyway."""
         gen = make_generator()
         ent = gen._generate_world_ent()
-        assert "Layer buildings {" in ent
+        assert ent == ""
 
     def test_generate_all_writes_buildings_layer(self, tmp_path, make_generator):
         gen = make_generator(buildings=[_building(0, lon=1.0, lat=1.0)])
@@ -369,5 +373,7 @@ class TestBuildingsLayerWiring:
         assert "buildings.layer" in files
         layer_path = Path(files["buildings.layer"])
         assert layer_path.exists()
+        # v1.5.0 layout: layers live in Worlds/<MapName>_Layers/.
+        assert layer_path.parent.name.endswith("_Layers")
         content = layer_path.read_text(encoding="utf-8")
         assert "Buildings layer" in content
