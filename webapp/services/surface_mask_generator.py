@@ -409,10 +409,35 @@ def generate_surface_masks(
             logger.info(
                 f"Resizing elevation for mask generation: {w}x{h} -> {target_w}x{target_h}"
             )
-            from services.utils.parallel import parallel_zoom
-            zoom_y = target_h / h
-            zoom_x = target_w / w
-            elevation = parallel_zoom(elevation, (zoom_y, zoom_x), order=3)
+            # The vertex→face resize is always exactly N+1 → N (issue #100
+            # introduced this step in v1.4.9). Use direct face-centre
+            # averaging instead of a cubic spline zoom: every face value is
+            # the average of its 4 corner vertices, which is what a terrain
+            # face physically is. The previous parallel_zoom(order=3) path
+            # used scipy's default mode='constant', cval=0.0 which pulled
+            # the outermost rows/columns of the elevation toward zero. That
+            # boundary discontinuity then spiked np.gradient (the slope
+            # input to the rock mask), saturating rock along the perimeter;
+            # normalization redistributed that to pine/forest_floor and
+            # produced the dark "frame" artifact reported as issue #115.
+            if (w, h) == (target_w + 1, target_h + 1):
+                elevation = 0.25 * (
+                    elevation[:-1, :-1].astype(np.float32)
+                    + elevation[1:, :-1].astype(np.float32)
+                    + elevation[:-1, 1:].astype(np.float32)
+                    + elevation[1:, 1:].astype(np.float32)
+                )
+            else:
+                # Fallback for any unexpected non-(N+1→N) call: use a
+                # boundary-preserving spline resample. mode='reflect' mirrors
+                # values across the boundary so the cubic kernel doesn't pad
+                # with zeros (the cval=0 default that caused issue #115).
+                from scipy.ndimage import zoom
+                zoom_y = target_h / h
+                zoom_x = target_w / w
+                elevation = zoom(
+                    elevation, (zoom_y, zoom_x), order=3, mode="reflect"
+                )
             h, w = elevation.shape
 
     logger.info(f"Generating surface masks for {w}x{h} terrain (cell size: {cell_size_m}m)")
