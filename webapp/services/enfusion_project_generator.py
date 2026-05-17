@@ -28,9 +28,11 @@ from config.enfusion import (
     PLATFORM_CONFIGS,
     FOREST_PREFAB_BASE,
     LAKE_PREFAB_BASE,
-    WORLD_ENTITY_DEFAULTS,
-    TERRAIN_LOD_DEFAULTS,
     WORLD_PREFABS,
+    WORLD_PREFAB_GUIDS,
+    WORLD_PREFAB_CLASS,
+    WORLD_PREFAB_INSTANCE_NAME,
+    AMBIENT_SOUND_PREFAB_GUIDS,
     PROJECT_NAME_ALLOWED_CHARS,
     PROJECT_NAME_MAX_LENGTH,
     MAX_SPLINE_POINTS,
@@ -255,18 +257,21 @@ class EnfusionProjectGenerator:
         """
         Generate all project files in the output directory.
 
-        Creates the full Enfusion project structure:
+        Creates the full Enfusion project structure (v1.5.0 layout —
+        layers under a per-world subfolder, mirroring what Workbench saves):
           <MapName>/
             addon.gproj
             Worlds/
-              <MapName>.ent
+              <MapName>.ent           (empty — editor populates on save)
               <MapName>.ent.meta
-              <MapName>_default.layer
-              <MapName>_managers.layer
-              <MapName>_gamemode.layer
-              <MapName>_roads.layer
-              <MapName>_vegetation.layer
-              <MapName>_water.layer
+              <MapName>_Layers/
+                default.layer
+                managers.layer
+                gamemode.layer
+                roads.layer
+                vegetation.layer
+                water.layer
+                buildings.layer
             Missions/
               <MapName>.conf
               <MapName>.conf.meta
@@ -278,9 +283,15 @@ class EnfusionProjectGenerator:
             Dict mapping file keys to their generated file paths.
         """
         # Create directory structure
+        # v1.5.0: layers live in a per-world subfolder
+        # `Worlds/<MapName>_Layers/<name>.layer` to match the layout
+        # Workbench itself uses (verified against Testprojekt reference).
+        # Pre-1.5 flat naming `Worlds/<MapName>_<name>.layer` was guessed.
         worlds_dir = output_dir / "Worlds"
+        layers_dir = worlds_dir / f"{self.map_name}_Layers"
         missions_dir = output_dir / "Missions"
         worlds_dir.mkdir(parents=True, exist_ok=True)
+        layers_dir.mkdir(parents=True, exist_ok=True)
         missions_dir.mkdir(parents=True, exist_ok=True)
 
         # Fresh per-call naming state so two consecutive generations from the
@@ -298,7 +309,7 @@ class EnfusionProjectGenerator:
             self._generate_gproj()
         )
 
-        # World file (layer index)
+        # World file (empty in v1.5.0 — editor populates BSP + bounds on save)
         files["world.ent"] = self._write_file(
             worlds_dir / f"{self.map_name}.ent",
             self._generate_world_ent()
@@ -310,19 +321,19 @@ class EnfusionProjectGenerator:
             self._generate_meta("ent", f"Worlds/{self.map_name}.ent", self.world_ent_guid)
         )
 
-        # Layer files
+        # Layer files (under Worlds/<MapName>_Layers/, generic names)
         files["default.layer"] = self._write_file(
-            worlds_dir / f"{self.map_name}_default.layer",
+            layers_dir / "default.layer",
             self._generate_default_layer()
         )
 
         files["managers.layer"] = self._write_file(
-            worlds_dir / f"{self.map_name}_managers.layer",
+            layers_dir / "managers.layer",
             self._generate_managers_layer()
         )
 
         files["gamemode.layer"] = self._write_file(
-            worlds_dir / f"{self.map_name}_gamemode.layer",
+            layers_dir / "gamemode.layer",
             self._generate_gamemode_layer()
         )
 
@@ -330,22 +341,22 @@ class EnfusionProjectGenerator:
             road_count = len(self.road_data.get("roads", [])) if self.road_data else 0
             job.add_log(f"Generating world file with {road_count} road entities...")
         files["roads.layer"] = self._write_file(
-            worlds_dir / f"{self.map_name}_roads.layer",
+            layers_dir / "roads.layer",
             self._generate_roads_layer()
         )
 
         files["vegetation.layer"] = self._write_file(
-            worlds_dir / f"{self.map_name}_vegetation.layer",
+            layers_dir / "vegetation.layer",
             self._generate_vegetation_layer()
         )
 
         files["water.layer"] = self._write_file(
-            worlds_dir / f"{self.map_name}_water.layer",
+            layers_dir / "water.layer",
             self._generate_water_layer()
         )
 
         files["buildings.layer"] = self._write_file(
-            worlds_dir / f"{self.map_name}_buildings.layer",
+            layers_dir / "buildings.layer",
             self._generate_buildings_layer()
         )
 
@@ -395,12 +406,16 @@ class EnfusionProjectGenerator:
     # -----------------------------------------------------------------------
 
     def _generate_gproj(self) -> str:
-        """Generate addon.gproj project definition."""
-        configs = "\n".join(
-            f'  GameProjectConfig {platform} {{\n  }}'
-            for platform in PLATFORM_CONFIGS
-        )
+        """Generate addon.gproj project definition.
 
+        The Workbench-saved reference at
+        Testprojekt/addon.gproj contains only ID / GUID / TITLE /
+        Dependencies — no ``Configurations { GameProjectConfig PC { } … }``
+        block. The pre-1.5 generator emitted that block on every platform in
+        ``PLATFORM_CONFIGS`` based on a guess at the .gproj schema; that
+        block isn't present in any saved-by-editor file we've inspected, so
+        v1.5.0 drops it.
+        """
         return f'''GameProject {{
  ID "{self.map_name}"
  GUID "{self.project_guid}"
@@ -408,36 +423,22 @@ class EnfusionProjectGenerator:
  Dependencies {{
   "{ARMA_REFORGER_GUID}"
  }}
- Configurations {{
-{configs}
- }}
 }}
 '''
 
     def _generate_world_ent(self) -> str:
-        """Generate world .ent file (layer index)."""
-        return f'''Layer default {{
- Index 0
-}}
-Layer managers {{
- Index 1
-}}
-Layer gamemode {{
- Index 2
-}}
-Layer roads {{
- Index 3
-}}
-Layer vegetation {{
- Index 4
-}}
-Layer water {{
- Index 5
-}}
-Layer buildings {{
- Index 6
-}}
-'''
+        """Generate world .ent file.
+
+        The Workbench-saved reference at
+        Testprojekt/Worlds/testworld.ent is zero bytes. The editor rebuilds
+        the world entity (with its BSP, bounds, layer index) on first save.
+        The pre-1.5 generator emitted a hand-built ``Layer default { Index 0 }
+        Layer managers { Index 1 } …`` block; nothing else in the codebase
+        ever read it back, and the editor overwrites it on save anyway.
+        v1.5.0 emits an empty file (the version banner is added by
+        ``_write_file`` regardless).
+        """
+        return ""
 
     def _generate_meta(self, resource_type: str, resource_path: str, guid: str) -> str:
         """
@@ -470,155 +471,161 @@ Layer buildings {{
 }}
 '''
 
+    def _render_prefab_instance(
+        self,
+        *,
+        key: str | None = None,
+        cls: str | None = None,
+        guid: str | None = None,
+        path: str | None = None,
+        instance_name: str | None = None,
+        coords: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        inline_comment: str | None = None,
+    ) -> str:
+        """Render a single ``ClassName [Name] : "{GUID}path" { coords … }`` block.
+
+        Matches the verbatim form Workbench writes to the saved
+        ``testworld_Layers/default.layer`` reference: typed-inheritance with
+        the per-prefab GUID, optional instance name, and a single ``coords``
+        property. No inline schema-extension properties — anything beyond
+        ``coords`` requires a verified reference line first.
+
+        Either ``key`` (looked up in WORLD_PREFAB_*) or the four explicit
+        ``cls / guid / path / instance_name`` arguments must be supplied.
+        Explicit args take precedence over key-lookup defaults.
+        """
+        if key is not None:
+            cls = cls or WORLD_PREFAB_CLASS[key]
+            guid = guid or WORLD_PREFAB_GUIDS[key]
+            path = path or WORLD_PREFABS[key]
+            instance_name = instance_name or WORLD_PREFAB_INSTANCE_NAME.get(key)
+        if not (cls and guid and path):
+            raise ValueError(
+                "_render_prefab_instance requires either a known key or "
+                "explicit cls/guid/path"
+            )
+        head = cls + (f" {instance_name}" if instance_name else "")
+        head += f' : "{{{guid}}}{path}"'
+        suffix = f" // {inline_comment}" if inline_comment else ""
+        cx, cy, cz = coords
+        return (
+            f"{head} {{{suffix}\n"
+            f" coords {cx:.3f} {cy:.3f} {cz:.3f}\n"
+            f"}}\n"
+        )
+
     def _generate_default_layer(self) -> str:
-        """
-        Generate the default layer with terrain entity, world entity, and environment setup.
+        """Generate the default layer.
 
-        This is the most complex generated file. It includes:
-        1. GenericWorldEntity — sky, atmosphere, ocean settings
-        2. GenericTerrainEntity — using GenericTerrain_Default.et prefab
-        3. Lighting_Default.et — default sun light
-        4. FogHaze_Default.et — default fog
-        5. GenericWorldPP_Default.et — post-processing defaults
-        6. EnvProbe_Default.et — environment probe
+        Mirrors the entity set the editor itself writes in
+        ``testworld_Layers/default.layer`` for the Atlas 2 §"Environment"
+        bootstrap: GenericTerrainEntity (no inline props), Lighting, Fog,
+        Post-processing, EnvProbe. Every line uses the verified per-prefab
+        GUID from ``WORLD_PREFAB_GUIDS``. The reference layer's
+        ``GenericWorldEntity world { BSP … boundMins … boundMaxs …
+        blockSize … }`` block is editor-generated spatial data and is not
+        authored here — Workbench rebuilds it on first save.
         """
-        we = WORLD_ENTITY_DEFAULTS
-        tl = TERRAIN_LOD_DEFAULTS
-
-        # Terrain center coordinates for camera positioning
         center_x = self.terrain_width / 2
         center_z = self.terrain_depth / 2
         camera_y = self.max_elevation + 200
 
-        content = f'''GenericWorldEntity {{
- coords 0 0 0
- {{
-  SkyPreset {{
-   SkyPresetName "{we['sky_preset']}"
-  }}
-  PlanetPresets {{
-   PlanetPreset {{
-    PlanetName "{we['planet_presets'][0]}"
-   }}
-   PlanetPreset {{
-    PlanetName "{we['planet_presets'][1]}"
-   }}
-   PlanetPreset {{
-    PlanetName "{we['planet_presets'][2]}"
-   }}
-  }}
-  SkyVolCloudsRenderer {{
-   CloudsPreset "{we['clouds_preset']}"
-  }}
-  OceanPreset {{
-   OceanMaterial "{we['ocean_material']}"
-   OceanSimulation "{we['ocean_simulation']}"
-  }}
- }}
-}}
-GenericTerrainEntity : "{{58D0FB3206B6F859}}{WORLD_PREFABS['terrain']}" {{
- coords 0 0 0
- TerrainGridSizeX {self.face_count_x}
- TerrainGridSizeZ {self.face_count_z}
- GridCellSize {self.cell_size}
- HeightScale {self.height_scale:.8f}
- HeightOffset {self.height_offset:.2f}
- CloseDistanceMax {tl['close_distance_max']}
- CloseDistanceBlend {tl['close_distance_blend']}
- MiddleDistanceMax {tl['middle_distance_max']}
- MiddleDistanceBlend {tl['middle_distance_blend']}
-}}
-${{58D0FB3206B6F859}}{WORLD_PREFABS['lighting']} {{
- coords {center_x:.1f} {camera_y:.1f} {center_z:.1f}
-}}
-${{58D0FB3206B6F859}}{WORLD_PREFABS['fog']} {{
- coords 0 0 0
-}}
-${{58D0FB3206B6F859}}{WORLD_PREFABS['post_processing']} {{
- coords 0 0 0
-}}
-${{58D0FB3206B6F859}}{WORLD_PREFABS['env_probe']} {{
- coords {center_x:.1f} 50 {center_z:.1f}
-}}
-'''
-        return content
+        # Terrain entity carries NO inline grid/height properties — those
+        # live in the per-terrain tileMap.conf Workbench writes via the
+        # right-click → "Create new terrain" action. Emitting them inline
+        # is exactly what triggered the issue #111 paint crash.
+        parts = [
+            self._render_prefab_instance(key="terrain"),
+            self._render_prefab_instance(
+                key="lighting",
+                coords=(center_x, camera_y, center_z),
+            ),
+            self._render_prefab_instance(key="fog"),
+            self._render_prefab_instance(key="post_processing"),
+            self._render_prefab_instance(
+                key="env_probe",
+                coords=(center_x, 50.0, center_z),
+            ),
+        ]
+        return "".join(parts)
 
     def _generate_managers_layer(self) -> str:
-        """
-        Generate the managers layer with the full Atlas 2 bootstrap entity set.
+        """Generate the managers layer (Atlas 2 bootstrap entities).
 
-        Emits every key from MANDATORY_BOOTSTRAP_KEYS (camera, weather, audio,
-        destruction, MP destruction, preload, radio, music, forest sync,
-        projectile sounds, map entity) plus the country-resolved AmbientSounds
-        prefab. v1.4.0 added the four MP / music / preload / radio entries to
-        close the gap against the manual "Atlas 2" workflow (issue #81).
+        Emits every key from ``MANDATORY_BOOTSTRAP_KEYS`` plus the
+        country-resolved AmbientSounds prefab. All entries are written in
+        the typed-inheritance form ``ClassName [Name] : "{GUID}path"`` with
+        per-prefab GUIDs lifted from the reference layer. No inline schema
+        properties beyond ``coords`` — anything else (e.g.
+        ``PlayFromCameraPosition``, ``Latitude``/``Longitude``) is dropped
+        until we verify it against a saved-by-editor line. Issue #111.
         """
         center_x = self.terrain_width / 2
         center_z = self.terrain_depth / 2
         camera_y = self.max_elevation + 200
 
         header = (
-            f"// Managers layer — bootstrap entities required for a fully\n"
-            f"// functional Reforger world (Atlas 2 alignment, v1.4.0).\n"
+            f"// Managers layer — Atlas 2 bootstrap entities, v1.5.0.\n"
             f"// Entries: {', '.join(MANDATORY_BOOTSTRAP_KEYS)}\n"
             f"// Ambient sounds: resolved to {self.ambient_prefab}\n"
             f"//   (countries detected: {', '.join(self.country_codes) or 'none'})\n"
         )
 
-        guid = ARMA_REFORGER_GUID
+        # Camera goes at the terrain center, looking down from altitude;
+        # env_probe entries already live in default.layer. Everything else
+        # spawns at the origin — matches the reference where every manager
+        # sits within a few metres of (0,0,0).
+        prefab_renderers = {
+            "camera": (center_x, camera_y, center_z),
+            "time_weather": (0.0, 0.0, 0.0),
+            "sound_world": (0.0, 0.0, 0.0),
+            "forest_sync": (0.0, 0.0, 0.0),
+            "destruction": (0.0, 0.0, 0.0),
+            "mp_destruction": (0.0, 0.0, 0.0),
+            "preload": (0.0, 0.0, 0.0),
+            "radio_broadcast": (0.0, 0.0, 0.0),
+            "music_manager": (0.0, 0.0, 0.0),
+        }
         parts = [
-            f'${{{guid}}}{WORLD_PREFABS["camera"]} {{\n'
-            f' coords {center_x:.1f} {camera_y:.1f} {center_z:.1f}\n'
-            f' PlayFromCameraPosition 1\n'
-            f'}}',
-            f'${{{guid}}}{WORLD_PREFABS["time_weather"]} {{\n'
-            f' coords 0 0 0\n'
-            f' Latitude {self.center_lat:.4f}\n'
-            f' Longitude {self.center_lon:.4f}\n'
-            f'}}',
-            f'${{{guid}}}{WORLD_PREFABS["projectile_sounds"]} {{\n'
-            f' coords 0 0 0\n'
-            f'}}',
-            f'${{{guid}}}{WORLD_PREFABS["map_entity"]} {{\n'
-            f' coords 0 0 0\n'
-            f'}}',
-            f'${{{guid}}}{WORLD_PREFABS["sound_world"]} {{\n'
-            f' coords 0 0 0\n'
-            f'}}',
-            f'${{{guid}}}{WORLD_PREFABS["forest_sync"]} {{\n'
-            f' coords 0 0 0\n'
-            f'}}',
-            f'${{{guid}}}{WORLD_PREFABS["destruction"]} {{\n'
-            f' coords 0 0 0\n'
-            f'}}',
-            f'${{{guid}}}{WORLD_PREFABS["mp_destruction"]} {{\n'
-            f' coords 0 0 0\n'
-            f'}}',
-            f'${{{guid}}}{WORLD_PREFABS["preload"]} {{\n'
-            f' coords 0 0 0\n'
-            f'}}',
-            f'${{{guid}}}{WORLD_PREFABS["radio_broadcast"]} {{\n'
-            f' coords 0 0 0\n'
-            f'}}',
-            f'${{{guid}}}{WORLD_PREFABS["music_manager"]} {{\n'
-            f' coords 0 0 0\n'
-            f'}}',
-            f'${{{guid}}}{self.ambient_prefab} {{ // biome-matched ambient sound\n'
-            f' coords 0 0 0\n'
-            f'}}',
+            self._render_prefab_instance(key=key, coords=coords)
+            for key, coords in prefab_renderers.items()
         ]
 
-        return header + "\n".join(parts) + "\n"
+        # Ambient sounds — biome-resolved at __init__ time. Uses the path-keyed
+        # GUID table, not WORLD_PREFAB_GUIDS; wrapper class is `GenericEntity`
+        # (matches the reference line in default.layer).
+        ambient_guid = AMBIENT_SOUND_PREFAB_GUIDS.get(self.ambient_prefab)
+        if ambient_guid is None:
+            raise ValueError(
+                f"Unverified AmbientSounds prefab {self.ambient_prefab!r}: "
+                "add its real Workbench GUID to AMBIENT_SOUND_PREFAB_GUIDS "
+                "before shipping (see plan §Open questions #1)."
+            )
+        parts.append(
+            self._render_prefab_instance(
+                cls="GenericEntity",
+                guid=ambient_guid,
+                path=self.ambient_prefab,
+                inline_comment="biome-matched ambient sound",
+            )
+        )
+
+        return header + "".join(parts)
 
     def _generate_gamemode_layer(self) -> str:
-        """Generate the game mode layer with Game Master mode for instant playability."""
-        center_x = self.terrain_width / 2
-        center_z = self.terrain_depth / 2
+        """Generate the game mode layer with Game Master mode for instant playability.
 
-        return f'''${{58D0FB3206B6F859}}{WORLD_PREFABS['gamemode_editor']} {{
- coords {center_x:.1f} 0 {center_z:.1f}
-}}
-'''
+        The GameMaster editor prefab isn't in the v1.5.0 reference layer
+        (that reference is a base scene, not a GameMaster sub-scene); we
+        therefore can't verify its real GUID against a saved Workbench
+        file. The pre-1.5 emission used ``${ARMA_REFORGER_GUID}path`` which
+        is the same broken pattern that nuked the default layer. For
+        v1.5.0 we drop the body to an empty file — users wanting Game
+        Master should follow Atlas 2 §"Game Master" (p. 17) manually. A
+        future release can repopulate this once a reference sub-scene
+        layer is captured.
+        """
+        return ""
 
     def _generate_roads_layer(self) -> str:
         """

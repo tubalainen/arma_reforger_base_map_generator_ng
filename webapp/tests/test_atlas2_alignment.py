@@ -153,10 +153,31 @@ class TestBootstrapEntities:
                 f"Bootstrap entity {key!r} ({path}) is not in the managers layer"
             )
 
-    def test_map_entity_uses_atlas2_default_suffix(self):
-        """Atlas 2 p. 16 names MapEntity_Default.et, not MapEntity.et."""
-        from config.enfusion import WORLD_PREFABS
-        assert WORLD_PREFABS["map_entity"].endswith("MapEntity_Default.et")
+    def test_world_prefab_tables_are_consistent(self):
+        """v1.5.0: every WORLD_PREFABS entry that ships in the managers layer
+        must also have a verified per-prefab GUID and class name."""
+        from config.enfusion import (
+            WORLD_PREFABS, WORLD_PREFAB_GUIDS, WORLD_PREFAB_CLASS,
+            MANDATORY_BOOTSTRAP_KEYS,
+        )
+        for key in MANDATORY_BOOTSTRAP_KEYS:
+            assert key in WORLD_PREFABS, f"{key} missing from WORLD_PREFABS"
+            assert key in WORLD_PREFAB_GUIDS, f"{key} missing from WORLD_PREFAB_GUIDS"
+            assert key in WORLD_PREFAB_CLASS, f"{key} missing from WORLD_PREFAB_CLASS"
+            guid = WORLD_PREFAB_GUIDS[key]
+            assert len(guid) == 16, f"{key} GUID {guid!r} is not 16 hex chars"
+            assert all(c in "0123456789ABCDEF" for c in guid), (
+                f"{key} GUID {guid!r} contains non-uppercase-hex chars"
+            )
+
+    def test_terrain_prefab_path_matches_reference(self):
+        """Verified against Testprojekt/Worlds/testworld_Layers/default.layer
+        (Workbench-saved reference, May 2026)."""
+        from config.enfusion import WORLD_PREFABS, WORLD_PREFAB_GUIDS
+        assert WORLD_PREFABS["terrain"] == (
+            "Prefabs/World/DefaultWorld/GenericTerrain_Default.et"
+        )
+        assert WORLD_PREFAB_GUIDS["terrain"] == "221ABC927C672E4E"
 
     def test_ambient_prefab_is_in_managers_layer(self):
         from services.enfusion_project_generator import EnfusionProjectGenerator
@@ -170,31 +191,97 @@ class TestBootstrapEntities:
         # Sweden → Arland ambient variant.
         assert "AmbientSounds_Arland.et" in out
 
-    def test_default_country_uses_everon_ambient(self):
+    def test_default_country_uses_arland_ambient_in_v150(self):
+        """v1.5.0 routes every country to Arland because Everon's GUID isn't
+        yet verified against a saved Workbench reference."""
         from services.enfusion_project_generator import EnfusionProjectGenerator
 
         gen = EnfusionProjectGenerator(
             map_name="TestMap",
             metadata=_metadata_for_4km(),
-            country_codes=["FR"],  # not in AMBIENT_SOUND_PREFABS
+            country_codes=["FR"],  # not Nordic, but still routes to Arland
         )
         out = gen._generate_managers_layer()
-        assert "AmbientSounds_Everon.et" in out
+        assert "AmbientSounds_Arland.et" in out
 
-    def test_managers_layer_has_no_nested_guid_inside_entity_bodies(self):
-        """Every bootstrap entity uses the flat ${guid}path.et { coords ... }
-        instance form. None should be nested inside another entity body."""
+    def test_managers_layer_has_balanced_braces(self):
+        """Every bootstrap entity is a flat ``ClassName : "{GUID}path" { coords … }``
+        block. Brace mismatch would suggest a nesting bug."""
         from services.enfusion_project_generator import EnfusionProjectGenerator
 
         gen = EnfusionProjectGenerator(
             map_name="TestMap", metadata=_metadata_for_4km(),
         )
         out = gen._generate_managers_layer()
-        # Count opening and closing braces — they must balance.
         assert out.count("{") == out.count("}"), (
             "Bootstrap entities should each be a flat block; brace mismatch "
             "suggests a nesting bug like the v1.1.0 road regression."
         )
+
+    def test_no_legacy_addon_guid_prefix_in_layers(self):
+        """Regression for issue #111: no generated layer file should embed
+        the addon-level ARMA_REFORGER_GUID as a per-prefab inheritance GUID.
+
+        Pre-1.5 builds used ``{58D0FB3206B6F859}Prefabs/...`` everywhere,
+        which made Workbench fail to resolve every world prefab and left
+        the terrain entity in a broken state that crashed NVTT on first
+        paint stroke.
+        """
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        gen = EnfusionProjectGenerator(
+            map_name="TestMap", metadata=_metadata_for_4km(),
+        )
+        for layer in (
+            gen._generate_default_layer(),
+            gen._generate_managers_layer(),
+        ):
+            assert "{58D0FB3206B6F859}Prefabs/" not in layer, (
+                "issue #111 regression: addon GUID used as prefab GUID"
+            )
+
+    def test_default_layer_omits_inline_terrain_grid_properties(self):
+        """Pre-1.5 wrote TerrainGridSizeX/Z, GridCellSize, HeightScale,
+        HeightOffset, CloseDistance* inline on GenericTerrainEntity. Those
+        properties don't belong in the layer (they live in tileMap.conf);
+        emitting them triggered the "Unknown keyword/data" cascade in
+        Gunnar's error.log (issue #111).
+        """
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        gen = EnfusionProjectGenerator(
+            map_name="TestMap", metadata=_metadata_for_4km(),
+        )
+        layer = gen._generate_default_layer()
+        for forbidden in (
+            "TerrainGridSizeX", "TerrainGridSizeZ", "GridCellSize",
+            "HeightScale", "HeightOffset",
+            "CloseDistanceMax", "CloseDistanceBlend",
+            "MiddleDistanceMax", "MiddleDistanceBlend",
+        ):
+            assert forbidden not in layer, (
+                f"issue #111 regression: {forbidden} still emitted inline"
+            )
+
+    def test_default_layer_omits_unknown_environment_classes(self):
+        """Pre-1.5 wrote a hand-built ``GenericWorldEntity { SkyPreset { … }
+        PlanetPresets { … } SkyVolCloudsRenderer { … } OceanPreset { … } }``
+        block. All four classes report as "Unknown class" in current
+        Workbench (Gunnar's error.log). The saved-by-editor reference has
+        no environment block at all — Workbench rebuilds it on save.
+        """
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        gen = EnfusionProjectGenerator(
+            map_name="TestMap", metadata=_metadata_for_4km(),
+        )
+        layer = gen._generate_default_layer()
+        for forbidden in (
+            "SkyPreset", "PlanetPresets", "SkyVolCloudsRenderer", "OceanPreset",
+        ):
+            assert forbidden not in layer, (
+                f"issue #111 regression: {forbidden} still emitted"
+            )
 
     def test_no_legacy_fabricated_prefab_names_anywhere(self):
         """Make sure the fabricated `_<width>m` road names from v1.3.x are
@@ -261,10 +348,11 @@ class TestResolveAmbientPrefab:
         assert resolve_ambient_prefab(["FR", "SE"]).endswith("AmbientSounds_Arland.et")
 
     def test_no_countries_returns_default(self):
+        """v1.5.0: default is Arland until we capture an Everon reference line."""
         from config.enfusion import resolve_ambient_prefab
-        assert resolve_ambient_prefab(None).endswith("AmbientSounds_Everon.et")
-        assert resolve_ambient_prefab([]).endswith("AmbientSounds_Everon.et")
+        assert resolve_ambient_prefab(None).endswith("AmbientSounds_Arland.et")
+        assert resolve_ambient_prefab([]).endswith("AmbientSounds_Arland.et")
 
     def test_unknown_country_falls_back_to_default(self):
         from config.enfusion import resolve_ambient_prefab
-        assert resolve_ambient_prefab(["XX"]).endswith("AmbientSounds_Everon.et")
+        assert resolve_ambient_prefab(["XX"]).endswith("AmbientSounds_Arland.et")
