@@ -142,15 +142,31 @@ def _cog_merge_rgb(
     open_start = time.monotonic()
     with Env(**_gdal_vsicurl_env()):
         # Open all COG files (only the header is fetched at this point)
+        skipped_single_band = 0
         for idx, href in enumerate(vsicurl_hrefs, 1):
             try:
                 ds = rasterio.open(href)
                 source_handles.append(ds)
+                # STAC Bild's primary collection is EPSG:3006 4-band RGBI, but
+                # sibling collections (e.g. se1g — historic single-band
+                # panchromatic) sometimes surface in the same search result.
+                # rasterio.merge() reads the same `indexes=[1,2,3]` from every
+                # source, so a 1-band tile makes the whole merge raise
+                # "band index 2 out of range" and we lose the orthophoto. Skip
+                # those tiles up front — if all returned tiles are single-band
+                # we'll return None and the caller falls back to WMS.
+                if ds.count < 3:
+                    skipped_single_band += 1
+                    logger.info(
+                        f"STAC Bild: skipping COG {idx}/{n_hrefs} — "
+                        f"{ds.count}-band source (need ≥3 for RGB merge): {href}"
+                    )
+                    continue
                 # STAC Bild's primary collection is EPSG:3006, but sibling
-                # collections (e.g. se1g) occasionally surface in the same
-                # search result in a different CRS. rasterio.merge() requires
-                # a homogeneous CRS, so wrap mismatched tiles in a WarpedVRT
-                # that lazily reprojects them on read.
+                # collections occasionally surface in a different CRS.
+                # rasterio.merge() requires a homogeneous CRS, so wrap
+                # mismatched tiles in a WarpedVRT that lazily reprojects
+                # them on read.
                 if ds.crs != target_crs:
                     vrt = WarpedVRT(
                         ds,
@@ -172,9 +188,13 @@ def _cog_merge_rgb(
             except Exception as exc:
                 logger.warning(f"Could not open COG {href}: {exc}")
         open_elapsed = time.monotonic() - open_start
+        skip_note = (
+            f" ({skipped_single_band} skipped as <3-band)"
+            if skipped_single_band else ""
+        )
         logger.info(
             f"STAC Bild: opened {len(datasets)}/{n_hrefs} COG headers "
-            f"in {open_elapsed:.1f}s"
+            f"in {open_elapsed:.1f}s{skip_note}"
         )
         if job:
             job.add_log(
