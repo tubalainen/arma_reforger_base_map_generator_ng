@@ -118,6 +118,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if path == "/api/health":
             return await call_next(request)
 
+        # Preview images (heightmap / surface) are fetched by the results-page
+        # <img> tags after a job completes. A failed load triggers an immediate
+        # onerror retry with a fresh cache-buster, and on a 429 the browser
+        # loops on the error path — a few hundred requests per second is
+        # easily reachable and starves the user's whole /api/* budget so the
+        # previews never paint (issue #119). Session ownership is already
+        # enforced inside get_preview(); rate-limiting buys nothing here.
+        if path.startswith("/api/job/") and "/preview/" in path:
+            return await call_next(request)
+
         key = self._get_rate_limit_key(request)
         now = datetime.utcnow()
 
