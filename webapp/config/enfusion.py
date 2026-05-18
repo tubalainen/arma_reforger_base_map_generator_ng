@@ -15,7 +15,7 @@ Community Wiki (community.bistudio.com) as of 2025-02-09.
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.5.11"
+APP_VERSION = "1.5.12"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
