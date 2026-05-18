@@ -79,6 +79,9 @@ map.addLayer(drawnItems);
 // ---------------------------------------------------------------------------
 // Square drawing tool (custom Leaflet.Draw handler)
 // Forces 1:1 aspect ratio in metres so Enfusion heightmap isn't distorted.
+// Only square selections are supported — Enfusion World Editor only handles
+// square / rectangular terrain (issue #50) and the workflow defaults to
+// square. Rectangles were removed in v1.5.9 (issue #128).
 // ---------------------------------------------------------------------------
 const SHAPE_STYLE = {
     color: '#26cd4d',
@@ -87,10 +90,30 @@ const SHAPE_STYLE = {
     weight: 2,
 };
 
+const M_PER_DEG_LAT = 111320;
+function mPerDegLng(lat) {
+    return 111320 * Math.cos(lat * Math.PI / 180);
+}
+
+// Given a fixed corner and a free corner, return the bounds of the
+// largest square (in metres) that fits the dragged extent. Used by both
+// the draw handler (free corner = cursor) and the edit handler (free corner
+// = dragged resize marker).
+function squareBoundsFrom(fixed, free) {
+    const dLat = free.lat - fixed.lat;
+    const dLng = free.lng - fixed.lng;
+    const mLat = M_PER_DEG_LAT;
+    const mLng = mPerDegLng((fixed.lat + free.lat) / 2);
+    const sizeM = Math.max(Math.abs(dLng) * mLng, Math.abs(dLat) * mLat);
+    const newCorner = L.latLng(
+        fixed.lat + (dLat >= 0 ? 1 : -1) * (sizeM / mLat),
+        fixed.lng + (dLng >= 0 ? 1 : -1) * (sizeM / mLng),
+    );
+    return L.latLngBounds(fixed, newCorner);
+}
+
 L.Draw.Square = L.Draw.Rectangle.extend({
-    statics: {
-        TYPE: 'square'
-    },
+    statics: { TYPE: 'square' },
 
     options: {
         shapeOptions: { ...SHAPE_STYLE },
@@ -105,85 +128,77 @@ L.Draw.Square = L.Draw.Rectangle.extend({
     _drawShape: function (latlng) {
         const start = this._startLatLng;
         if (!start) return;
-
-        const dLat = latlng.lat - start.lat;
-        const dLng = latlng.lng - start.lng;
-
-        const midLat = (start.lat + latlng.lat) / 2;
-        const mPerDegLat = 111320;
-        const mPerDegLng = 111320 * Math.cos(midLat * Math.PI / 180);
-
-        const widthM = Math.abs(dLng) * mPerDegLng;
-        const heightM = Math.abs(dLat) * mPerDegLat;
-        const sizeM = Math.max(widthM, heightM);
-
-        const halfLngSpan = (sizeM / mPerDegLng);
-        const halfLatSpan = (sizeM / mPerDegLat);
-
-        const endLng = start.lng + (dLng >= 0 ? halfLngSpan : -halfLngSpan);
-        const endLat = start.lat + (dLat >= 0 ? halfLatSpan : -halfLatSpan);
-
+        const bounds = squareBoundsFrom(start, latlng);
         if (!this._shape) {
-            this._shape = new L.Rectangle(
-                new L.LatLngBounds(start, new L.LatLng(endLat, endLng)),
-                this.options.shapeOptions
-            );
+            this._shape = new L.Rectangle(bounds, this.options.shapeOptions);
             this._map.addLayer(this._shape);
         } else {
-            this._shape.setBounds(
-                new L.LatLngBounds(start, new L.LatLng(endLat, endLng))
-            );
+            this._shape.setBounds(bounds);
         }
     },
 });
 
-L.drawLocal.draw.toolbar.buttons.square = 'Draw a square area (recommended)';
+L.drawLocal.draw.toolbar.buttons.square = 'Draw a square area';
 
-// Standard draw toolbar (rectangle + edit/remove). The Square button is
-// injected into the same toolbar below so both drawing tools live in one
-// uniform control group. The Enfusion World Editor only supports
-// square / rectangular terrain (issue #50), so the polygon tool is
-// disabled.
-const drawControl = new L.Control.Draw({
-    position: 'topleft',
-    draw: {
-        polygon: false,
-        rectangle: {
-            shapeOptions: { ...SHAPE_STYLE },
-        },
-        polyline: false,
-        circle: false,
-        circlemarker: false,
-        marker: false,
-    },
-    edit: {
-        featureGroup: drawnItems,
-        remove: true,
+// Square-aware edit handler: corner-drag preserves 1:1 aspect ratio so the
+// shape stays a square while the user adjusts its size. The center marker
+// (inherited from L.Edit.SimpleShape) handles moves without modification.
+L.Edit.Square = L.Edit.Rectangle.extend({
+    _resize: function (latlng) {
+        const bounds = squareBoundsFrom(this._oppositeCorner, latlng);
+        this._shape.setBounds(bounds);
+        this._moveMarker.setLatLng(bounds.getCenter());
     },
 });
-map.addControl(drawControl);
 
-// Inject a Square button into the same toolbar row as rectangle.
-// Using the existing Leaflet.Draw toolbar gives us identical sizing, borders,
-// and hover styling — see issue #40.
-(function addSquareToolButton() {
-    const rectButton = document.querySelector('.leaflet-draw-draw-rectangle');
-    if (!rectButton || !rectButton.parentNode) return;
-    if (rectButton.parentNode.querySelector('.leaflet-draw-draw-square')) return;
+// Custom selection toolbar (replaces L.Control.Draw entirely so the UI
+// only exposes the two buttons that make sense for this workflow):
+//   • Square — start drawing a new 1:1 selection
+//   • Delete — clear the current selection (no two-step "remove mode")
+// Re-uses Leaflet.Draw's CSS classes so styling matches the rest of the app.
+const SelectionToolbar = L.Control.extend({
+    options: { position: 'topleft' },
 
-    const link = document.createElement('a');
-    link.className = 'leaflet-draw-draw-square';
-    link.href = '#';
-    link.title = 'Draw a square area (recommended for Enfusion)';
-    link.setAttribute('role', 'button');
+    onAdd: function () {
+        const container = L.DomUtil.create(
+            'div', 'leaflet-draw leaflet-control');
 
-    L.DomEvent.on(link, 'click', function (e) {
-        L.DomEvent.stop(e);
-        new L.Draw.Square(map, { shapeOptions: { ...SHAPE_STYLE } }).enable();
-    });
+        const drawSection = L.DomUtil.create(
+            'div', 'leaflet-draw-section', container);
+        const drawToolbar = L.DomUtil.create(
+            'div', 'leaflet-draw-toolbar leaflet-bar', drawSection);
+        const squareBtn = L.DomUtil.create(
+            'a', 'leaflet-draw-draw-square', drawToolbar);
+        squareBtn.href = '#';
+        squareBtn.title = 'Draw a square area';
+        squareBtn.setAttribute('role', 'button');
 
-    rectButton.parentNode.insertBefore(link, rectButton.nextSibling);
-})();
+        const editSection = L.DomUtil.create(
+            'div', 'leaflet-draw-section', container);
+        const editToolbar = L.DomUtil.create(
+            'div', 'leaflet-draw-toolbar leaflet-bar', editSection);
+        const deleteBtn = L.DomUtil.create(
+            'a', 'leaflet-draw-edit-remove', editToolbar);
+        deleteBtn.href = '#';
+        deleteBtn.title = 'Clear selection';
+        deleteBtn.setAttribute('role', 'button');
+
+        L.DomEvent.on(squareBtn, 'click', function (e) {
+            L.DomEvent.stop(e);
+            new L.Draw.Square(map, { shapeOptions: { ...SHAPE_STYLE } }).enable();
+        });
+
+        L.DomEvent.on(deleteBtn, 'click', function (e) {
+            L.DomEvent.stop(e);
+            clearSelection();
+        });
+
+        L.DomEvent.disableClickPropagation(container);
+        return container;
+    },
+});
+
+map.addControl(new SelectionToolbar());
 
 // ===========================================================================
 // State
@@ -204,39 +219,67 @@ let logsSinceCursor = 0;
 // Event handlers
 // ===========================================================================
 
-map.on(L.Draw.Event.CREATED, function (event) {
-    // Only rectangle / square selections are supported — Enfusion World Editor
-    // can only build square or rectangular terrain (issue #50).
-    if (event.layerType !== 'rectangle' && event.layerType !== 'square') {
-        return;
-    }
-
-    // Clear previous selection
-    drawnItems.clearLayers();
-
-    const layer = event.layer;
-    drawnItems.addLayer(layer);
-    currentPolygon = layer;
-
-    // Extract bbox corners as [lng, lat] pairs (closed ring)
-    const bounds = layer.getBounds();
-    const coords = [
+function boundsToCoords(bounds) {
+    // Closed ring as [lng, lat] pairs.
+    return [
         [bounds.getWest(), bounds.getSouth()],
         [bounds.getEast(), bounds.getSouth()],
         [bounds.getEast(), bounds.getNorth()],
         [bounds.getWest(), bounds.getNorth()],
         [bounds.getWest(), bounds.getSouth()],
     ];
+}
 
-    currentPolygonCoords = coords;
-    onPolygonSelected(coords);
+map.on(L.Draw.Event.CREATED, function (event) {
+    if (event.layerType !== 'square') return;
+
+    // Replace any previous selection.
+    drawnItems.clearLayers();
+
+    const layer = event.layer;
+    drawnItems.addLayer(layer);
+    currentPolygon = layer;
+
+    currentPolygonCoords = boundsToCoords(layer.getBounds());
+    onPolygonSelected(currentPolygonCoords);
+
+    // Make the new square immediately editable — the user can drag the
+    // center handle to move it or any corner handle to resize, without
+    // pressing a separate "edit" button (issue #128).
+    enableLiveEditing(layer);
 });
 
-map.on(L.Draw.Event.DELETED, function () {
-    currentPolygon = null;
-    currentPolygonCoords = null;
-    onPolygonCleared();
-});
+function enableLiveEditing(layer) {
+    // Swap in the square-aware edit handler (Leaflet auto-attaches the
+    // standard L.Edit.Rectangle in an init hook). Always disable the
+    // existing handler before replacing — otherwise its markers leak.
+    if (layer.editing) layer.editing.disable();
+    layer.editing = new L.Edit.Square(layer);
+    layer.editing.enable();
+
+    // Update the sidebar bbox / size readout live while the user drags.
+    // Country detection only fires after the drag ends so we don't spam
+    // the detect-countries endpoint on every mousemove.
+    const handler = layer.editing;
+    const markers = [
+        ...(handler._resizeMarkers || []),
+        handler._moveMarker,
+    ].filter(Boolean);
+
+    const liveUpdate = () => {
+        currentPolygonCoords = boundsToCoords(layer.getBounds());
+        updateSelectionDisplay(currentPolygonCoords);
+    };
+    const finishEdit = () => {
+        currentPolygonCoords = boundsToCoords(layer.getBounds());
+        onPolygonSelected(currentPolygonCoords);
+    };
+
+    markers.forEach((m) => {
+        m.on('drag', liveUpdate);
+        m.on('dragend', finishEdit);
+    });
+}
 
 // ===========================================================================
 // UI handlers
@@ -267,11 +310,10 @@ document.getElementById('grid-resolution').addEventListener('change', updateTerr
 
 const MAX_MAP_EXTENT_KM = 32; // must match MAX_MAP_EXTENT_M in config/terrain.py
 
-function onPolygonSelected(coords) {
+function updateSelectionDisplay(coords) {
     document.getElementById('selection-info').classList.remove('d-none');
     document.getElementById('no-selection').classList.add('d-none');
 
-    // Compute bounding box
     const lngs = coords.map(c => c[0]);
     const lats = coords.map(c => c[1]);
     const west = Math.min(...lngs);
@@ -282,15 +324,11 @@ function onPolygonSelected(coords) {
     document.getElementById('info-bbox').textContent =
         `${south.toFixed(4)}, ${west.toFixed(4)} - ${north.toFixed(4)}, ${east.toFixed(4)}`;
 
-    // Estimate size in km
-    const dLat = north - south;
-    const dLng = east - west;
-    const latKm = dLat * 111;
-    const lngKm = dLng * 111 * Math.cos((north + south) / 2 * Math.PI / 180);
+    const latKm = (north - south) * 111;
+    const lngKm = (east - west) * 111 * Math.cos((north + south) / 2 * Math.PI / 180);
     document.getElementById('info-size').textContent =
         `~${lngKm.toFixed(1)} x ${latKm.toFixed(1)} km`;
 
-    // Check area limit
     const warning = document.getElementById('area-warning');
     const warningText = document.getElementById('area-warning-text');
     if (lngKm > MAX_MAP_EXTENT_KM || latKm > MAX_MAP_EXTENT_KM) {
@@ -302,24 +340,10 @@ function onPolygonSelected(coords) {
         warning.classList.add('d-none');
         document.getElementById('btn-generate').disabled = false;
     }
+}
 
-    // Check aspect ratio — inform user about non-square terrain
-    const aspectWarning = document.getElementById('aspect-warning');
-    const aspectWarningText = document.getElementById('aspect-warning-text');
-    const aspectRatio = Math.max(lngKm, latKm) / Math.min(lngKm, latKm);
-    if (aspectRatio > 1.05) {
-        // More than 5% off from square — show info about non-square terrain
-        aspectWarningText.innerHTML =
-            `<i class="bi bi-info-circle-fill"></i> ` +
-            `Non-square selection detected (${lngKm.toFixed(1)} x ${latKm.toFixed(1)} km). ` +
-            `The terrain will use different vertex counts per axis to match the area's aspect ratio ` +
-            `(no stretching or distortion).`;
-        aspectWarning.classList.remove('d-none');
-    } else {
-        aspectWarning.classList.add('d-none');
-    }
-
-    // Detect countries (quick bbox check)
+function onPolygonSelected(coords) {
+    updateSelectionDisplay(coords);
     detectCountries(coords);
 }
 
@@ -332,6 +356,9 @@ function onPolygonCleared() {
 }
 
 function clearSelection() {
+    if (currentPolygon && currentPolygon.editing) {
+        currentPolygon.editing.disable();
+    }
     drawnItems.clearLayers();
     currentPolygon = null;
     currentPolygonCoords = null;

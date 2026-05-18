@@ -38,10 +38,10 @@
                 <div class="sidebar-section">
                     <h6><i class="bi bi-vector-pen"></i> Area Selection</h6>
                     <p class="small mb-2">
-                        Use one of the drawing tools on the map &mdash;
-                        <strong>rectangle</strong> or
-                        <strong>1:1 square</strong> (recommended for Enfusion).
-                        Enfusion only supports square / rectangular terrain.
+                        Click the <strong>square</strong> tool on the map and drag
+                        out a 1:1 area. Once placed, drag the centre handle to move
+                        it or the corner handles to resize &mdash; no separate edit
+                        step. Use the <strong>trash</strong> tool to clear.
                     </p>
                     <div id="selection-info" class="d-none">
                         <table class="table table-sm table-dark mb-1">
@@ -58,17 +58,14 @@
                                 <td id="info-size">-</td>
                             </tr>
                         </table>
-                        <div id="area-warning" class="alert alert-danger py-1 px-2 mb-1 small d-none">
+                        <div id="area-warning" class="alert alert-danger py-1 px-2 mb-0 small d-none">
                             <i class="bi bi-exclamation-triangle-fill"></i>
                             <span id="area-warning-text"></span>
-                        </div>
-                        <div id="aspect-warning" class="alert alert-info py-1 px-2 mb-0 small d-none">
-                            <span id="aspect-warning-text"></span>
                         </div>
                     </div>
                     <div id="no-selection" class="text-center py-3">
                         <i class="bi bi-hand-index-thumb"></i>
-                        <p class="small mt-1">Pick a drawing tool to start</p>
+                        <p class="small mt-1">Pick the square tool to start</p>
                     </div>
                 </div>
 
