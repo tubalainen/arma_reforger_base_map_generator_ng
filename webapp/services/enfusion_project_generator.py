@@ -32,6 +32,11 @@ from config.enfusion import (
     WORLD_PREFAB_GUIDS,
     WORLD_PREFAB_CLASS,
     WORLD_PREFAB_INSTANCE_NAME,
+    WORLD_ENV_SKY_PRESET,
+    WORLD_ENV_PLANET_PRESET,
+    WORLD_ENV_CLOUDS_RENDERER,
+    WORLD_ENV_CLOUDS_PRESET,
+    WORLD_ENV_LENS_FLARES_CONFIG,
     AMBIENT_SOUND_PREFAB_GUIDS,
     PROJECT_NAME_ALLOWED_CHARS,
     PROJECT_NAME_MAX_LENGTH,
@@ -514,28 +519,52 @@ class EnfusionProjectGenerator:
             f"}}\n"
         )
 
+    def _render_world_env_block(self) -> str:
+        """Render the ``GenericWorldEntity world { … }`` block.
+
+        Verified verbatim against BohemiaInteractive/Arma-Reforger-Samples
+        (Assets_Showcase_Base) and the Utflandia community map. Both reference
+        files begin their default.layer with this exact shape.
+
+        BSP / boundMins / boundMaxs / blockSize are intentionally omitted —
+        they are Workbench-authored spatial data, rebuilt on first save.
+        Ocean materials are omitted by policy; user drags them in via Workbench
+        Environment tab per Atlas 2 p.5.
+        """
+        planets = "\n".join(f'  "{p}"' for p in WORLD_ENV_PLANET_PRESET)
+        return (
+            "GenericWorldEntity world {\n"
+            f' SkyPreset "{WORLD_ENV_SKY_PRESET}"\n'
+            " PlanetPreset {\n"
+            f"{planets}\n"
+            " }\n"
+            f" CloudsRenderer {WORLD_ENV_CLOUDS_RENDERER}\n"
+            f' CloudsPreset "{WORLD_ENV_CLOUDS_PRESET}"\n'
+            f' LensFlaresConfig "{WORLD_ENV_LENS_FLARES_CONFIG}"\n'
+            "}\n"
+        )
+
     def _generate_default_layer(self) -> str:
         """Generate the default layer.
 
-        Mirrors the entity set the editor itself writes in
-        ``testworld_Layers/default.layer`` for the Atlas 2 §"Environment"
-        bootstrap: GenericTerrainEntity (no inline props), Lighting, Fog,
-        Post-processing, EnvProbe. Every line uses the verified per-prefab
-        GUID from ``WORLD_PREFAB_GUIDS``. The reference layer's
-        ``GenericWorldEntity world { BSP … boundMins … boundMaxs …
-        blockSize … }`` block is editor-generated spatial data and is not
-        authored here — Workbench rebuilds it on first save.
+        Mirrors the entity set every shipped Reforger map writes: a
+        ``GenericWorldEntity world { Sky/Planet/Clouds/LensFlares }``
+        block first, then ``GenericTerrainEntity Terrain : "{GUID}…"`` (no
+        inline grid/height props — those live in tileMap.conf), then
+        Lighting, Fog, Post-processing, EnvProbe. The world entity's BSP /
+        bounds / blockSize are Workbench-authored spatial data and are
+        rebuilt on first save.
         """
         center_x = self.terrain_width / 2
         center_z = self.terrain_depth / 2
         camera_y = self.max_elevation + 200
 
-        # Terrain entity carries NO inline grid/height properties — those
-        # live in the per-terrain tileMap.conf Workbench writes via the
-        # right-click → "Create new terrain" action. Emitting them inline
-        # is exactly what triggered the issue #111 paint crash.
         parts = [
-            self._render_prefab_instance(key="terrain"),
+            self._render_world_env_block(),
+            self._render_prefab_instance(
+                key="terrain",
+                instance_name="Terrain",
+            ),
             self._render_prefab_instance(
                 key="lighting",
                 coords=(center_x, camera_y, center_z),
