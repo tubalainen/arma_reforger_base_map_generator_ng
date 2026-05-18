@@ -20,12 +20,18 @@ Workflow:
 3. Open all COGs in parallel via rasterio.Env(GDAL_HTTP_AUTH=BASIC, …) +
    /vsicurl/ prefix (ThreadPoolExecutor, capped at 8 workers — small
    round-trips, server tolerates the burst)
-4. Read each tile's windowed intersection with the target bbox in parallel
-   (RGB bands only — drops NIR band 4 — using COG overviews for efficiency),
-   then first-wins merge in newest-first order so newer imagery takes priority.
-   Read pool is capped at 6 workers and each tile gets up to 2 retries because
-   dl1.lantmateriet.se drops connections under sustained range-read load
-   (surfaces as response_code=0 + GDAL ZLib decode error).
+4. Read each tile's windowed intersection with the target bbox in two
+   phases (RGB bands only — drops NIR band 4 — using COG overviews):
+   Phase 1 = 4 parallel workers, single attempt per tile, failures
+   deferred to Phase 2. Phase 2 = single-threaded serial retry sweep
+   with jittered backoff (1–5s) so retries can't stampede or collide
+   with still-running Phase 1 reads. Both phases share a daemon
+   watchdog thread that emits heartbeat progress, flags stalled tiles
+   (>60s in flight), and enforces a 10-min total wall-clock cap.
+   Then first-wins merge in newest-first order so newer imagery takes
+   priority. v1.5.6 + refs #118 — replaces the v1.5.5 in-worker retry
+   loop that caused thrashing under dl1.lantmateriet.se's connection
+   drops.
 5. Warp merged EPSG:3006 result to WGS84 at the requested pixel dimensions
    (single multi-band reproject with GDAL num_threads, all 3 bands at once)
 6. Return PNG bytes — same format as the WMS service, so the existing
@@ -35,10 +41,14 @@ Workflow:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import logging
 import math
 import os
+import random
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
@@ -56,25 +66,190 @@ def _default_workers() -> int:
 
 
 def _default_read_workers() -> int:
-    """Worker count for parallel windowed range-reads against dl1.lantmateriet.se.
+    """Worker count for Phase 1 (parallel single-attempt) tile reads.
 
-    Capped lower than open-header/warp concurrency because dl1.lantmateriet.se
-    drops connections under sustained high-concurrency range-read load
-    (observed: 8 workers → ~30% of tiles fail with response_code=0 and
-    GDAL `ZIPDecode: unknown compression method`). 6 is the empirical
-    sweet spot — still ~5–6× faster than serial without triggering drops.
+    Capped at 4 because dl1.lantmateriet.se drops connections under
+    sustained range-read load — v1.5.5 at 6 workers still triggered
+    ~30% per-attempt failure rates. Phase 2 picks up any failures
+    serially, so we trade peak throughput for predictable success.
     """
-    return min(6, os.cpu_count() or 2)
+    return min(4, os.cpu_count() or 2)
 
 
-def _tile_read_retries() -> int:
-    """Per-tile retry budget when a windowed read fails mid-flight.
+def _serial_retry_attempts() -> int:
+    """Phase 2 serial retry budget per failed tile.
 
-    dl1.lantmateriet.se occasionally drops the underlying TCP connection
-    during a range-read, surfacing as `response_code=0` + a GDAL ZLib
-    decode error. A single retry recovers the vast majority of those.
+    Each retry is jitter-spaced (1–4s) and runs single-threaded, so
+    there is no stampede effect. Production data showed tiles needing
+    up to 3 attempts before recovering, so 3 is the right ceiling.
     """
-    return 2
+    return 3
+
+
+def _gdal_quiet_env() -> dict:
+    """Extra GDAL env vars layered on top of _gdal_vsicurl_env() for the
+    merge phase.
+
+    GDAL emits raw stderr lines like
+    `ERROR 1: Request for <range> failed with response_code=0` and
+    decode chatter (`ZIPDecode: unknown compression method`) for every
+    individual byte-range request that gets a dropped connection.
+    Those events are already handled by the merge orchestrator;
+    surfacing them at the GDAL layer just floods the log without
+    adding diagnostic value. The orchestrator emits one concise line
+    per per-tile event instead.
+    """
+    return {
+        # Suppress the GDAL CPL debug stream entirely.
+        "CPL_DEBUG": "OFF",
+        # Quiet libcurl's per-request error chatter.
+        "CPL_CURL_VERBOSE": "NO",
+        # Redirect GDAL's CPL_LOG to a sink so any errors GDAL would
+        # otherwise print to stderr go to /dev/null instead.
+        "CPL_LOG": "NUL" if os.name == "nt" else "/dev/null",
+    }
+
+
+@contextlib.contextmanager
+def _quiet_rasterio_logging():
+    """Temporarily raise rasterio's GDAL-bridge loggers to WARNING.
+
+    Rasterio installs a Python error handler that surfaces every GDAL
+    `CPLError` as an `INFO` log line on `rasterio._err`. During a flaky
+    merge those duplicate every connection drop and decode error 3-5
+    times per failed tile attempt. The merge orchestrator already
+    logs one concise line per outcome, so we silence the duplicate
+    chatter for the merge duration and restore on exit.
+    """
+    targets = ("rasterio._err", "rasterio._io")
+    saved = {name: logging.getLogger(name).level for name in targets}
+    for name in targets:
+        logging.getLogger(name).setLevel(logging.WARNING)
+    try:
+        yield
+    finally:
+        for name, level in saved.items():
+            logging.getLogger(name).setLevel(level)
+
+
+class _MergeWatchdog:
+    """Daemon thread that monitors merge progress and flags stalled tiles.
+
+    Replaces the v1.5.4 heartbeat thread with a richer observer. It
+    tracks per-attempt start times so any tile read that exceeds
+    `stall_seconds` (default 60s) is logged as stalled — useful when
+    the upstream server is silently rate-limiting and a connection
+    just hangs.
+
+    Watchdog is purely observational: Python threads cannot be killed,
+    so a "stalled" tile keeps running until GDAL_HTTP_TIMEOUT (60s)
+    eventually trips. The watchdog surfaces the condition so the user
+    knows what's happening, not so we can preempt the read.
+    """
+
+    def __init__(
+        self,
+        total_tiles: int,
+        job=None,
+        interval: float = 5.0,
+        stall_seconds: float = 60.0,
+        total_timeout_seconds: float = 600.0,
+    ):
+        self.total = total_tiles
+        self.job = job
+        self.interval = interval
+        self.stall_seconds = stall_seconds
+        self.total_timeout_seconds = total_timeout_seconds
+
+        self._lock = threading.Lock()
+        # idx -> attempt start time (current attempt only)
+        self._in_flight: dict[int, float] = {}
+        # idx values that are fully done (either succeeded or gave up)
+        self._tiles_done: set[int] = set()
+        self._attempts_failed = 0
+        # Stall warnings deduplicated per idx so we don't spam every tick.
+        self._stall_warned: set[int] = set()
+
+        self._stop = threading.Event()
+        self._timed_out = threading.Event()
+        self._t0 = time.monotonic()
+        self._thread: Optional[threading.Thread] = None
+
+    def begin(self, idx: int) -> None:
+        with self._lock:
+            self._in_flight[idx] = time.monotonic()
+            self._stall_warned.discard(idx)
+
+    def end_ok(self, idx: int) -> None:
+        with self._lock:
+            self._in_flight.pop(idx, None)
+            self._tiles_done.add(idx)
+
+    def end_attempt_fail(self, idx: int) -> None:
+        with self._lock:
+            self._in_flight.pop(idx, None)
+            self._attempts_failed += 1
+
+    def end_perm_fail(self, idx: int) -> None:
+        with self._lock:
+            self._in_flight.pop(idx, None)
+            self._tiles_done.add(idx)
+
+    @property
+    def timed_out(self) -> bool:
+        return self._timed_out.is_set()
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.5)
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            now = time.monotonic()
+            elapsed = now - self._t0
+            with self._lock:
+                in_flight = dict(self._in_flight)
+                done = len(self._tiles_done)
+                attempts_failed = self._attempts_failed
+                stall_warned = self._stall_warned
+
+            stalled = [
+                (i, now - t) for i, t in in_flight.items()
+                if now - t > self.stall_seconds and i not in stall_warned
+            ]
+            for i, age in stalled:
+                logger.warning(
+                    f"STAC Bild: tile {i + 1} stalled — {age:.0f}s in flight "
+                    f"(GDAL_HTTP_TIMEOUT will trip at 60s)"
+                )
+                with self._lock:
+                    self._stall_warned.add(i)
+
+            logger.info(
+                f"STAC Bild: watchdog — {done}/{self.total} done, "
+                f"{len(in_flight)} in-flight, {attempts_failed} attempt(s) failed "
+                f"({elapsed:.0f}s elapsed)"
+            )
+            if self.job:
+                self.job.add_log(
+                    f"...orthophoto progress: {done}/{self.total} done, "
+                    f"{len(in_flight)} in-flight, {attempts_failed} attempt(s) "
+                    f"failed ({elapsed:.0f}s)"
+                )
+
+            if elapsed > self.total_timeout_seconds:
+                logger.error(
+                    f"STAC Bild: watchdog — merge exceeded "
+                    f"{self.total_timeout_seconds:.0f}s wall-clock cap; "
+                    f"signalling abort"
+                )
+                self._timed_out.set()
+                return
 
 # STAC search endpoint (open — no auth required)
 _SEARCH_HEADERS = {
@@ -164,9 +339,6 @@ def _cog_merge_rgb(
         (merged_rgb_array, affine_transform) where the array has shape
         (3, H, W) in uint8. Returns (None, None) on failure.
     """
-    import threading
-    import time
-
     import rasterio
     from affine import Affine
     from rasterio.crs import CRS
@@ -180,7 +352,7 @@ def _cog_merge_rgb(
     target_crs = CRS.from_epsg(3006)
     workers = _default_workers()
     read_workers = _default_read_workers()
-    max_retries = _tile_read_retries()
+    max_serial_retries = _serial_retry_attempts()
 
     # --------------------------------------------------------------
     # 1. Parallel COG header opens
@@ -320,168 +492,246 @@ def _cog_merge_rgb(
         f"STAC Bild: merging {len(datasets)} tiles at "
         f"approx_res={approx_res:.2f} m/px over bounds "
         f"{int(x_max - x_min)}×{int(y_max - y_min)} m "
-        f"→ output {out_w}×{out_h} px (workers={read_workers}, "
-        f"retries={max_retries})"
+        f"→ output {out_w}×{out_h} px "
+        f"(phase 1: {read_workers} parallel workers, "
+        f"phase 2: up to {max_serial_retries} serial retries)"
     )
     if job:
         job.add_log(
-            f"Reading {len(datasets)} orthophoto tile windows in parallel "
-            f"({read_workers} workers, up to {max_retries} retries per tile)..."
+            f"Reading {len(datasets)} orthophoto tile windows: "
+            f"phase 1 parallel ({read_workers} workers), "
+            f"phase 2 serial retry for any failures..."
         )
 
     merge_start = time.monotonic()
     merged = np.zeros((3, out_h, out_w), dtype=np.uint8)
-    tiles_done = 0
-    tiles_done_lock = threading.Lock()
 
-    # Heartbeat: emit a periodic progress line so docker logs and the web
-    # UI show forward motion even when individual tile reads are slow.
-    heartbeat_stop = threading.Event()
+    # Per-tile result slot. Populated by either Phase 1 (parallel) or
+    # Phase 2 (serial retry). Tiles that overlap the output bbox but
+    # legitimately have no pixels in range stay None — same as before.
+    results: list[Optional[tuple]] = [None] * len(datasets)
 
-    def _heartbeat():
-        elapsed = 0
-        while not heartbeat_stop.wait(5.0):
-            elapsed += 5
-            with tiles_done_lock:
-                done = tiles_done
+    watchdog = _MergeWatchdog(len(datasets), job=job)
+    watchdog.start()
+
+    # _read_tile_once returns one of three outcome tuples:
+    #   ("ok",   idx, rs, re, cs, ce, buf, elapsed)
+    #   ("skip", idx)                              — tile doesn't overlap
+    #   ("fail", idx, exc_repr)                    — read raised, not retried here
+    def _read_tile_once(idx_ds: tuple[int, object]) -> tuple:
+        idx, ds = idx_ds
+        watchdog.begin(idx)
+        t0 = time.monotonic()
+        # Layer the merge-only quiet env on top of the auth env. Per-worker
+        # GDAL_NUM_THREADS=2 lets each tile's own decode use 2 GDAL
+        # threads; bounded total ≈ workers × 2 stays sane.
+        env = {
+            **_gdal_vsicurl_env(),
+            **_gdal_quiet_env(),
+            "GDAL_NUM_THREADS": "2",
+        }
+        try:
+            with Env(**env):
+                tx_min, ty_min, tx_max, ty_max = ds.bounds
+                ix_min = max(x_min_s, tx_min)
+                ix_max = min(x_max_s, tx_max)
+                iy_min = max(y_min_s, ty_min)
+                iy_max = min(y_max_s, ty_max)
+                if ix_min >= ix_max or iy_min >= iy_max:
+                    return ("skip", idx)
+
+                col_start = int(round((ix_min - x_min_s) / approx_res))
+                col_end = int(round((ix_max - x_min_s) / approx_res))
+                row_start = int(round((y_max_s - iy_max) / approx_res))
+                row_end = int(round((y_max_s - iy_min) / approx_res))
+                col_end = min(col_end, out_w)
+                row_end = min(row_end, out_h)
+                dest_h = row_end - row_start
+                dest_w = col_end - col_start
+                if dest_h <= 0 or dest_w <= 0:
+                    return ("skip", idx)
+
+                src_window = window_from_bounds(
+                    ix_min, iy_min, ix_max, iy_max, transform=ds.transform
+                )
+                buf = ds.read(
+                    indexes=[1, 2, 3],
+                    window=src_window,
+                    out_shape=(3, dest_h, dest_w),
+                    resampling=Resampling.bilinear,
+                    boundless=True,
+                    fill_value=0,
+                )
+            return (
+                "ok",
+                idx,
+                row_start,
+                row_end,
+                col_start,
+                col_end,
+                buf,
+                time.monotonic() - t0,
+            )
+        except Exception as exc:
+            # Short-form so the log line stays readable. The full GDAL
+            # error is in CPL_LOG anyway — for live debugging set
+            # CPL_DEBUG=ON via env to restore the verbose stream.
+            exc_repr = type(exc).__name__
+            if str(exc):
+                exc_repr = f"{exc_repr}: {str(exc).splitlines()[0][:120]}"
+            return ("fail", idx, exc_repr)
+
+    try:
+        with _quiet_rasterio_logging():
+            # ----- Phase 1 — bounded parallel, single attempt per tile.
+            phase1_start = time.monotonic()
             logger.info(
-                f"STAC Bild: tile reads in progress... {elapsed}s elapsed "
-                f"({done}/{len(datasets)} tiles complete)"
+                f"STAC Bild: phase 1/2 — parallel single-attempt read "
+                f"({read_workers} workers, {len(datasets)} tiles)"
             )
             if job:
                 job.add_log(
-                    f"...still reading orthophoto tiles "
-                    f"({done}/{len(datasets)} complete, {elapsed}s elapsed)"
+                    f"Phase 1: parallel read of {len(datasets)} tiles "
+                    f"with {read_workers} workers..."
                 )
 
-    heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
-    heartbeat_thread.start()
-
-    # Track retries separately so the post-merge summary can call them out.
-    retries_used = 0
-    tiles_failed = 0
-    tile_counts_lock = threading.Lock()
-
-    def _read_tile(idx_ds: tuple[int, object]) -> Optional[tuple[int, int, int, int, int, np.ndarray, float]]:
-        """Read one tile's intersection with the output bbox, retrying on transient failure.
-
-        Returns (idx, row_start, row_end, col_start, col_end, buf, elapsed)
-        or None if the tile does not overlap or all retries failed.
-        """
-        nonlocal retries_used, tiles_failed
-        idx, ds = idx_ds
-        t0 = time.monotonic()
-        # Set GDAL_NUM_THREADS per worker so each tile's own decode can use
-        # 2 GDAL threads; bounded total threads stays sane.
-        env = {**_gdal_vsicurl_env(), "GDAL_NUM_THREADS": "2"}
-        with Env(**env):
-            tx_min, ty_min, tx_max, ty_max = ds.bounds
-            ix_min = max(x_min_s, tx_min)
-            ix_max = min(x_max_s, tx_max)
-            iy_min = max(y_min_s, ty_min)
-            iy_max = min(y_max_s, ty_max)
-            if ix_min >= ix_max or iy_min >= iy_max:
-                return None
-
-            col_start = int(round((ix_min - x_min_s) / approx_res))
-            col_end = int(round((ix_max - x_min_s) / approx_res))
-            row_start = int(round((y_max_s - iy_max) / approx_res))
-            row_end = int(round((y_max_s - iy_min) / approx_res))
-            col_end = min(col_end, out_w)
-            row_end = min(row_end, out_h)
-            dest_h = row_end - row_start
-            dest_w = col_end - col_start
-            if dest_h <= 0 or dest_w <= 0:
-                return None
-
-            src_window = window_from_bounds(
-                ix_min, iy_min, ix_max, iy_max, transform=ds.transform
-            )
-            # Attempt the windowed read, retrying once or twice on
-            # response_code=0 / ZLib decode errors caused by dl1.lantmateriet.se
-            # dropping the connection. GDAL retries the underlying range
-            # request itself (GDAL_HTTP_MAX_RETRY=3), but those retries
-            # don't always cover the case where the entire connection
-            # gets reset mid-stream, so we wrap one more layer here.
-            last_exc: Optional[Exception] = None
-            for attempt in range(max_retries + 1):
-                try:
-                    buf = ds.read(
-                        indexes=[1, 2, 3],
-                        window=src_window,
-                        out_shape=(3, dest_h, dest_w),
-                        resampling=Resampling.bilinear,
-                        boundless=True,
-                        fill_value=0,
-                    )
-                    if attempt > 0:
-                        with tile_counts_lock:
-                            retries_used += 1
+            failed_in_phase1: list[tuple[int, object]] = []
+            phase1_ok = 0
+            with ThreadPoolExecutor(max_workers=read_workers) as pool:
+                fut_to_idx_ds = {
+                    pool.submit(_read_tile_once, (i, ds)): (i, ds)
+                    for i, ds in enumerate(datasets)
+                }
+                for fut in as_completed(fut_to_idx_ds):
+                    if watchdog.timed_out:
+                        # Cancel still-pending futures; running ones will
+                        # finish on their own. Either way we stop draining.
+                        for pending in fut_to_idx_ds:
+                            if not pending.done():
+                                pending.cancel()
+                        break
+                    outcome = fut.result()
+                    kind = outcome[0]
+                    idx = outcome[1]
+                    if kind == "ok":
+                        results[idx] = outcome[1:]   # (idx, rs, re, cs, ce, buf, elapsed)
+                        watchdog.end_ok(idx)
+                        phase1_ok += 1
+                    elif kind == "skip":
+                        # Doesn't overlap output — count as done, no fail.
+                        watchdog.end_ok(idx)
+                    else:  # "fail"
+                        watchdog.end_attempt_fail(idx)
+                        failed_in_phase1.append(fut_to_idx_ds[fut])
+                        # One concise log line per failure replaces the
+                        # 5-15 lines of GDAL chatter we used to emit.
                         logger.info(
-                            f"STAC Bild: tile {idx + 1}/{len(datasets)} "
-                            f"recovered on attempt {attempt + 1}"
+                            f"STAC Bild: tile {idx + 1} → phase 2 "
+                            f"({outcome[2]})"
                         )
-                    break
-                except Exception as exc:
-                    last_exc = exc
-                    if attempt < max_retries:
-                        logger.warning(
-                            f"STAC Bild: tile {idx + 1}/{len(datasets)} "
-                            f"read attempt {attempt + 1} failed ({exc}); "
-                            f"retrying..."
-                        )
-                        time.sleep(0.5 * (attempt + 1))
-                        continue
-                    logger.warning(
-                        f"STAC Bild: tile {idx + 1}/{len(datasets)} "
-                        f"read failed after {max_retries + 1} attempts: {exc}"
-                    )
-                    with tile_counts_lock:
-                        tiles_failed += 1
-                    return None
-            assert last_exc is None or buf is not None  # guarded by loop above
-        return idx, row_start, row_end, col_start, col_end, buf, time.monotonic() - t0
 
-    try:
-        results: list[Optional[tuple]] = [None] * len(datasets)
-        with ThreadPoolExecutor(max_workers=read_workers) as pool:
-            futures = [pool.submit(_read_tile, (i, ds)) for i, ds in enumerate(datasets)]
-            for fut in as_completed(futures):
-                r = fut.result()
-                if r is None:
-                    with tiles_done_lock:
-                        tiles_done += 1
-                    continue
-                idx = r[0]
-                results[idx] = r
-                with tiles_done_lock:
-                    tiles_done += 1
-                    done = tiles_done
-                logger.info(
-                    f"STAC Bild: read tile {idx + 1}/{len(datasets)} "
-                    f"({r[5].shape[2]}×{r[5].shape[1]} px) in {r[6]:.1f}s "
-                    f"[{done}/{len(datasets)} complete]"
+            phase1_elapsed = time.monotonic() - phase1_start
+            logger.info(
+                f"STAC Bild: phase 1 done in {phase1_elapsed:.1f}s — "
+                f"{phase1_ok} ok, {len(failed_in_phase1)} deferred"
+            )
+            if job:
+                job.add_log(
+                    f"Phase 1 complete in {phase1_elapsed:.1f}s — "
+                    f"{phase1_ok} ok, {len(failed_in_phase1)} deferred to phase 2"
                 )
 
-        # First-wins merge in newest-first input order — a pixel is filled
-        # only if every band is still 0 (nodata). Matches rasterio.merge's
-        # method='first' + nodata=0 semantics.
-        for r in results:
-            if r is None:
-                continue
-            _, rs, re_, cs, ce, buf, _ = r
-            region = merged[:, rs:re_, cs:ce]
-            # Pixel is nodata where ALL bands are zero.
-            is_nodata = (region == 0).all(axis=0)
-            if not is_nodata.any():
-                continue
-            np.copyto(region, buf, where=is_nodata[np.newaxis, :, :])
+            # ----- Phase 2 — serial retry sweep with jittered backoff.
+            permanent_failures = 0
+            if failed_in_phase1 and not watchdog.timed_out:
+                phase2_start = time.monotonic()
+                logger.info(
+                    f"STAC Bild: phase 2/2 — serial retry sweep "
+                    f"({len(failed_in_phase1)} tiles, up to "
+                    f"{max_serial_retries} attempts each, jittered backoff)"
+                )
+                if job:
+                    job.add_log(
+                        f"Phase 2: retrying {len(failed_in_phase1)} tile(s) "
+                        f"serially with jittered backoff..."
+                    )
+
+                recovered = 0
+                for idx, ds in failed_in_phase1:
+                    if watchdog.timed_out:
+                        break
+                    success = False
+                    for attempt in range(max_serial_retries):
+                        # Jittered linear backoff: 1.0–2.5s, 1.0–4.0s, 1.0–5.5s.
+                        # First attempt waits too — server needs to cool off
+                        # from Phase 1's load before we hit it again.
+                        sleep_for = 1.0 + random.uniform(0, 1.5 * (attempt + 1))
+                        time.sleep(sleep_for)
+                        outcome = _read_tile_once((idx, ds))
+                        if outcome[0] == "ok":
+                            results[idx] = outcome[1:]
+                            watchdog.end_ok(idx)
+                            recovered += 1
+                            success = True
+                            logger.info(
+                                f"STAC Bild: tile {idx + 1} recovered "
+                                f"(serial attempt {attempt + 1})"
+                            )
+                            break
+                        elif outcome[0] == "skip":
+                            # Shouldn't normally happen on retry (overlap
+                            # is deterministic) but handle it cleanly.
+                            watchdog.end_ok(idx)
+                            success = True
+                            break
+                        else:
+                            watchdog.end_attempt_fail(idx)
+                    if not success:
+                        watchdog.end_perm_fail(idx)
+                        permanent_failures += 1
+                        logger.warning(
+                            f"STAC Bild: tile {idx + 1} permanently failed "
+                            f"after {max_serial_retries} serial retries"
+                        )
+
+                phase2_elapsed = time.monotonic() - phase2_start
+                logger.info(
+                    f"STAC Bild: phase 2 done in {phase2_elapsed:.1f}s — "
+                    f"{recovered} recovered, {permanent_failures} permanent fail"
+                )
+                if job:
+                    job.add_log(
+                        f"Phase 2 complete in {phase2_elapsed:.1f}s — "
+                        f"{recovered} recovered, {permanent_failures} permanent"
+                    )
+            else:
+                # No failures in Phase 1 (or already timed out).
+                # `permanent_failures` already initialised to 0 above.
+                pass
+
+            if watchdog.timed_out:
+                logger.error(
+                    "STAC Bild: aborting merge — watchdog wall-clock cap reached"
+                )
+                return None, None
+
+            # ----- First-wins composite in newest-first input order.
+            # A pixel is filled only if every band is still 0 (nodata).
+            # Matches rasterio.merge's method='first' + nodata=0 semantics.
+            for r in results:
+                if r is None:
+                    continue
+                _, rs, re_, cs, ce, buf, _ = r
+                region = merged[:, rs:re_, cs:ce]
+                is_nodata = (region == 0).all(axis=0)
+                if not is_nodata.any():
+                    continue
+                np.copyto(region, buf, where=is_nodata[np.newaxis, :, :])
     except Exception as exc:
-        logger.error(f"STAC Bild: parallel merge failed: {exc}")
+        logger.error(f"STAC Bild: merge failed: {exc}")
         return None, None
     finally:
-        heartbeat_stop.set()
-        heartbeat_thread.join(timeout=1.0)
+        watchdog.stop()
         # Close VRT wrappers before the DatasetReaders they wrap.
         for ds in datasets:
             if ds in source_handles:
@@ -498,22 +748,20 @@ def _cog_merge_rgb(
 
     merge_elapsed = time.monotonic() - merge_start
     merged_mb = merged.nbytes / (1024 * 1024)
-    retry_note = ""
-    if retries_used or tiles_failed:
-        retry_note = (
-            f" — {retries_used} tile(s) recovered via retry, "
-            f"{tiles_failed} permanently failed"
-        )
+    fail_note = (
+        f" — {permanent_failures} tile(s) permanently failed (within tolerance)"
+        if permanent_failures else ""
+    )
     logger.info(
-        f"STAC Bild: parallel range-merge complete in {merge_elapsed:.1f}s "
+        f"STAC Bild: range-merge complete in {merge_elapsed:.1f}s "
         f"({merged.shape[2]}×{merged.shape[1]} px, {merged_mb:.0f} MB in-memory)"
-        f"{retry_note}"
+        f"{fail_note}"
     )
     if job:
         job.add_log(
             f"COG range-merge complete in {merge_elapsed:.1f}s "
             f"({merged.shape[2]}×{merged.shape[1]} px, {merged_mb:.0f} MB)"
-            f"{retry_note}"
+            f"{fail_note}"
         )
 
     # Hard fail if upstream coverage was so degraded that the merged
@@ -521,10 +769,10 @@ def _cog_merge_rgb(
     # because newer-first overlap usually fills them in, but if more
     # than a third of tiles are lost the user should see a clear error
     # rather than a quietly-degraded orthophoto.
-    if tiles_failed and tiles_failed > max(1, len(datasets) // 3):
+    if permanent_failures and permanent_failures > max(1, len(datasets) // 3):
         logger.error(
             f"STAC Bild: too many tile read failures "
-            f"({tiles_failed}/{len(datasets)}) — orthophoto coverage "
+            f"({permanent_failures}/{len(datasets)}) — orthophoto coverage "
             f"would be unacceptably degraded; aborting STAC Bild"
         )
         return None, None
