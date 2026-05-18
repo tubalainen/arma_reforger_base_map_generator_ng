@@ -117,17 +117,22 @@ class TestSurfaceCoverageFiltering:
 
 
 class TestHeightmapImportStep:
-    """Issue #120 — the Import Height Map dialog defaults to
-    Resample=ON, Min=0, Max=1, which silently flattens every imported
-    heightmap into a 0–1 m strip. The reporter's project showed this
-    exact failure mode: their heightmap.asc ranged from -1.98 m to
-    +23.29 m, but HeightMap.desc came out as
-    ``ResampleMinHeight 0 / ResampleMaxHeight 1`` because the guide
-    only documented the Invert axes and left the user on the dialog
-    defaults. Pin that the rendered guide names the resample
-    behaviour *and* the project's real Min/Max numbers."""
+    """Issue #120 + #130 — the Import Height Map dialog has labels
+    ``Invert in X axis``, ``Invert in Z axis``, ``Disable blocks under
+    height``, ``Resample heights``, ``Lowest source height is`` and
+    ``Highest source height is``. ``Resample heights`` is UNCHECKED by
+    default; the two source-height fields are disabled while it is off.
+    The original failure mode (#120) was a user enabling Resample and
+    accepting Lowest=0 / Highest=1, which silently flattens every
+    imported heightmap into a 0–1 m strip — their heightmap.asc ranged
+    from -1.98 m to +23.29 m but HeightMap.desc came out as
+    ``ResampleMinHeight 0 / ResampleMaxHeight 1``. v1.5.11 also fixed
+    issue #130: the guide previously named the dialog fields with
+    invented labels (``Invert X Axis``, ``Min Height``, ``Max Height``,
+    ``Resample to specified range``) that don't exist in Workbench,
+    leaving users unable to find them."""
 
-    def test_heightmap_phase_states_real_min_and_max_height(self):
+    def test_heightmap_phase_uses_real_workbench_field_labels(self):
         from services.setup_guide_generator import SetupGuideGenerator
 
         meta = _metadata(["grass"], {"grass": {"percentage": 100.0}})
@@ -136,15 +141,35 @@ class TestHeightmapImportStep:
 
         guide = SetupGuideGenerator("TestMap", meta)._phase_terrain_creation()
 
-        # The exact field labels Workbench shows the user.
-        assert "**Min Height**" in guide
-        assert "**Max Height**" in guide
+        # The exact field labels Workbench shows the user (issue #130).
+        assert "**Invert in X axis**" in guide
+        assert "**Invert in Z axis**" in guide
+        assert "**Disable blocks under height**" in guide
+        assert "**Resample heights**" in guide
+        assert "**Lowest source height is**" in guide
+        assert "**Highest source height is**" in guide
         # The project's actual elevation range — not 0/1.
         assert "-1.981" in guide
         assert "23.289" in guide
-        # Telling the user to unckeck Resample is the load-bearing part.
-        assert "Resample to specified range" in guide
-        assert "UNCHECK" in guide
+        # The load-bearing instruction: keep Resample unchecked.
+        assert "UNCHECKED" in guide
+
+    def test_heightmap_phase_does_not_use_invented_labels(self):
+        """Issue #130 regression — the previous wording invented labels
+        (Min Height / Max Height / Resample to specified range / Invert X
+        Axis) that don't exist in the Workbench dialog. If anyone
+        reintroduces them, this test catches it."""
+        from services.setup_guide_generator import SetupGuideGenerator
+
+        guide = SetupGuideGenerator(
+            "TestMap", _metadata(["grass"], {"grass": {"percentage": 100.0}})
+        )._phase_terrain_creation()
+
+        assert "Min Height" not in guide
+        assert "Max Height" not in guide
+        assert "Resample to specified range" not in guide
+        assert "Invert X Axis" not in guide
+        assert "Invert Z Axis" not in guide
 
     def test_heightmap_phase_warns_about_dialog_defaults(self):
         from services.setup_guide_generator import SetupGuideGenerator
@@ -152,11 +177,11 @@ class TestHeightmapImportStep:
         meta = _metadata(["grass"], {"grass": {"percentage": 100.0}})
         guide = SetupGuideGenerator("TestMap", meta)._phase_terrain_creation()
 
-        # The narrative that explains *why* the defaults are wrong —
-        # without this, future-us will silently delete the table thinking
-        # the explicit values are redundant.
-        assert "do not accept the dialog defaults" in guide
+        # The narrative that explains *why* enabling Resample is wrong
+        # for .asc imports — without this, future-us will silently delete
+        # the table thinking the explicit values are redundant.
         assert "#120" in guide
+        assert "Resample heights" in guide
 
 
 class TestRoadsPhaseGuide:

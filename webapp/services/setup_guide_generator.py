@@ -247,17 +247,18 @@ You should see this structure inside:
 2. Go to the **Manage** tab
 3. Click **Import Height Map...**
 4. Navigate to: `{self.map_name}/Sourcefiles/heightmap.asc`
-5. Settings — **use these exact values, do not accept the dialog defaults**:
+5. Settings — **use these exact values** (the labels below match the Workbench dialog verbatim):
 
    | Field | Value |
    |-------|-------|
-   | **Invert X Axis** | No |
-   | **Invert Z Axis** | Yes |
-   | **Resample to specified range** | **UNCHECK** (use the raw metres from the .asc file) |
-   | **Min Height** | **{min_elev:.3f}** |
-   | **Max Height** | **{max_elev:.3f}** |
+   | **Invert in X axis** | unchecked (default) |
+   | **Invert in Z axis** | **checked** |
+   | **Disable blocks under height** | `-1e+06` (default — leave as-is) |
+   | **Resample heights** | **UNCHECKED** (default — do **not** enable for .asc imports) |
+   | **Lowest source height is** | *(disabled, ignored)* — would be **{min_elev:.3f}** if you ever resample |
+   | **Highest source height is** | *(disabled, ignored)* — would be **{max_elev:.3f}** if you ever resample |
 
-   > **Why this matters:** the dialog defaults are `Resample = ON`, `Min = 0`, `Max = 1`. Accepting them flattens the entire terrain into a 0–1 m strip, which can both produce a paper-flat map *and* leave the world in an inconsistent state that has crashed Workbench on the subsequent reload (issue #120). The `Min`/`Max` numbers above are this map's real elevation range from `Reference/metadata.json` — Workbench uses them as the absolute height bounds for the imported grid.
+   > **Why this matters:** the `.asc` file already contains absolute height values in metres, so leaving **Resample heights** unchecked tells Workbench to use those metres directly. Enabling **Resample heights** *and* accepting the field defaults (`Lowest = 0`, `Highest = 1`) rescales the whole map into a 0–1 m strip, producing a paper-flat terrain and an inconsistent project state that has crashed Workbench on the subsequent reload (issue #120). The `Lowest`/`Highest` values shown above come from this map's real elevation range in `Reference/metadata.json` — only relevant if you deliberately re-enable Resample.
 
 6. Click **Import**
 
@@ -811,8 +812,9 @@ Heightmap Dimensions:   {dims} pixels
 Heightmap Format:       ESRI ASCII Grid (.asc) — recommended
                         16-bit PNG (.png) — alternative
 
-Invert X Axis:          No
-Invert Z Axis:          Yes
+Invert in X axis:       unchecked
+Invert in Z axis:       checked
+Resample heights:       unchecked (use raw metres from .asc)
 
 Default Surface:        {self.recommended_default} ({self.default_material})
 Surface Masks:          {self.surf.get('count', 5)} masks
