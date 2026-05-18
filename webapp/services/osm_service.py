@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import datetime
 from typing import Optional
 
 import httpx
@@ -62,6 +63,24 @@ def _endpoint_label(url: str) -> str:
         return urlparse(url).hostname or url
     except Exception:
         return url
+
+
+def _is_valid_iso_timestamp(value: str) -> bool:
+    """Check that an Overpass `timestamp_osm_base` string parses as an ISO date.
+
+    Healthy mirrors return values like "2026-05-06T03:25:00Z". Broken mirrors
+    have been observed (issue #131) returning bare integers like "114277"
+    alongside an empty `elements` array.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        # fromisoformat doesn't accept the trailing "Z" before Python 3.11,
+        # so strip it. Anything that parses is good enough.
+        datetime.fromisoformat(value.rstrip("Z"))
+        return True
+    except ValueError:
+        return False
 
 
 async def _run_overpass_query(query: str, max_retries: int = 2, job=None) -> Optional[dict]:
@@ -121,6 +140,40 @@ async def _run_overpass_query(query: str, max_retries: int = 2, job=None) -> Opt
                             result = resp.json()
                             element_count = len(result.get("elements", []))
                             data_size_kb = len(resp.content) / 1024
+
+                            # Reject broken/stale mirrors: timestamp_osm_base must be a parseable
+                            # ISO date. Observed 2026-05-18 (issue #131): overpass.osm.ch returned
+                            # 200 OK with `timestamp_osm_base: "114277"` and zero elements for every
+                            # query, masking a genuine result on the next mirror.
+                            timestamp = result.get("osm3s", {}).get("timestamp_osm_base", "")
+                            if not _is_valid_iso_timestamp(timestamp):
+                                logger.warning(
+                                    f"Overpass [{label}] returned corrupt timestamp_osm_base "
+                                    f"({timestamp!r}) — treating as broken mirror, trying next..."
+                                )
+                                if job:
+                                    job.add_log(
+                                        f"Overpass mirror [{label}] returned corrupt data, trying next...",
+                                        "warning",
+                                    )
+                                continue
+
+                            # Soft-error detection: Overpass returns 200 OK with a `remark` field
+                            # for runtime errors (timeouts, memory limits). If elements is empty
+                            # AND remark is present, treat as failure rather than "no data here".
+                            remark = result.get("remark", "")
+                            if element_count == 0 and remark:
+                                logger.warning(
+                                    f"Overpass [{label}] returned 0 elements with remark "
+                                    f"({remark!r}) — treating as soft failure, trying next..."
+                                )
+                                if job:
+                                    job.add_log(
+                                        f"Overpass mirror [{label}] soft error: {remark}",
+                                        "warning",
+                                    )
+                                continue
+
                             logger.info(
                                 f"Successfully fetched {query_type} from Overpass [{label}]: "
                                 f"{element_count} elements, {data_size_kb:.1f} KB"
