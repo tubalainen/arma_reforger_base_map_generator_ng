@@ -17,10 +17,13 @@ Architecture notes:
 Workflow:
 1. POST /stac-bild/v1/search (open, no auth) — newest items first
 2. Build VSICURL paths for the "data" asset of each matching item
-3. Open COGs via rasterio.Env(GDAL_HTTP_AUTH=BASIC, …) + /vsicurl/ prefix
-4. rasterio.merge(bounds=projected_bbox, res=target_res, indexes=[1,2,3])
-   — reads only RGB bands (drops NIR band 4), uses COG overviews for efficiency
+3. Open all COGs in parallel via rasterio.Env(GDAL_HTTP_AUTH=BASIC, …) +
+   /vsicurl/ prefix (ThreadPoolExecutor, capped at 8 workers)
+4. Read each tile's windowed intersection with the target bbox in parallel
+   (RGB bands only — drops NIR band 4 — using COG overviews for efficiency),
+   then first-wins merge in newest-first order so newer imagery takes priority
 5. Warp merged EPSG:3006 result to WGS84 at the requested pixel dimensions
+   (single multi-band reproject with GDAL num_threads, all 3 bands at once)
 6. Return PNG bytes — same format as the WMS service, so the existing
    reprojection step (step 7b in map_generator) aligns it correctly
 """
@@ -30,6 +33,9 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import math
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import httpx
@@ -38,6 +44,11 @@ import numpy as np
 from config.lantmateriet import LANTMATERIET_CONFIG
 
 logger = logging.getLogger(__name__)
+
+
+def _default_workers() -> int:
+    """Worker count for parallel tile I/O — matches services.utils.parallel."""
+    return min(8, os.cpu_count() or 2)
 
 # STAC search endpoint (open — no auth required)
 _SEARCH_HEADERS = {
@@ -125,183 +136,309 @@ def _cog_merge_rgb(
     import time
 
     import rasterio
+    from affine import Affine
     from rasterio.crs import CRS
     from rasterio.env import Env
     from rasterio.enums import Resampling
-    from rasterio.merge import merge as rasterio_merge
     from rasterio.vrt import WarpedVRT
+    from rasterio.windows import from_bounds as window_from_bounds
 
     x_min, y_min, x_max, y_max = epsg3006_bounds
     n_hrefs = len(vsicurl_hrefs)
     target_crs = CRS.from_epsg(3006)
+    workers = _default_workers()
 
-    # Datasets and the underlying file handles are tracked separately because
-    # WarpedVRT wrappers must be closed before the wrapped DatasetReader.
-    datasets = []
-    source_handles = []
-    open_start = time.monotonic()
-    with Env(**_gdal_vsicurl_env()):
-        # Open all COG files (only the header is fetched at this point)
-        skipped_single_band = 0
-        for idx, href in enumerate(vsicurl_hrefs, 1):
+    # --------------------------------------------------------------
+    # 1. Parallel COG header opens
+    #
+    # Each rasterio.open(/vsicurl/...) is a small HTTP range-request
+    # round-trip; doing them serially scales with len(hrefs). Open in
+    # threads so we trade ~50 sequential round-trips for ~50/workers.
+    # Results are reassembled in input order so the merge's
+    # "first-wins / newest-first" semantics are preserved.
+    # --------------------------------------------------------------
+    open_results: list[Optional[tuple]] = [None] * n_hrefs
+
+    def _open_one(idx_href: tuple[int, str]) -> tuple[int, Optional[object], Optional[object], Optional[str]]:
+        """Open one COG, decide whether to skip or WarpedVRT-wrap it.
+
+        Returns (idx, dataset_for_merge, source_handle, log_line).
+        dataset_for_merge is None if the tile was skipped or failed.
+        source_handle is the underlying rasterio handle to close later;
+        if it equals dataset_for_merge, no VRT is in play.
+        """
+        idx, href = idx_href
+        with Env(**_gdal_vsicurl_env()):
             try:
                 ds = rasterio.open(href)
-                source_handles.append(ds)
-                # STAC Bild's primary collection is EPSG:3006 4-band RGBI, but
-                # sibling collections (e.g. se1g — historic single-band
-                # panchromatic) sometimes surface in the same search result.
-                # rasterio.merge() reads the same `indexes=[1,2,3]` from every
-                # source, so a 1-band tile makes the whole merge raise
-                # "band index 2 out of range" and we lose the orthophoto. Skip
-                # those tiles up front — if all returned tiles are single-band
-                # we'll return None and the caller falls back to WMS.
-                if ds.count < 3:
-                    skipped_single_band += 1
-                    logger.info(
-                        f"STAC Bild: skipping COG {idx}/{n_hrefs} — "
-                        f"{ds.count}-band source (need ≥3 for RGB merge): {href}"
-                    )
-                    continue
-                # STAC Bild's primary collection is EPSG:3006, but sibling
-                # collections occasionally surface in a different CRS.
-                # rasterio.merge() requires a homogeneous CRS, so wrap
-                # mismatched tiles in a WarpedVRT that lazily reprojects
-                # them on read.
-                if ds.crs != target_crs:
-                    vrt = WarpedVRT(
-                        ds,
-                        crs=target_crs,
-                        resampling=Resampling.bilinear,
-                    )
-                    datasets.append(vrt)
-                    logger.info(
-                        f"STAC Bild: opened COG {idx}/{n_hrefs} "
-                        f"({ds.width}×{ds.height} px native, "
-                        f"reprojecting {ds.crs.to_string()} → EPSG:3006)"
-                    )
-                else:
-                    datasets.append(ds)
-                    logger.info(
-                        f"STAC Bild: opened COG {idx}/{n_hrefs} "
-                        f"({ds.width}×{ds.height} px native)"
-                    )
             except Exception as exc:
-                logger.warning(f"Could not open COG {href}: {exc}")
-        open_elapsed = time.monotonic() - open_start
-        skip_note = (
-            f" ({skipped_single_band} skipped as <3-band)"
-            if skipped_single_band else ""
-        )
-        logger.info(
-            f"STAC Bild: opened {len(datasets)}/{n_hrefs} COG headers "
-            f"in {open_elapsed:.1f}s{skip_note}"
-        )
-        if job:
-            job.add_log(
-                f"Opened {len(datasets)}/{n_hrefs} Lantmäteriet COG tile headers "
-                f"in {open_elapsed:.1f}s — starting range-merge over target bounds..."
-            )
-
-        if not datasets:
-            return None, None
-
-        # Hint rasterio toward a coarse overview level when one would suffice:
-        # pick a target resolution that yields roughly `target_width` pixels at
-        # the requested bounds, but only as a hint — merge uses the *closest
-        # source overview* whose resolution is finer or equal to this value.
-        # The merged output keeps that overview's native resolution (no
-        # secondary resampling here), so tile windows stay grid-aligned.
-        approx_res = max(
-            (x_max - x_min) / max(target_width, 1),
-            (y_max - y_min) / max(target_height, 1),
-        )
-
-        logger.info(
-            f"STAC Bild: merging {len(datasets)} tiles at "
-            f"approx_res={approx_res:.2f} m/px over bounds "
-            f"{int(x_max - x_min)}×{int(y_max - y_min)} m "
-            f"→ target {target_width}×{target_height} px"
-        )
-        if job:
-            # rasterio.merge is a single blocking call with no progress hook —
-            # warn the user up front so the UI doesn't look frozen.
-            job.add_log(
-                f"Merging {len(datasets)} orthophoto tiles into final image — "
-                f"this can take 30–120 seconds and the activity log will look "
-                f"idle while it runs. Please stand by..."
-            )
-
-        merge_start = time.monotonic()
-
-        # Heartbeat thread: emit a progress line every 5s so docker logs and the
-        # web UI activity log show forward motion during the blocking merge.
-        heartbeat_stop = threading.Event()
-
-        def _heartbeat():
-            elapsed = 0
-            while not heartbeat_stop.wait(5.0):
-                elapsed += 5
-                logger.info(
-                    f"STAC Bild: merge in progress... {elapsed}s elapsed"
+                return idx, None, None, f"Could not open COG {href}: {exc}"
+            # STAC Bild's primary collection is EPSG:3006 4-band RGBI, but
+            # sibling collections (e.g. se1g — historic single-band
+            # panchromatic) sometimes surface in the same search result.
+            # A windowed multi-band read on a 1-band tile would raise
+            # "band index out of range" and abort the merge. Skip those.
+            if ds.count < 3:
+                return (
+                    idx,
+                    None,
+                    ds,
+                    f"STAC Bild: skipping COG {idx + 1}/{n_hrefs} — "
+                    f"{ds.count}-band source (need ≥3 for RGB merge): {href}",
                 )
-                if job:
-                    job.add_log(
-                        f"...still merging orthophoto tiles ({elapsed}s elapsed)"
-                    )
-
-        heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
-        heartbeat_thread.start()
-
-        try:
-            # indexes=[1, 2, 3] selects the RGB bands (band 4 is NIR — skip it).
-            # target_aligned_pixels=True snaps the output extent so pixels are
-            # integer multiples of `res` from the origin: every source tile
-            # resamples into the *same* shared grid, so adjacent tiles can no
-            # longer leave a sub-pixel sliver between them.
-            merged, transform = rasterio_merge(
-                datasets,
-                bounds=(x_min, y_min, x_max, y_max),
-                target_aligned_pixels=True,
-                res=approx_res,
-                resampling=Resampling.bilinear,
-                indexes=[1, 2, 3],
-                nodata=0,
+            # Sibling collections occasionally surface in a different CRS;
+            # wrap mismatched tiles in a WarpedVRT that lazily reprojects
+            # to EPSG:3006 on read so all tiles share one CRS.
+            if ds.crs != target_crs:
+                vrt = WarpedVRT(ds, crs=target_crs, resampling=Resampling.bilinear)
+                return (
+                    idx,
+                    vrt,
+                    ds,
+                    f"STAC Bild: opened COG {idx + 1}/{n_hrefs} "
+                    f"({ds.width}×{ds.height} px native, "
+                    f"reprojecting {ds.crs.to_string()} → EPSG:3006)",
+                )
+            return (
+                idx,
+                ds,
+                ds,
+                f"STAC Bild: opened COG {idx + 1}/{n_hrefs} "
+                f"({ds.width}×{ds.height} px native)",
             )
-            # merged shape: (3, H, W) — exact pixel count depends on the
-            # overview rasterio picked, the caller warps to the final size.
-        except Exception as exc:
-            logger.error(f"rasterio.merge failed for STAC Bild COGs: {exc}")
-            return None, None
-        finally:
-            heartbeat_stop.set()
-            heartbeat_thread.join(timeout=1.0)
-            # Close VRT wrappers before the underlying DatasetReaders they wrap.
-            for ds in datasets:
-                if ds in source_handles:
-                    continue
-                try:
-                    ds.close()
-                except Exception:
-                    pass
-            for ds in source_handles:
-                try:
-                    ds.close()
-                except Exception:
-                    pass
 
-        merge_elapsed = time.monotonic() - merge_start
-        merged_mb = merged.nbytes / (1024 * 1024)
-        logger.info(
-            f"STAC Bild: range-merge complete in {merge_elapsed:.1f}s "
-            f"({merged.shape[2]}×{merged.shape[1]} px, {merged_mb:.0f} MB in-memory)"
+    open_start = time.monotonic()
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_open_one, (i, h)) for i, h in enumerate(vsicurl_hrefs)]
+        for fut in as_completed(futures):
+            entry = fut.result()
+            open_results[entry[0]] = entry
+
+    # Assemble in newest-first input order — "first wins" depends on it.
+    datasets: list = []
+    source_handles: list = []
+    skipped_single_band = 0
+    for entry in open_results:
+        if entry is None:
+            continue
+        _, ds_for_merge, src_handle, log_line = entry
+        if log_line:
+            logger.info(log_line)
+        if src_handle is not None and ds_for_merge is None:
+            # opened but skipped (e.g. <3 bands); still close later
+            skipped_single_band += 1
+            source_handles.append(src_handle)
+            continue
+        if ds_for_merge is None:
+            # open failed
+            continue
+        datasets.append(ds_for_merge)
+        source_handles.append(src_handle)
+
+    open_elapsed = time.monotonic() - open_start
+    skip_note = (
+        f" ({skipped_single_band} skipped as <3-band)"
+        if skipped_single_band else ""
+    )
+    logger.info(
+        f"STAC Bild: opened {len(datasets)}/{n_hrefs} COG headers "
+        f"in {open_elapsed:.1f}s{skip_note} (workers={workers})"
+    )
+    if job:
+        job.add_log(
+            f"Opened {len(datasets)}/{n_hrefs} Lantmäteriet COG tile headers "
+            f"in {open_elapsed:.1f}s — starting parallel windowed read..."
         )
-        if job:
-            job.add_log(
-                f"COG range-merge complete in {merge_elapsed:.1f}s "
-                f"({merged.shape[2]}×{merged.shape[1]} px, {merged_mb:.0f} MB)"
-            )
 
-    return merged, transform
+    if not datasets:
+        for h in source_handles:
+            try:
+                h.close()
+            except Exception:
+                pass
+        return None, None
+
+    # Hint GDAL toward a coarse overview level when one would suffice:
+    # pick a target resolution that yields roughly `target_width` pixels at
+    # the requested bounds. Each tile read passes out_shape=, so GDAL picks
+    # the closest source overview whose resolution is finer or equal —
+    # tile windows stay grid-aligned across tiles.
+    approx_res = max(
+        (x_max - x_min) / max(target_width, 1),
+        (y_max - y_min) / max(target_height, 1),
+    )
+
+    # Snap bounds to integer multiples of approx_res (equivalent to
+    # rasterio.merge's target_aligned_pixels=True) so every tile resamples
+    # into the same shared pixel grid — no sub-pixel slivers between tiles.
+    x_min_s = math.floor(x_min / approx_res) * approx_res
+    y_min_s = math.floor(y_min / approx_res) * approx_res
+    x_max_s = math.ceil(x_max / approx_res) * approx_res
+    y_max_s = math.ceil(y_max / approx_res) * approx_res
+
+    out_w = max(1, int(round((x_max_s - x_min_s) / approx_res)))
+    out_h = max(1, int(round((y_max_s - y_min_s) / approx_res)))
+    out_transform = Affine.translation(x_min_s, y_max_s) * Affine.scale(
+        approx_res, -approx_res
+    )
+
+    logger.info(
+        f"STAC Bild: merging {len(datasets)} tiles at "
+        f"approx_res={approx_res:.2f} m/px over bounds "
+        f"{int(x_max - x_min)}×{int(y_max - y_min)} m "
+        f"→ output {out_w}×{out_h} px (workers={workers})"
+    )
+    if job:
+        job.add_log(
+            f"Reading {len(datasets)} orthophoto tile windows in parallel "
+            f"({workers} workers)..."
+        )
+
+    merge_start = time.monotonic()
+    merged = np.zeros((3, out_h, out_w), dtype=np.uint8)
+    tiles_done = 0
+    tiles_done_lock = threading.Lock()
+
+    # Heartbeat: emit a periodic progress line so docker logs and the web
+    # UI show forward motion even when individual tile reads are slow.
+    heartbeat_stop = threading.Event()
+
+    def _heartbeat():
+        elapsed = 0
+        while not heartbeat_stop.wait(5.0):
+            elapsed += 5
+            with tiles_done_lock:
+                done = tiles_done
+            logger.info(
+                f"STAC Bild: tile reads in progress... {elapsed}s elapsed "
+                f"({done}/{len(datasets)} tiles complete)"
+            )
+            if job:
+                job.add_log(
+                    f"...still reading orthophoto tiles "
+                    f"({done}/{len(datasets)} complete, {elapsed}s elapsed)"
+                )
+
+    heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
+    heartbeat_thread.start()
+
+    def _read_tile(idx_ds: tuple[int, object]) -> Optional[tuple[int, int, int, int, int, np.ndarray, float]]:
+        """Read one tile's intersection with the output bbox.
+
+        Returns (idx, row_start, row_end, col_start, col_end, buf, elapsed)
+        or None if the tile does not overlap.
+        """
+        idx, ds = idx_ds
+        t0 = time.monotonic()
+        # Set GDAL_NUM_THREADS per worker so each tile's own decode can use
+        # 2 GDAL threads; bounded total threads stays sane.
+        env = {**_gdal_vsicurl_env(), "GDAL_NUM_THREADS": "2"}
+        with Env(**env):
+            tx_min, ty_min, tx_max, ty_max = ds.bounds
+            ix_min = max(x_min_s, tx_min)
+            ix_max = min(x_max_s, tx_max)
+            iy_min = max(y_min_s, ty_min)
+            iy_max = min(y_max_s, ty_max)
+            if ix_min >= ix_max or iy_min >= iy_max:
+                return None
+
+            col_start = int(round((ix_min - x_min_s) / approx_res))
+            col_end = int(round((ix_max - x_min_s) / approx_res))
+            row_start = int(round((y_max_s - iy_max) / approx_res))
+            row_end = int(round((y_max_s - iy_min) / approx_res))
+            col_end = min(col_end, out_w)
+            row_end = min(row_end, out_h)
+            dest_h = row_end - row_start
+            dest_w = col_end - col_start
+            if dest_h <= 0 or dest_w <= 0:
+                return None
+
+            src_window = window_from_bounds(
+                ix_min, iy_min, ix_max, iy_max, transform=ds.transform
+            )
+            try:
+                buf = ds.read(
+                    indexes=[1, 2, 3],
+                    window=src_window,
+                    out_shape=(3, dest_h, dest_w),
+                    resampling=Resampling.bilinear,
+                    boundless=True,
+                    fill_value=0,
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"STAC Bild: tile {idx + 1}/{len(datasets)} read failed: {exc}"
+                )
+                return None
+        return idx, row_start, row_end, col_start, col_end, buf, time.monotonic() - t0
+
+    try:
+        results: list[Optional[tuple]] = [None] * len(datasets)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_read_tile, (i, ds)) for i, ds in enumerate(datasets)]
+            for fut in as_completed(futures):
+                r = fut.result()
+                if r is None:
+                    with tiles_done_lock:
+                        tiles_done += 1
+                    continue
+                idx = r[0]
+                results[idx] = r
+                with tiles_done_lock:
+                    tiles_done += 1
+                    done = tiles_done
+                logger.info(
+                    f"STAC Bild: read tile {idx + 1}/{len(datasets)} "
+                    f"({r[5].shape[2]}×{r[5].shape[1]} px) in {r[6]:.1f}s "
+                    f"[{done}/{len(datasets)} complete]"
+                )
+
+        # First-wins merge in newest-first input order — a pixel is filled
+        # only if every band is still 0 (nodata). Matches rasterio.merge's
+        # method='first' + nodata=0 semantics.
+        for r in results:
+            if r is None:
+                continue
+            _, rs, re_, cs, ce, buf, _ = r
+            region = merged[:, rs:re_, cs:ce]
+            # Pixel is nodata where ALL bands are zero.
+            is_nodata = (region == 0).all(axis=0)
+            if not is_nodata.any():
+                continue
+            np.copyto(region, buf, where=is_nodata[np.newaxis, :, :])
+    except Exception as exc:
+        logger.error(f"STAC Bild: parallel merge failed: {exc}")
+        return None, None
+    finally:
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=1.0)
+        # Close VRT wrappers before the DatasetReaders they wrap.
+        for ds in datasets:
+            if ds in source_handles:
+                continue
+            try:
+                ds.close()
+            except Exception:
+                pass
+        for h in source_handles:
+            try:
+                h.close()
+            except Exception:
+                pass
+
+    merge_elapsed = time.monotonic() - merge_start
+    merged_mb = merged.nbytes / (1024 * 1024)
+    logger.info(
+        f"STAC Bild: parallel range-merge complete in {merge_elapsed:.1f}s "
+        f"({merged.shape[2]}×{merged.shape[1]} px, {merged_mb:.0f} MB in-memory)"
+    )
+    if job:
+        job.add_log(
+            f"COG range-merge complete in {merge_elapsed:.1f}s "
+            f"({merged.shape[2]}×{merged.shape[1]} px, {merged_mb:.0f} MB)"
+        )
+
+    return merged, out_transform
 
 
 async def fetch_stac_orthophoto(
@@ -458,44 +595,43 @@ async def fetch_stac_orthophoto(
         dst_transform = from_bounds(w, s, e, n, width, height)
         dst_array = np.zeros((3, height, width), dtype=np.uint8)
 
+        warp_workers = _default_workers()
         warp_start = _time.monotonic()
         logger.info(
             f"STAC Bild: warping EPSG:3006 → WGS84 (Lanczos), "
-            f"target {width}×{height} px, 3 bands..."
+            f"target {width}×{height} px, 3 bands, {warp_workers} GDAL threads..."
         )
         if job:
             job.add_log(
                 f"Warping orthophoto EPSG:3006 → WGS84 at {width}×{height} px "
-                f"(Lanczos, 3 bands)..."
+                f"(Lanczos, 3 bands, {warp_workers} threads)..."
             )
 
-        # Each band warp is ~9s blocking. Run each on a worker thread so the
-        # event loop unblocks between bands and the UI activity log can refresh.
-        for band in range(3):
-            band_start = _time.monotonic()
-            await asyncio.to_thread(
-                warp_reproject,
-                source=merged_rgb[band],
-                destination=dst_array[band],
-                src_transform=src_transform,
-                src_crs=src_crs,
-                dst_transform=dst_transform,
-                dst_crs=dst_crs,
-                resampling=Resampling.lanczos,
-            )
-            band_elapsed = _time.monotonic() - band_start
-            logger.info(
-                f"STAC Bild: warped band {band + 1}/3 in {band_elapsed:.1f}s"
-            )
-            if job:
-                job.add_log(
-                    f"Warped orthophoto band {band + 1}/3 in {band_elapsed:.1f}s"
-                )
+        # Single multi-band reproject — GDAL parallelizes internally via
+        # num_threads. Replaces the previous 3-iteration loop (one band at a
+        # time on serially-awaited worker threads, ~9s/band).
+        await asyncio.to_thread(
+            warp_reproject,
+            source=merged_rgb,
+            destination=dst_array,
+            src_transform=src_transform,
+            src_crs=src_crs,
+            dst_transform=dst_transform,
+            dst_crs=dst_crs,
+            resampling=Resampling.lanczos,
+            num_threads=warp_workers,
+        )
 
         warp_elapsed = _time.monotonic() - warp_start
-        logger.info(f"STAC Bild: warp complete in {warp_elapsed:.1f}s")
+        logger.info(
+            f"STAC Bild: warped 3 bands in {warp_elapsed:.1f}s "
+            f"({warp_workers} GDAL threads)"
+        )
         if job:
-            job.add_log(f"Orthophoto warp complete in {warp_elapsed:.1f}s")
+            job.add_log(
+                f"Warped 3 orthophoto bands EPSG:3006 → WGS84 in "
+                f"{warp_elapsed:.1f}s ({warp_workers} threads)"
+            )
 
     except Exception as exc:
         logger.error(f"STAC Bild: EPSG:3006 → WGS84 warp failed: {exc}")
