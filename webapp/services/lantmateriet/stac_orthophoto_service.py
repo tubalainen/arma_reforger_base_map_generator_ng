@@ -18,10 +18,14 @@ Workflow:
 1. POST /stac-bild/v1/search (open, no auth) — newest items first
 2. Build VSICURL paths for the "data" asset of each matching item
 3. Open all COGs in parallel via rasterio.Env(GDAL_HTTP_AUTH=BASIC, …) +
-   /vsicurl/ prefix (ThreadPoolExecutor, capped at 8 workers)
+   /vsicurl/ prefix (ThreadPoolExecutor, capped at 8 workers — small
+   round-trips, server tolerates the burst)
 4. Read each tile's windowed intersection with the target bbox in parallel
    (RGB bands only — drops NIR band 4 — using COG overviews for efficiency),
-   then first-wins merge in newest-first order so newer imagery takes priority
+   then first-wins merge in newest-first order so newer imagery takes priority.
+   Read pool is capped at 6 workers and each tile gets up to 2 retries because
+   dl1.lantmateriet.se drops connections under sustained range-read load
+   (surfaces as response_code=0 + GDAL ZLib decode error).
 5. Warp merged EPSG:3006 result to WGS84 at the requested pixel dimensions
    (single multi-band reproject with GDAL num_threads, all 3 bands at once)
 6. Return PNG bytes — same format as the WMS service, so the existing
@@ -49,6 +53,28 @@ logger = logging.getLogger(__name__)
 def _default_workers() -> int:
     """Worker count for parallel tile I/O — matches services.utils.parallel."""
     return min(8, os.cpu_count() or 2)
+
+
+def _default_read_workers() -> int:
+    """Worker count for parallel windowed range-reads against dl1.lantmateriet.se.
+
+    Capped lower than open-header/warp concurrency because dl1.lantmateriet.se
+    drops connections under sustained high-concurrency range-read load
+    (observed: 8 workers → ~30% of tiles fail with response_code=0 and
+    GDAL `ZIPDecode: unknown compression method`). 6 is the empirical
+    sweet spot — still ~5–6× faster than serial without triggering drops.
+    """
+    return min(6, os.cpu_count() or 2)
+
+
+def _tile_read_retries() -> int:
+    """Per-tile retry budget when a windowed read fails mid-flight.
+
+    dl1.lantmateriet.se occasionally drops the underlying TCP connection
+    during a range-read, surfacing as `response_code=0` + a GDAL ZLib
+    decode error. A single retry recovers the vast majority of those.
+    """
+    return 2
 
 # STAC search endpoint (open — no auth required)
 _SEARCH_HEADERS = {
@@ -95,6 +121,12 @@ def _gdal_vsicurl_env() -> dict:
         "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.tiff",
         # Merge consecutive ranges into a single HTTP request for speed
         "GDAL_HTTP_MERGE_CONSECUTIVE_RANGES": "YES",
+        # Retry individual range requests inside one read when dl1.lantmateriet.se
+        # drops the connection mid-flight (observed as response_code=0 →
+        # ZIPDecode: unknown compression method). GDAL retries the HTTP
+        # request at the curl layer before bubbling the failure up.
+        "GDAL_HTTP_MAX_RETRY": "3",
+        "GDAL_HTTP_RETRY_DELAY": "1",
     }
 
 
@@ -147,6 +179,8 @@ def _cog_merge_rgb(
     n_hrefs = len(vsicurl_hrefs)
     target_crs = CRS.from_epsg(3006)
     workers = _default_workers()
+    read_workers = _default_read_workers()
+    max_retries = _tile_read_retries()
 
     # --------------------------------------------------------------
     # 1. Parallel COG header opens
@@ -286,12 +320,13 @@ def _cog_merge_rgb(
         f"STAC Bild: merging {len(datasets)} tiles at "
         f"approx_res={approx_res:.2f} m/px over bounds "
         f"{int(x_max - x_min)}×{int(y_max - y_min)} m "
-        f"→ output {out_w}×{out_h} px (workers={workers})"
+        f"→ output {out_w}×{out_h} px (workers={read_workers}, "
+        f"retries={max_retries})"
     )
     if job:
         job.add_log(
             f"Reading {len(datasets)} orthophoto tile windows in parallel "
-            f"({workers} workers)..."
+            f"({read_workers} workers, up to {max_retries} retries per tile)..."
         )
 
     merge_start = time.monotonic()
@@ -322,12 +357,18 @@ def _cog_merge_rgb(
     heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
     heartbeat_thread.start()
 
+    # Track retries separately so the post-merge summary can call them out.
+    retries_used = 0
+    tiles_failed = 0
+    tile_counts_lock = threading.Lock()
+
     def _read_tile(idx_ds: tuple[int, object]) -> Optional[tuple[int, int, int, int, int, np.ndarray, float]]:
-        """Read one tile's intersection with the output bbox.
+        """Read one tile's intersection with the output bbox, retrying on transient failure.
 
         Returns (idx, row_start, row_end, col_start, col_end, buf, elapsed)
-        or None if the tile does not overlap.
+        or None if the tile does not overlap or all retries failed.
         """
+        nonlocal retries_used, tiles_failed
         idx, ds = idx_ds
         t0 = time.monotonic()
         # Set GDAL_NUM_THREADS per worker so each tile's own decode can use
@@ -356,25 +397,54 @@ def _cog_merge_rgb(
             src_window = window_from_bounds(
                 ix_min, iy_min, ix_max, iy_max, transform=ds.transform
             )
-            try:
-                buf = ds.read(
-                    indexes=[1, 2, 3],
-                    window=src_window,
-                    out_shape=(3, dest_h, dest_w),
-                    resampling=Resampling.bilinear,
-                    boundless=True,
-                    fill_value=0,
-                )
-            except Exception as exc:
-                logger.warning(
-                    f"STAC Bild: tile {idx + 1}/{len(datasets)} read failed: {exc}"
-                )
-                return None
+            # Attempt the windowed read, retrying once or twice on
+            # response_code=0 / ZLib decode errors caused by dl1.lantmateriet.se
+            # dropping the connection. GDAL retries the underlying range
+            # request itself (GDAL_HTTP_MAX_RETRY=3), but those retries
+            # don't always cover the case where the entire connection
+            # gets reset mid-stream, so we wrap one more layer here.
+            last_exc: Optional[Exception] = None
+            for attempt in range(max_retries + 1):
+                try:
+                    buf = ds.read(
+                        indexes=[1, 2, 3],
+                        window=src_window,
+                        out_shape=(3, dest_h, dest_w),
+                        resampling=Resampling.bilinear,
+                        boundless=True,
+                        fill_value=0,
+                    )
+                    if attempt > 0:
+                        with tile_counts_lock:
+                            retries_used += 1
+                        logger.info(
+                            f"STAC Bild: tile {idx + 1}/{len(datasets)} "
+                            f"recovered on attempt {attempt + 1}"
+                        )
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < max_retries:
+                        logger.warning(
+                            f"STAC Bild: tile {idx + 1}/{len(datasets)} "
+                            f"read attempt {attempt + 1} failed ({exc}); "
+                            f"retrying..."
+                        )
+                        time.sleep(0.5 * (attempt + 1))
+                        continue
+                    logger.warning(
+                        f"STAC Bild: tile {idx + 1}/{len(datasets)} "
+                        f"read failed after {max_retries + 1} attempts: {exc}"
+                    )
+                    with tile_counts_lock:
+                        tiles_failed += 1
+                    return None
+            assert last_exc is None or buf is not None  # guarded by loop above
         return idx, row_start, row_end, col_start, col_end, buf, time.monotonic() - t0
 
     try:
         results: list[Optional[tuple]] = [None] * len(datasets)
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        with ThreadPoolExecutor(max_workers=read_workers) as pool:
             futures = [pool.submit(_read_tile, (i, ds)) for i, ds in enumerate(datasets)]
             for fut in as_completed(futures):
                 r = fut.result()
@@ -428,15 +498,36 @@ def _cog_merge_rgb(
 
     merge_elapsed = time.monotonic() - merge_start
     merged_mb = merged.nbytes / (1024 * 1024)
+    retry_note = ""
+    if retries_used or tiles_failed:
+        retry_note = (
+            f" — {retries_used} tile(s) recovered via retry, "
+            f"{tiles_failed} permanently failed"
+        )
     logger.info(
         f"STAC Bild: parallel range-merge complete in {merge_elapsed:.1f}s "
         f"({merged.shape[2]}×{merged.shape[1]} px, {merged_mb:.0f} MB in-memory)"
+        f"{retry_note}"
     )
     if job:
         job.add_log(
             f"COG range-merge complete in {merge_elapsed:.1f}s "
             f"({merged.shape[2]}×{merged.shape[1]} px, {merged_mb:.0f} MB)"
+            f"{retry_note}"
         )
+
+    # Hard fail if upstream coverage was so degraded that the merged
+    # mosaic would have visible holes. A few permanent failures are OK
+    # because newer-first overlap usually fills them in, but if more
+    # than a third of tiles are lost the user should see a clear error
+    # rather than a quietly-degraded orthophoto.
+    if tiles_failed and tiles_failed > max(1, len(datasets) // 3):
+        logger.error(
+            f"STAC Bild: too many tile read failures "
+            f"({tiles_failed}/{len(datasets)}) — orthophoto coverage "
+            f"would be unacceptably degraded; aborting STAC Bild"
+        )
+        return None, None
 
     return merged, out_transform
 
