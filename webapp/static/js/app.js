@@ -121,8 +121,10 @@ L.Draw.Square = L.Draw.Rectangle.extend({
     },
 
     initialize: function (map, options) {
-        this.type = 'square';
         L.Draw.Rectangle.prototype.initialize.call(this, map, options);
+        // Parent's initialize sets this.type = 'rectangle'; override it
+        // AFTER the super call so CREATED events fire with layerType:'square'.
+        this.type = 'square';
     },
 
     _drawShape: function (latlng) {
