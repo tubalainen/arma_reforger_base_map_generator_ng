@@ -323,29 +323,6 @@ def _rasterize_polygons(
     return mask.astype(bool)
 
 
-def _rasterize_lines(
-    features: dict | None,
-    bounds: tuple[float, float, float, float],
-    width: int,
-    height: int,
-    buffer_px: int = 2,
-    filter_tags: dict[str, list[str]] | None = None,
-) -> np.ndarray:
-    """
-    Fast line rasterization wrapper.
-    Returns a boolean mask (True where lines exist, including buffer).
-    """
-    if not features or not features.get("features"):
-        return np.zeros((height, width), dtype=bool)
-
-    mask = rasterize_features_to_mask(
-        features, width, height, bounds,
-        filter_tags=filter_tags,
-        buffer_px=buffer_px,
-    )
-    return mask.astype(bool)
-
-
 # ---------------------------------------------------------------------------
 # Main generation function
 # ---------------------------------------------------------------------------
@@ -444,16 +421,17 @@ def generate_surface_masks(
     if job:
         job.add_log(f"Generating surface masks for {w}x{h} terrain (cell size: {cell_size_m}m)...")
 
-    # Resolution-scaled parameters. Asphalt no longer uses a fixed buffer —
-    # each paved road feature is rasterized at its own OSM-derived width.
+    # Resolution-scaled parameters. All road surfaces (asphalt / gravel / dirt
+    # roads) now rasterize each feature at its own OSM-derived width via
+    # `rasterize_lines_per_feature_width`; only the polygon-derived farmland
+    # dirt layer and the forest/shore soft edges still use scalar widths.
     sigma = max(1.0, 2.0 * (cell_size_m / 2.0))
-    gravel_buffer_px = max(1, int(3.0 / cell_size_m))   # ~3m gravel road half-width
     forest_transition_px = max(3, int(20.0 / cell_size_m))  # ~20m forest edge transition
     sand_transition_px = max(2, int(10.0 / cell_size_m))    # ~10m shoreline transition
 
     logger.debug(
         f"Resolution-scaled params: sigma={sigma:.1f}, "
-        f"gravel_buf={gravel_buffer_px}px, forest_edge={forest_transition_px}px"
+        f"forest_edge={forest_transition_px}px"
     )
 
     # =========================================================================
@@ -500,18 +478,11 @@ def generate_surface_masks(
     # Deciduous = all forest minus coniferous
     deciduous_binary = forest_binary & ~coniferous_binary
 
-    # Paved roads — built later, after `urban_binary` is rasterized, so that
-    # the per-feature surface classification can consult the urban polygons to
-    # decide whether context-dependent highway types (residential / service /
-    # cycleway / unclassified) end up as asphalt vs gravel. See below.
-
-    # Gravel/dirt roads
-    gravel_types = ["track", "path", "footway", "bridleway"]
-    gravel_binary = _rasterize_lines(
-        osm_data.get("roads"), bounds, w, h,
-        buffer_px=gravel_buffer_px,
-        filter_tags={"highway": gravel_types},
-    )
+    # All road surface bitmaps (asphalt / gravel / dirt-roads) are built
+    # later, after `urban_binary` is rasterized, so the per-feature surface
+    # classifier can consult the urban polygons to decide whether context-
+    # dependent highway types (residential / service / cycleway /
+    # unclassified) end up as asphalt vs gravel. See below.
 
     # Water bodies (for sand/shoreline transition)
     if job:
@@ -539,10 +510,20 @@ def generate_surface_masks(
         filter_tags={"type": ["residential", "industrial", "commercial", "retail"]},
     )
 
-    # Paved roads — rasterize each feature at its own width (matching the
+    # Road surfaces — rasterize each feature at its own width (matching the
     # per-feature width used by road_processor when emitting splines) and
-    # classify surface using the same infer_road_surface() helper so the
-    # asphalt mask follows exactly the same road set as the splines.
+    # classify surface using the same infer_road_surface() helper so each
+    # road surface mask follows exactly the same road set as the splines.
+    #
+    # Pre-v1.5.11 only the asphalt mask used this per-feature pipeline;
+    # gravel was built from a fixed `highway in {track,path,footway,bridleway}`
+    # filter which dropped the dominant Swedish-rural case (`highway=service`
+    # with `surface=gravel|unpaved|compacted` — 58 of 78 features in the
+    # tyqklRtexhHYt0o8 export) and dirt-roads weren't rendered at all (only
+    # farmland polygons were). Now all three road surfaces (asphalt, gravel,
+    # dirt) classify each feature through `infer_road_surface()` and share
+    # the same width function, so each OSM road ends up in exactly the mask
+    # that matches its exported spline surface.
     logger.debug("Rasterizing road network (per-feature widths)...")
     if job:
         job.progress = 64
@@ -560,44 +541,65 @@ def generate_surface_masks(
         py = max(0, min(h - 1, py))
         return bool(urban_binary[py, px])
 
-    def _is_asphalt_feature(feature: dict) -> bool:
+    def _classify_road_feature(feature: dict) -> str | None:
+        """Return inferred surface ('asphalt' | 'gravel' | 'dirt') or None for non-roads."""
         geom = feature.get("geometry", {})
         if geom.get("type") not in ("LineString", "MultiLineString"):
-            return False
+            return None
         props = feature.get("properties", {})
         highway = props.get("highway", "")
         if not highway:
-            return False
+            return None
         coords = geom.get("coordinates", [])
         if geom.get("type") == "MultiLineString":
             coords = coords[0] if coords else []
         is_urban = _line_midpoint_in_urban(coords)
-        surface = infer_road_surface(
+        return infer_road_surface(
             highway_type=highway,
             osm_surface=props.get("surface", ""),
             country_code=country_code,
             is_in_forest=False,
             is_in_urban=is_urban,
         )
-        return surface == "asphalt"
 
     def _feature_buffer_px(feature: dict) -> int:
         props = feature.get("properties", {})
+        surface = _classify_road_feature(feature) or "gravel"
         width_m = infer_road_width(
             highway_type=props.get("highway", ""),
             osm_width=props.get("width", ""),
             osm_lanes=props.get("lanes", ""),
-            surface="asphalt",
+            surface=surface,
         )
         return max(1, int(round((width_m / 2.0) / cell_size_m)))
 
+    roads_collection = osm_data.get("roads") or {"features": []}
+
     asphalt_binary = rasterize_lines_per_feature_width(
-        osm_data.get("roads") or {"features": []},
+        roads_collection,
         width=w,
         height=h,
         bbox_wgs84=bounds,
         buffer_px_fn=_feature_buffer_px,
-        filter_fn=_is_asphalt_feature,
+        filter_fn=lambda f: _classify_road_feature(f) == "asphalt",
+    ).astype(bool)
+
+    gravel_binary = rasterize_lines_per_feature_width(
+        roads_collection,
+        width=w,
+        height=h,
+        bbox_wgs84=bounds,
+        buffer_px_fn=_feature_buffer_px,
+        filter_fn=lambda f: _classify_road_feature(f) == "gravel",
+    ).astype(bool)
+
+    dirt_roads_binary = rasterize_lines_per_feature_width(
+        roads_collection,
+        width=w,
+        height=h,
+        bbox_wgs84=bounds,
+        buffer_px_fn=_feature_buffer_px,
+        filter_fn=lambda f: _classify_road_feature(f) == "dirt",
     ).astype(bool)
 
     # =========================================================================
@@ -641,8 +643,12 @@ def generate_surface_masks(
         return soft_edge_mask(gravel_binary, transition_px=2) * 0.8
 
     def _compute_dirt():
-        """Farmland and dirt paths."""
-        return soft_edge_mask(farmland_binary, transition_px=5) * 0.6
+        """Farmland (soft, weighted) plus dirt roads/paths (full strength)."""
+        farmland = soft_edge_mask(farmland_binary, transition_px=5) * 0.6
+        if np.any(dirt_roads_binary):
+            roads = soft_edge_mask(dirt_roads_binary, transition_px=2)
+            return np.maximum(farmland, roads)
+        return farmland
 
     def _compute_sand():
         """Sandy shoreline transition zone around water polygons.

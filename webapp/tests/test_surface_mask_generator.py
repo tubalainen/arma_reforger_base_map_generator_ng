@@ -87,8 +87,11 @@ def _empty_collection() -> dict:
     return {"type": "FeatureCollection", "features": []}
 
 
-def _run_with(osm_data: dict, tmp_path: Path) -> np.ndarray:
-    """Run generate_surface_masks and return the asphalt mask as a 2-D uint8 array."""
+def _run_and_load(osm_data: dict, tmp_path: Path, surface: str) -> np.ndarray:
+    """Run generate_surface_masks and return the named mask as a 2-D uint8 array.
+
+    Returns a zero array if the mask was skipped (no meaningful coverage).
+    """
     result = generate_surface_masks(
         elevation=_flat_elevation(),
         osm_data=osm_data,
@@ -99,11 +102,15 @@ def _run_with(osm_data: dict, tmp_path: Path) -> np.ndarray:
         heightmap_dimensions=(W, H),
     )
     assert result is not None
-    asphalt_path = tmp_path / "surface_asphalt.png"
-    if not asphalt_path.exists():
-        # The generator skips empty masks; return a zero array.
+    path = tmp_path / f"surface_{surface}.png"
+    if not path.exists():
         return np.zeros((H, W), dtype=np.uint8)
-    return np.array(Image.open(asphalt_path).convert("L"))
+    return np.array(Image.open(path).convert("L"))
+
+
+def _run_with(osm_data: dict, tmp_path: Path) -> np.ndarray:
+    """Run generate_surface_masks and return the asphalt mask as a 2-D uint8 array."""
+    return _run_and_load(osm_data, tmp_path, "asphalt")
 
 
 class TestAsphaltUrbanPolygonsNoLongerPainted:
@@ -254,6 +261,119 @@ class TestAsphaltUsesPerFeatureWidth:
             f"Wider road must produce a thicker asphalt stripe; "
             f"narrow(4m)={narrow_count}, wide(14m)={wide_count}. "
             f"Pre-v1.2.5 both used a fixed 6m buffer regardless of OSM width."
+        )
+
+
+class TestGravelAndDirtMatchRoadProcessorClassification:
+    """v1.5.11: gravel and dirt road masks now classify every OSM road feature
+    through infer_road_surface() (matching the spline export), instead of the
+    old fixed `highway in {track,path,footway,bridleway}` tag filter that
+    dropped the dominant Swedish-rural case (`highway=service` with
+    surface=gravel|unpaved|compacted)."""
+
+    def test_service_road_outside_urban_paints_gravel(self, tmp_path: Path):
+        """Per road_processor.infer_road_surface, 'service' outside urban → gravel."""
+        osm_data = {
+            "roads": {
+                "type": "FeatureCollection",
+                "features": [_road_feature(15.001, 58.0015, 15.004, "service")],
+            },
+            "water": _empty_collection(),
+            "forests": _empty_collection(),
+            "buildings": _empty_collection(),
+            "land_use": _empty_collection(),
+        }
+        gravel = _run_and_load(osm_data, tmp_path, "gravel")
+        assert gravel.sum() > 0, (
+            "A 'service' road outside any urban polygon must paint gravel — "
+            "this is the dominant Swedish-rural case the v1.5.11 fix addresses."
+        )
+
+    def test_service_road_inside_urban_skips_gravel(self, tmp_path: Path):
+        """Same service road inside residential polygon → asphalt, not gravel."""
+        osm_data = {
+            "roads": {
+                "type": "FeatureCollection",
+                "features": [_road_feature(15.001, 58.0015, 15.004, "service")],
+            },
+            "water": _empty_collection(),
+            "forests": _empty_collection(),
+            "buildings": _empty_collection(),
+            "land_use": {
+                "type": "FeatureCollection",
+                "features": [
+                    _landuse_polygon(15.0005, 58.0005, 15.0045, 58.0025, "residential"),
+                ],
+            },
+        }
+        gravel = _run_and_load(osm_data, tmp_path, "gravel")
+        asphalt = _run_and_load(osm_data, tmp_path, "asphalt")
+        assert asphalt.sum() > 0, "service-in-urban must paint asphalt"
+        assert gravel.sum() == 0, (
+            f"service-in-urban must NOT also paint gravel; got {gravel.sum()} px"
+        )
+
+    def test_track_paints_gravel_not_dirt(self, tmp_path: Path):
+        """highway=track defaults to gravel (rules.track_surface_default)."""
+        osm_data = {
+            "roads": {
+                "type": "FeatureCollection",
+                "features": [_road_feature(15.001, 58.0015, 15.004, "track")],
+            },
+            "water": _empty_collection(),
+            "forests": _empty_collection(),
+            "buildings": _empty_collection(),
+            "land_use": _empty_collection(),
+        }
+        gravel = _run_and_load(osm_data, tmp_path, "gravel")
+        dirt = _run_and_load(osm_data, tmp_path, "dirt")
+        assert gravel.sum() > 0, "highway=track must paint gravel"
+        assert dirt.sum() == 0, (
+            f"highway=track must NOT paint dirt; got {dirt.sum()} px"
+        )
+
+    def test_path_paints_dirt_not_gravel(self, tmp_path: Path):
+        """highway=path is unconditionally classified as dirt — pre-v1.5.11
+        it was wrongly painted into the gravel mask by the `gravel_types` list."""
+        osm_data = {
+            "roads": {
+                "type": "FeatureCollection",
+                "features": [_road_feature(15.001, 58.0015, 15.004, "path")],
+            },
+            "water": _empty_collection(),
+            "forests": _empty_collection(),
+            "buildings": _empty_collection(),
+            "land_use": _empty_collection(),
+        }
+        gravel = _run_and_load(osm_data, tmp_path, "gravel")
+        dirt = _run_and_load(osm_data, tmp_path, "dirt")
+        assert dirt.sum() > 0, "highway=path must paint dirt"
+        assert gravel.sum() == 0, (
+            f"highway=path must NOT paint gravel; got {gravel.sum()} px"
+        )
+
+    def test_service_with_explicit_gravel_surface_paints_gravel(self, tmp_path: Path):
+        """OSM `surface=gravel` on a service road in urban context — the
+        explicit surface tag wins over the urban-context default."""
+        feature = _road_feature(15.001, 58.0015, 15.004, "service")
+        feature["properties"]["surface"] = "gravel"
+        osm_data = {
+            "roads": {"type": "FeatureCollection", "features": [feature]},
+            "water": _empty_collection(),
+            "forests": _empty_collection(),
+            "buildings": _empty_collection(),
+            "land_use": {
+                "type": "FeatureCollection",
+                "features": [
+                    _landuse_polygon(15.0005, 58.0005, 15.0045, 58.0025, "residential"),
+                ],
+            },
+        }
+        gravel = _run_and_load(osm_data, tmp_path, "gravel")
+        asphalt = _run_and_load(osm_data, tmp_path, "asphalt")
+        assert gravel.sum() > 0, "explicit surface=gravel must paint gravel"
+        assert asphalt.sum() == 0, (
+            f"explicit surface=gravel must NOT paint asphalt; got {asphalt.sum()} px"
         )
 
 
