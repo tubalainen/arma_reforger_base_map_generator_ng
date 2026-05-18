@@ -391,6 +391,7 @@ def reproject_satellite_to_terrain_crs(
         True on success, False on failure (original file left unchanged on error).
     """
     try:
+        import os
         import time
         from pathlib import Path
 
@@ -405,11 +406,14 @@ def reproject_satellite_to_terrain_crs(
         else:
             target_w, target_h = int(target_size[0]), int(target_size[1])
 
+        warp_threads = min(8, os.cpu_count() or 2)
+
         satellite_path = Path(satellite_path)
         if job:
             job.add_log(
                 f"Reprojecting satellite WGS84 → {dst_crs} "
-                f"at {target_w}×{target_h} px (Lanczos)..."
+                f"at {target_w}×{target_h} px (Lanczos, "
+                f"{warp_threads} GDAL threads)..."
             )
 
         # Load source image
@@ -435,30 +439,37 @@ def reproject_satellite_to_terrain_crs(
         # Allocate destination (rasterio expects bands × H × W)
         dst_raster = np.zeros((3, target_h, target_w), dtype=np.uint8)
 
-        # Reproject all three bands. Lanczos preserves more high-frequency
-        # detail than bilinear — important when the source is sub-metre
-        # imagery (Lantmäteriet STAC Bild at 0.16 m/px) being warped to a
-        # sub-metre output texture (see #67).
+        # Single multi-band reproject. The previous implementation looped
+        # over bands and paid the warp setup cost three times; collapsing
+        # to one call lets GDAL parallelise across bands via num_threads
+        # (8 threads cut a 3-band 8192² warp from ~27s to under 10s in
+        # production logs — mirror of the v1.5.4 fix in
+        # stac_orthophoto_service.py).
+        #
+        # Lanczos preserves more high-frequency detail than bilinear —
+        # important when the source is sub-metre imagery (Lantmäteriet
+        # STAC Bild at 0.16 m/px) being warped to a sub-metre output
+        # texture (see #67).
         warp_start = time.monotonic()
-        for band in range(3):
-            band_start = time.monotonic()
-            reproject(
-                source=src_raster[band],
-                destination=dst_raster[band],
-                src_transform=src_transform,
-                src_crs=src_crs,
-                dst_transform=dst_transform,
-                dst_crs=dst_crs_obj,
-                resampling=Resampling.lanczos,
-            )
-            logger.info(
-                f"Satellite reproject: band {band + 1}/3 warped in "
-                f"{time.monotonic() - band_start:.1f}s"
-            )
+        reproject(
+            source=src_raster,
+            destination=dst_raster,
+            src_transform=src_transform,
+            src_crs=src_crs,
+            dst_transform=dst_transform,
+            dst_crs=dst_crs_obj,
+            resampling=Resampling.lanczos,
+            num_threads=warp_threads,
+        )
         warp_elapsed = time.monotonic() - warp_start
+        logger.info(
+            f"Satellite reproject: warped 3 bands in {warp_elapsed:.1f}s "
+            f"({warp_threads} GDAL threads)"
+        )
         if job:
             job.add_log(
-                f"Satellite reprojection complete in {warp_elapsed:.1f}s"
+                f"Satellite reprojection complete in {warp_elapsed:.1f}s "
+                f"({warp_threads} GDAL threads)"
             )
 
         # Save reprojected image back to the same path
