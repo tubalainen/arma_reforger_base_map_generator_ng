@@ -263,12 +263,13 @@ class TestBootstrapEntities:
                 f"issue #111 regression: {forbidden} still emitted inline"
             )
 
-    def test_default_layer_omits_unknown_environment_classes(self):
-        """Pre-1.5 wrote a hand-built ``GenericWorldEntity { SkyPreset { … }
-        PlanetPresets { … } SkyVolCloudsRenderer { … } OceanPreset { … } }``
-        block. All four classes report as "Unknown class" in current
-        Workbench (Gunnar's error.log). The saved-by-editor reference has
-        no environment block at all — Workbench rebuilds it on save.
+    def test_default_layer_starts_with_generic_world_entity(self):
+        """Issue #122: every shipped Reforger default.layer begins with a
+        ``GenericWorldEntity world { Sky/Planet/Clouds/LensFlares }`` block.
+        Verified against BohemiaInteractive/Arma-Reforger-Samples and the
+        Utflandia community map. Pre-1.5 emitted a broken sibling form that
+        Workbench rejected; v1.5.0-1.5.6 dropped the block entirely (an
+        over-correction); v1.5.7 emits the correct nested form.
         """
         from services.enfusion_project_generator import EnfusionProjectGenerator
 
@@ -276,12 +277,58 @@ class TestBootstrapEntities:
             map_name="TestMap", metadata=_metadata_for_4km(),
         )
         layer = gen._generate_default_layer()
-        for forbidden in (
-            "SkyPreset", "PlanetPresets", "SkyVolCloudsRenderer", "OceanPreset",
+        assert layer.startswith("GenericWorldEntity world {\n"), (
+            "default.layer must begin with the world-entity block"
+        )
+        # Required environment property assignments — exact spelling matters,
+        # Workbench rejects "PlanetPresets" (plural) as Unknown class.
+        for needed in (
+            'SkyPreset "{621C7F2EC2763297}',
+            "PlanetPreset {",                 # singular, sub-block
+            "CloudsRenderer SkyVolCloudsRenderer",
+            'CloudsPreset "{D3683C927920C51D}',
+            'LensFlaresConfig "{92489E4CCCB3D82F}',
         ):
-            assert forbidden not in layer, (
-                f"issue #111 regression: {forbidden} still emitted"
+            assert needed in layer, (
+                f"#122 regression: world-entity block missing {needed!r}"
             )
+        # Ocean materials are deliberately not shipped — user adds them in
+        # Workbench's Environment tab per Atlas 2 p.5.
+        for absent in ("OceanMaterial", "OceanSimulation", "WaterSimulation",
+                       "ShoreSimulation"):
+            assert absent not in layer, (
+                f"Ocean material {absent} was emitted but policy says omit"
+            )
+
+    def test_default_layer_terrain_has_instance_name(self):
+        """The two reference layers both give the terrain entity an explicit
+        instance name (``Terrain`` in BI's Assets_Showcase, ``Terrain_Island``
+        in Utflandia). We use ``Terrain`` to match the BI sample.
+        """
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        gen = EnfusionProjectGenerator(
+            map_name="TestMap", metadata=_metadata_for_4km(),
+        )
+        layer = gen._generate_default_layer()
+        assert (
+            'GenericTerrainEntity Terrain : '
+            '"{221ABC927C672E4E}Prefabs/World/DefaultWorld/GenericTerrain_Default.et"'
+        ) in layer, "terrain entity must carry the instance name 'Terrain'"
+
+    def test_default_layer_has_balanced_braces(self):
+        """Sanity check: the world-entity block plus its PlanetPreset
+        sub-block plus all five anonymous entity blocks must balance.
+        """
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        gen = EnfusionProjectGenerator(
+            map_name="TestMap", metadata=_metadata_for_4km(),
+        )
+        layer = gen._generate_default_layer()
+        assert layer.count("{") == layer.count("}"), (
+            "brace mismatch in default.layer — check world-entity nesting"
+        )
 
     def test_no_legacy_fabricated_prefab_names_anywhere(self):
         """Make sure the fabricated `_<width>m` road names from v1.3.x are

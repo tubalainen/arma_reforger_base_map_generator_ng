@@ -15,7 +15,7 @@ Community Wiki (community.bistudio.com) as of 2025-02-09.
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.5.6"
+APP_VERSION = "1.5.7"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
@@ -33,17 +33,41 @@ VALID_ENFUSION_VERTEX_COUNTS = [f + 1 for f in VALID_ENFUSION_FACE_COUNTS]
 # => [129, 257, 513, 1025, 2049, 4097, 8193]
 
 # ---------------------------------------------------------------------------
-# Default world entity settings — REMOVED in v1.5.0
+# GenericWorldEntity environment materials — restored in v1.5.7 (issue #122)
 # ---------------------------------------------------------------------------
-# The pre-1.5 generator emitted a hand-built `GenericWorldEntity { SkyPreset
-# { … } PlanetPresets { … } SkyVolCloudsRenderer { … } OceanPreset { … } }`
-# block at the top of every `_default.layer`. Inspection of a Workbench-saved
-# reference layer (Testprojekt/Worlds/testworld_Layers/default.layer) shows
-# none of those classes exist in the current Reforger schema — the parser
-# rejects each one as "Unknown class" and discards everything in the layer
-# that followed. We now emit no environment block at all and let Workbench
-# rebuild the `GenericWorldEntity world { BSP … boundMins … }` block on its
-# own at first save. See issue #111.
+# The v1.5.0 fix for #111 removed the entire environment block because the
+# pre-1.5 form (`SkyPreset { … } PlanetPresets { … } SkyVolCloudsRenderer { … }
+# OceanPreset { … }` as top-level siblings, with wrong class names) was
+# rejected by Workbench as "Unknown class". That was an over-correction —
+# every shipped Reforger map begins `default.layer` with a
+# `GenericWorldEntity world { SkyPreset "…"; PlanetPreset { … }; CloudsRenderer
+# SkyVolCloudsRenderer; CloudsPreset "…"; LensFlaresConfig "…" }` block
+# (verified against BohemiaInteractive/Arma-Reforger-Samples and the Utflandia
+# community map). v1.5.7 emits the correct form. The paint-crash root cause
+# was the inline TerrainGridSizeX/Z + GridCellSize props on the terrain
+# entity (still removed; tested in test_atlas2_alignment.py).
+#
+# Ocean materials (OceanMaterial/Simulation, WaterSimulation, ShoreSimulation)
+# are intentionally NOT shipped. Per Atlas 2 p.5, the user drags the ocean
+# materials onto the GenericWorldEntity's Environment tab in Workbench when
+# their map needs water.
+
+WORLD_ENV_SKY_PRESET = (
+    "{621C7F2EC2763297}Terrains/Common/Sky/Atmosphere/Atmosphere.emat"
+)
+WORLD_ENV_PLANET_PRESET = [
+    "{7037BF6589EEFD5D}Terrains/Common/Sky/Planets/Sun_01.emat",
+    "{63C716F4064F5D43}Terrains/Common/Sky/Planets/Moon_01.emat",
+    "{C8DD10DC67D45E10}Terrains/Common/Sky/Planets/Stars_01.emat",
+    "{E9A96C987913DBD2}Terrains/Common/Sky/Clouds/Clouds_Distant_Semi01.emat",
+]
+WORLD_ENV_CLOUDS_RENDERER = "SkyVolCloudsRenderer"
+WORLD_ENV_CLOUDS_PRESET = (
+    "{D3683C927920C51D}Terrains/Common/Sky/Clouds/Clouds_Volumetric.emat"
+)
+WORLD_ENV_LENS_FLARES_CONFIG = (
+    "{92489E4CCCB3D82F}Configs/LensFlares/LensFlares.conf"
+)
 
 # ---------------------------------------------------------------------------
 # Terrain LOD defaults — REMOVED in v1.5.0
