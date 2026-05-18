@@ -391,3 +391,57 @@ class TestBuildMetadataFeatureSources:
         from services.map_generator import build_metadata
         meta = build_metadata(**self._minimal_results())
         assert "feature_sources" not in meta
+
+
+class TestTroubleshootingAppendix:
+    """Appendix C must walk users through the post-import reopen crash
+    (issue #120). The chain is: maps generated before v1.5.7 lack the
+    `GenericWorldEntity world {…}` block (env materials missing), and
+    NVTT's cubemap baker null-derefs on the next world reload. The fix is
+    to regenerate against v1.5.7+. The troubleshooting text must say so
+    explicitly so a user hitting the crash on an old bundle knows which
+    version banner to look for."""
+
+    def _gen(self):
+        from services.setup_guide_generator import SetupGuideGenerator
+        meta = _metadata(
+            surfaces_present=["grass"],
+            coverage_per_surface={"grass": {"percentage": 100.0}},
+        )
+        return SetupGuideGenerator("TestMap", meta)
+
+    def test_issue_120_section_is_present(self):
+        guide = self._gen()._appendix_troubleshooting()
+        assert (
+            "### Workbench crashes on world reopen after heightmap import "
+            "(issue #120)"
+        ) in guide
+
+    def test_issue_120_section_cites_nvtt_signature_and_v157_fix(self):
+        """The crash signature and the version cutoff are the two facts a
+        user actually needs to triage their old bundle. Both must appear in
+        the same section."""
+        guide = self._gen()._appendix_troubleshooting()
+        section_start = guide.index("(issue #120)")
+        # Next H3 heading bounds the #120 section.
+        next_heading = guide.find("\n### ", section_start + 1)
+        section = guide[section_start:next_heading] if next_heading != -1 else guide[section_start:]
+        assert "nvtt::CubeSurface::toGamma" in section, (
+            "crash signature missing — users won't recognise their crash.log"
+        )
+        assert "v1.5.6 or earlier" in section, (
+            "version cutoff missing — users won't know which banner to look for"
+        )
+        assert "v1.5.7" in section, (
+            "v1.5.7 fix version missing — users won't know what to regenerate against"
+        )
+        assert "default.layer" in section, (
+            "file pointer missing — users need to know where the banner lives"
+        )
+
+    def test_no_sky_section_reflects_v157_restoration(self):
+        """The 'No sky/atmosphere' entry used to claim Workbench rebuilds the
+        env block on save (v1.5.0-1.5.6). v1.5.7 emits it directly. The
+        guide must not perpetuate the old 'Workbench rebuilds it' story."""
+        guide = self._gen()._appendix_troubleshooting()
+        assert "Workbench rebuilds it on first" not in guide
