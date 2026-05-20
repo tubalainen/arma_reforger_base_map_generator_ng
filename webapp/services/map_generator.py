@@ -286,6 +286,7 @@ async def _fetch_features_sweden(
         fetch_forests,
         fetch_buildings,
         fetch_land_use,
+        probe_overpass_mirrors,
     )
 
     bbox_tuple = (bbox["west"], bbox["south"], bbox["east"], bbox["north"])
@@ -297,13 +298,17 @@ async def _fetch_features_sweden(
         )
         job.progress = 27
 
+    # Probe the Overpass mirror pool once; the ranked order is reused for the
+    # OSM roads/buildings fetches and any land-cover fallbacks further down.
+    overpass_endpoints = await probe_overpass_mirrors(job)
+
     # Launch all fetches concurrently:
     # Lantmäteriet: water (Hydrografi) + land cover (Marktäcke)
     # OSM: roads + buildings (always needed)
     lm_water_task = fetch_lantmateriet_water(bbox_tuple, job)
     lm_land_cover_task = fetch_lantmateriet_land_cover(bbox_tuple, job)
-    osm_roads_task = fetch_roads(bbox, job)
-    osm_buildings_task = fetch_buildings(bbox, job)
+    osm_roads_task = fetch_roads(bbox, job, overpass_endpoints)
+    osm_buildings_task = fetch_buildings(bbox, job, overpass_endpoints)
 
     lm_water, lm_land_cover, osm_roads, osm_buildings = await asyncio.gather(
         lm_water_task,
@@ -334,7 +339,7 @@ async def _fetch_features_sweden(
                 f"falling back to OpenStreetMap...",
                 "warning",
             )
-        osm_water = await fetch_water(bbox, job)
+        osm_water = await fetch_water(bbox, job, overpass_endpoints)
         result["water"] = _safe_result(osm_water, "water", job)
         sources["water"] = f"{osm_label} (Lantmäteriet Hydrografi unavailable)"
     else:
@@ -350,8 +355,8 @@ async def _fetch_features_sweden(
                 f"falling back to OpenStreetMap...",
                 "warning",
             )
-        osm_forests = await fetch_forests(bbox, job)
-        osm_land_use = await fetch_land_use(bbox, job)
+        osm_forests = await fetch_forests(bbox, job, overpass_endpoints)
+        osm_land_use = await fetch_land_use(bbox, job, overpass_endpoints)
         result["forests"] = _safe_result(osm_forests, "forests", job)
         result["land_use"] = _safe_result(osm_land_use, "land_use", job)
         sources["forests"] = f"{osm_label} (Lantmäteriet Marktäcke unavailable)"
