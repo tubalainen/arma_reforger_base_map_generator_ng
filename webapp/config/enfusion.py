@@ -8,6 +8,8 @@ All paths and GUIDs are verified against the official Bohemia Interactive
 Community Wiki (community.bistudio.com) as of 2025-02-09.
 """
 
+from config.terrain import TERRAIN_TILE_FACES, MAX_TERRAIN_GRID_SIZE
+
 # ---------------------------------------------------------------------------
 # Generator version
 # ---------------------------------------------------------------------------
@@ -15,7 +17,7 @@ Community Wiki (community.bistudio.com) as of 2025-02-09.
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.5.14"
+APP_VERSION = "1.6.0"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
@@ -27,10 +29,10 @@ ARMA_REFORGER_GUID = "58D0FB3206B6F859"
 # Valid Enfusion terrain dimensions
 # ---------------------------------------------------------------------------
 
-# Enfusion terrain uses faces (power of 2). Heightmap vertex count = faces + 1.
-VALID_ENFUSION_FACE_COUNTS = [128, 256, 512, 1024, 2048, 4096, 8192]
-VALID_ENFUSION_VERTEX_COUNTS = [f + 1 for f in VALID_ENFUSION_FACE_COUNTS]
-# => [129, 257, 513, 1025, 2049, 4097, 8193]
+# Terrain grid size = number of faces per axis. The "New Terrain" dialog
+# requires it to be a multiple of the tile size (128 faces) — NOT a power of
+# two (Everon is 6400). The imported heightmap PNG is faces + 1 vertices.
+# Snapping is done by snap_to_tile_multiple() below.
 
 # ---------------------------------------------------------------------------
 # GenericWorldEntity environment materials — restored in v1.5.7 (issue #122)
@@ -369,38 +371,25 @@ RECOMMENDED_MAX_EXTERNAL_MASKS = 3
 BLOCK_SURFACE_THRESHOLD = 10  # out of 255
 
 
-def snap_to_enfusion_size(requested_size: int) -> int:
+def snap_to_tile_multiple(face_count: int) -> int:
     """
-    Snap a requested heightmap dimension to the nearest valid Enfusion vertex count.
+    Snap a terrain grid size (faces per axis) to a valid Enfusion value.
 
-    Enfusion terrain uses faces that must be a power of 2.
-    Heightmap = faces + 1 vertices. Valid sizes: 129, 257, 513, 1025, 2049, 4097, 8193.
+    The "New Terrain" dialog requires the terrain grid size to be a multiple of
+    the tile size (``TERRAIN_TILE_FACES`` = 128) — not a power of two. The
+    requested value is rounded to the nearest tile multiple and clamped to
+    ``[TERRAIN_TILE_FACES, MAX_TERRAIN_GRID_SIZE]``. The imported heightmap PNG
+    is ``face_count + 1`` pixels per axis.
 
     Args:
-        requested_size: The user's requested heightmap dimension in pixels.
+        face_count: Desired number of terrain faces per axis.
 
     Returns:
-        The nearest valid Enfusion heightmap vertex count.
+        A valid terrain grid size — a multiple of 128.
     """
-    return min(VALID_ENFUSION_VERTEX_COUNTS, key=lambda x: abs(x - requested_size))
-
-
-def snap_to_enfusion_dimensions(size_x: int, size_z: int) -> tuple[int, int]:
-    """
-    Snap X and Z vertex counts independently to valid Enfusion sizes.
-
-    Enfusion supports non-square terrain — ``TerrainGridSizeX`` and
-    ``TerrainGridSizeZ`` can differ, but each must be a power-of-2 face
-    count (i.e. vertex count = 2^n + 1).
-
-    Args:
-        size_x: Requested vertex count along the X (width) axis.
-        size_z: Requested vertex count along the Z (depth) axis.
-
-    Returns:
-        Tuple of (snapped_x, snapped_z) valid Enfusion vertex counts.
-    """
-    return (snap_to_enfusion_size(size_x), snap_to_enfusion_size(size_z))
+    tiles = max(1, round(face_count / TERRAIN_TILE_FACES))
+    snapped = tiles * TERRAIN_TILE_FACES
+    return max(TERRAIN_TILE_FACES, min(snapped, MAX_TERRAIN_GRID_SIZE))
 
 
 def compute_height_scale(min_elevation: float, max_elevation: float) -> float:

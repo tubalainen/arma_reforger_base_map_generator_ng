@@ -114,7 +114,8 @@ def create_job(
 
     Args:
         polygon_coords: List of [lng, lat] coordinates defining the area
-        options: Generation options (heightmap_size, grid_resolution, etc.)
+        options: Generation options (feature toggles). Terrain grid size and
+            grid cell size are derived from the selected area, not options.
         session_id: Session ID of the user creating the job
 
     Returns:
@@ -646,6 +647,8 @@ def build_metadata(
             "road_data": "roads_enfusion.geojson",
             "road_splines": "roads_splines.csv",
             "recommended_settings": {
+                "terrain_grid_size": heightmap_result["terrain_grid_size"],
+                "heightmap_resolution_px": heightmap_result["dimensions"],
                 "terrain_size": heightmap_result["terrain_size_m"],
                 "grid_cell_size": heightmap_result["grid_cell_size_m"],
                 "height_scale": heightmap_result["height_scale"],
@@ -741,33 +744,33 @@ async def run_generation(job: MapGenerationJob):
         logger.info(f"[{job.job_id}] Step 2: Elevation acquisition")
         job.add_log(f"Downloading elevation data ({primary_country})...")
 
-        # Compute per-axis heightmap dimensions from bbox aspect ratio.
-        # Enfusion supports non-square terrain (TerrainGridSizeX ≠ TerrainGridSizeZ).
-        # The longest geographic axis gets the user's selected vertex count;
-        # the shorter axis is proportional and snapped to valid Enfusion size.
-        from config.enfusion import snap_to_enfusion_size
+        # Terrain grid size = faces per axis = real-world metres ÷ grid cell
+        # size, snapped to a valid tile multiple (×128). The heightmap PNG is
+        # faces + 1 pixels. Enfusion supports non-square terrain, so each axis
+        # is derived independently from the selected bbox.
+        from config.enfusion import snap_to_tile_multiple
+        from config.terrain import DEFAULT_GRID_CELL_SIZE
         from services.utils.geo import estimate_bbox_dimensions_m
 
-        user_vertices = job.options.get("heightmap_size", 2048)
-        user_vertices = snap_to_enfusion_size(user_vertices)
-
+        cell_size = DEFAULT_GRID_CELL_SIZE
         width_m, height_m = estimate_bbox_dimensions_m(bbox)
 
-        if width_m >= height_m:
-            target_size_x = user_vertices
-            target_size_z = snap_to_enfusion_size(round(user_vertices * (height_m / width_m)))
-        else:
-            target_size_z = user_vertices
-            target_size_x = snap_to_enfusion_size(round(user_vertices * (width_m / height_m)))
+        faces_x = snap_to_tile_multiple(round(width_m / cell_size))
+        faces_z = snap_to_tile_multiple(round(height_m / cell_size))
+        target_size_x = faces_x + 1
+        target_size_z = faces_z + 1
 
         target_size = (target_size_x, target_size_z)
         logger.info(
-            f"[{job.job_id}] Terrain dimensions: {target_size_x}x{target_size_z} vertices "
-            f"(bbox {width_m:.0f}m x {height_m:.0f}m)"
+            f"[{job.job_id}] Terrain grid size: {faces_x}x{faces_z} faces — "
+            f"{faces_x * cell_size:.0f}x{faces_z * cell_size:.0f} m in-game "
+            f"(bbox {width_m:.0f}x{height_m:.0f} m, "
+            f"heightmap {target_size_x}x{target_size_z} px)"
         )
         job.add_log(
-            f"Terrain dimensions: {target_size_x}x{target_size_z} vertices "
-            f"(area {width_m:.0f}m x {height_m:.0f}m)"
+            f"Terrain grid size: {faces_x}×{faces_z} faces — "
+            f"{faces_x * cell_size:.0f}×{faces_z * cell_size:.0f} m in-game "
+            f"(heightmap {target_size_x}×{target_size_z} px)"
         )
 
         # Pass the heightmap size to the elevation fetcher so it can limit
@@ -850,8 +853,8 @@ async def run_generation(job: MapGenerationJob):
         logger.info(f"[{job.job_id}] Step 4: Heightmap generation")
         job.add_log("Generating heightmap from elevation data...")
 
-        # target_size already set in step 2 (from job.options["heightmap_size"])
-        target_resolution = job.options.get("grid_resolution", 2.0)
+        # target_size (heightmap pixels) was derived from the bbox in step 2.
+        target_resolution = cell_size
 
         from services.heightmap_generator import ElevationTruncatedError
 

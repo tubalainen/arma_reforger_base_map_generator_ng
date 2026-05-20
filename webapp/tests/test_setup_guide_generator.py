@@ -365,6 +365,7 @@ class TestBuildMetadataFeatureSources:
             "elevation_result": {"source": "Lantmäteriet STAC Höjd (1 m)", "resolution_m": 1},
             "heightmap_result": {
                 "dimensions": "2049x2049",
+                "terrain_grid_size": "2048x2048",
                 "terrain_size_m": 4096,
                 "grid_cell_size_m": 2.0,
                 "min_elevation": 0,

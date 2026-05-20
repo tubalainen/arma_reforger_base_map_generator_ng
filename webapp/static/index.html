@@ -58,10 +58,6 @@
                                 <td id="info-size">-</td>
                             </tr>
                         </table>
-                        <div id="area-warning" class="alert alert-danger py-1 px-2 mb-0 small d-none">
-                            <i class="bi bi-exclamation-triangle-fill"></i>
-                            <span id="area-warning-text"></span>
-                        </div>
                     </div>
                     <div id="no-selection" class="text-center py-3">
                         <i class="bi bi-hand-index-thumb"></i>
@@ -83,24 +79,14 @@
                         Used for Enfusion project folder name. Auto-generated if blank.
                     </div>
 
-                    <label class="form-label small">Heightmap Resolution</label>
-                    <select class="form-select form-select-sm mb-2" id="heightmap-size">
-                        <option value="1025">1024 × 1024 faces (small test)</option>
-                        <option value="2049" selected>2048 × 2048 faces (standard)</option>
-                        <option value="4097">4096 × 4096 faces (high detail)</option>
-                    </select>
-
-                    <label class="form-label small">Grid Cell Size</label>
-                    <select class="form-select form-select-sm mb-2" id="grid-resolution">
-                        <option value="1">1m (very high detail)</option>
-                        <option value="2" selected>2m (standard)</option>
-                        <option value="4">4m (large terrain)</option>
-                        <option value="8">8m (very large terrain)</option>
-                    </select>
-
-                    <label class="form-label small">Terrain Size</label>
+                    <label class="form-label small">Terrain</label>
                     <div class="small mb-3" id="terrain-size-display">
-                        2048 faces at 2m = <strong>4096m x 4096m</strong> terrain
+                        <span class="text-muted">Draw an area on the map to size the terrain.</span>
+                    </div>
+                    <div class="form-text small mb-3" style="margin-top:-0.5rem; color:#8b949e;">
+                        Derived from your selection — these are the values to
+                        enter in the World Editor "New Terrain" dialog. Grid
+                        cell size is fixed at 2 m (the Arma Reforger standard).
                     </div>
 
                     <label class="form-label small">Features to Generate</label>

@@ -12,7 +12,7 @@ Configuration is split into focused modules:
 - buildings: BUILDING_PREFAB_BASE, KNOWN_BUILDING_PREFABS, validate_building_prefab
 - surfaces: SURFACE_CLASSES
 - endpoints: OVERPASS_*, OPENTOPOGRAPHY_*, SENTINEL2_*, CORINE_*, TREE_COVER_*
-- terrain: MAX_TERRAIN_SIZE, DEFAULT_GRID_CELL_SIZE, height scale defaults
+- terrain: MAX_TERRAIN_GRID_SIZE, TERRAIN_TILE_FACES, DEFAULT_GRID_CELL_SIZE, height scale defaults
 """
 
 # Paths & server
@@ -70,7 +70,8 @@ from config.endpoints import (
 
 # Terrain defaults
 from config.terrain import (
-    MAX_MAP_EXTENT_M, MAX_TERRAIN_SIZE, DEFAULT_GRID_CELL_SIZE,
+    MAX_MAP_EXTENT_M, MAX_TERRAIN_GRID_SIZE, TERRAIN_TILE_FACES,
+    DEFAULT_GRID_CELL_SIZE,
     DEFAULT_HEIGHT_SCALE, ENFUSION_HEIGHT_SCALE_DEFAULT,
     ENFUSION_MAX_SURFACES_PER_BLOCK, DEFAULT_TARGET_CRS,
 )
@@ -78,7 +79,6 @@ from config.terrain import (
 # Enfusion Workbench project generation
 from config.enfusion import (
     ARMA_REFORGER_GUID,
-    VALID_ENFUSION_VERTEX_COUNTS, VALID_ENFUSION_FACE_COUNTS,
     SURFACE_MATERIAL_MAP, SURFACE_MATERIAL_ALTERNATIVES,
     SURFACE_MATERIAL_BASE, SURFACE_IMPORT_ORDER,
     WORLD_PREFABS, WORLD_PREFAB_GUIDS, WORLD_PREFAB_CLASS,
@@ -89,5 +89,5 @@ from config.enfusion import (
     PROJECT_NAME_ALLOWED_CHARS, PROJECT_NAME_MAX_LENGTH,
     BLOCK_FACE_SIZE, BLOCK_VERTEX_SIZE, MAX_SURFACES_PER_BLOCK,
     RECOMMENDED_MAX_EXTERNAL_MASKS, BLOCK_SURFACE_THRESHOLD,
-    snap_to_enfusion_size, compute_height_scale, compute_terrain_size,
+    snap_to_tile_multiple, compute_height_scale, compute_terrain_size,
 )
