@@ -27,7 +27,7 @@ from scipy.interpolate import NearestNDInterpolator
 # Re-exported here for backward compatibility (surface_mask_generator imports from here).
 from services.utils.rasterize import rasterize_features_to_mask  # noqa: F401
 from services.utils.parallel import parallel_gaussian_filter, parallel_zoom
-from config.enfusion import snap_to_enfusion_size, VALID_ENFUSION_VERTEX_COUNTS
+from config.enfusion import snap_to_tile_multiple
 
 logger = logging.getLogger(__name__)
 
@@ -621,25 +621,28 @@ def generate_heightmap(
     if output_dir is None:
         output_dir = Path(tempfile.mkdtemp())
 
-    # 0. Normalize target_size to (size_x, size_z) tuple and snap each axis
+    # 0. Normalize target_size to (px_x, px_z) and snap each axis.
+    # target_size is the output heightmap dimension in pixels; an N-face
+    # terrain needs an (N+1)-pixel heightmap. Snap the face count to a valid
+    # tile multiple (×128), then add 1 back for the vertex/pixel count.
     if isinstance(target_size, int):
         target_size = (target_size, target_size)
 
     original_size = target_size
-    size_x = snap_to_enfusion_size(target_size[0])
-    size_z = snap_to_enfusion_size(target_size[1])
+    size_x = snap_to_tile_multiple(target_size[0] - 1) + 1
+    size_z = snap_to_tile_multiple(target_size[1] - 1) + 1
     target_size = (size_x, size_z)
 
     if target_size != original_size:
         logger.info(
             f"Snapped heightmap size from {original_size[0]}x{original_size[1]} "
             f"to {size_x}x{size_z} "
-            f"(Enfusion requires power-of-2 faces per axis)"
+            f"(terrain grid size must be a multiple of 128 faces)"
         )
         if job:
             job.add_log(
                 f"Adjusted heightmap size: {original_size[0]}x{original_size[1]} → "
-                f"{size_x}x{size_z} (Enfusion requires power-of-2 faces per axis)"
+                f"{size_x}x{size_z} (terrain grid size must be a multiple of 128 faces)"
             )
 
     # 1. Parse GeoTIFF
@@ -774,8 +777,11 @@ def generate_heightmap(
         "heightmap_png": png_path,
         "heightmap_asc": asc_path,
         "heightmap_preview": preview_path,
+        # dimensions = heightmap pixels (N+1); terrain_grid_size = faces (N);
+        # terrain_size_m = faces × cell (N×C)
         "dimensions": f"{heightmap.shape[1]}x{heightmap.shape[0]}",
-        "terrain_size_m": f"{heightmap.shape[1] * target_resolution_m:.0f}x{heightmap.shape[0] * target_resolution_m:.0f}",
+        "terrain_grid_size": f"{heightmap.shape[1] - 1}x{heightmap.shape[0] - 1}",
+        "terrain_size_m": f"{(heightmap.shape[1] - 1) * target_resolution_m:.0f}x{(heightmap.shape[0] - 1) * target_resolution_m:.0f}",
         "grid_cell_size_m": target_resolution_m,
         # Intermediate arrays for downstream steps (e.g. surface mask generation)
         # so callers don't need to re-parse the DEM from raw bytes.

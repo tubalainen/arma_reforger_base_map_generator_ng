@@ -9,7 +9,9 @@ import math
 import re
 from fastapi import HTTPException
 
-from config.terrain import MAX_MAP_EXTENT_M
+from config.terrain import (
+    MAX_MAP_EXTENT_M, TERRAIN_TILE_FACES, DEFAULT_GRID_CELL_SIZE,
+)
 
 # Job IDs are URL-safe base64, 16-32 characters
 JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
@@ -127,7 +129,7 @@ def validate_polygon(polygon: list[list[float]]) -> list[list[float]]:
                 detail=f"Latitude out of range at position {i}: {lat}",
             )
 
-    # Validate bounding box size (metric — 20 km max per axis)
+    # Validate bounding box size against the max terrain grid size.
     lngs = [c[0] for c in polygon]
     lats = [c[1] for c in polygon]
     lng_range = max(lngs) - min(lngs)
@@ -138,9 +140,14 @@ def validate_polygon(polygon: list[list[float]]) -> list[list[float]]:
     m_per_deg_lng = 111_320 * math.cos(math.radians(lat_mid))
     width_m = lng_range * m_per_deg_lng
     height_m = lat_range * m_per_deg_lat
+    # Allow one tile of slack: the frontend auto-snaps the square to a terrain
+    # grid size, and this metre estimate can differ slightly from the browser's
+    # due to projection rounding — without slack an exactly-max square is
+    # falsely rejected.
+    max_allowed_m = MAX_MAP_EXTENT_M + TERRAIN_TILE_FACES * DEFAULT_GRID_CELL_SIZE
     max_km = MAX_MAP_EXTENT_M / 1000
 
-    if width_m > MAX_MAP_EXTENT_M or height_m > MAX_MAP_EXTENT_M:
+    if width_m > max_allowed_m or height_m > max_allowed_m:
         raise HTTPException(
             status_code=400,
             detail=(

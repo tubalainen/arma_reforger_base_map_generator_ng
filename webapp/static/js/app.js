@@ -95,6 +95,53 @@ function mPerDegLng(lat) {
     return 111320 * Math.cos(lat * Math.PI / 180);
 }
 
+// ---------------------------------------------------------------------------
+// Terrain sizing — the drawn square is the only size input. Grid cell size is
+// locked at 2 m; the terrain grid size (faces per axis) must be a multiple of
+// the 128-face tile size. Mirrors config/terrain.py + config/enfusion.py.
+// ---------------------------------------------------------------------------
+const GRID_CELL_SIZE_M = 2;
+const TERRAIN_TILE_FACES = 128;
+const MAX_TERRAIN_GRID_SIZE = 16384;
+
+// Derive the Enfusion terrain parameters from a drawn side length in metres.
+function deriveTerrain(sideMetres) {
+    const tiles = Math.min(
+        MAX_TERRAIN_GRID_SIZE / TERRAIN_TILE_FACES,
+        Math.max(1, Math.round(sideMetres / GRID_CELL_SIZE_M / TERRAIN_TILE_FACES)),
+    );
+    const N = tiles * TERRAIN_TILE_FACES;
+    return {
+        N: N,                        // terrain grid size (faces per axis)
+        tiles: tiles,                // tiles per axis (N / 128)
+        sideM: N * GRID_CELL_SIZE_M, // in-game terrain side, metres
+        heightmapPx: N + 1,          // heightmap PNG dimension
+    };
+}
+
+// Side length (metres) of a square Leaflet bounds — uses the larger axis so a
+// slightly non-square bounds still resolves to a single value.
+function squareSideMetres(bounds) {
+    const widthM = (bounds.getEast() - bounds.getWest())
+        * mPerDegLng(bounds.getCenter().lat);
+    const heightM = (bounds.getNorth() - bounds.getSouth()) * M_PER_DEG_LAT;
+    return Math.max(widthM, heightM);
+}
+
+// Resize a square layer in place so its side equals a valid terrain size,
+// keeping it centred where the user left it.
+function snapSquareToTerrain(layer) {
+    const bounds = layer.getBounds();
+    const centre = bounds.getCenter();
+    const { sideM } = deriveTerrain(squareSideMetres(bounds));
+    const halfLat = (sideM / 2) / M_PER_DEG_LAT;
+    const halfLng = (sideM / 2) / mPerDegLng(centre.lat);
+    layer.setBounds(L.latLngBounds(
+        L.latLng(centre.lat - halfLat, centre.lng - halfLng),
+        L.latLng(centre.lat + halfLat, centre.lng + halfLng),
+    ));
+}
+
 // Given a fixed corner and a free corner, return the bounds of the
 // largest square (in metres) that fits the dragged extent. Used by both
 // the draw handler (free corner = cursor) and the edit handler (free corner
@@ -242,6 +289,10 @@ map.on(L.Draw.Event.CREATED, function (event) {
     drawnItems.addLayer(layer);
     currentPolygon = layer;
 
+    // Snap the drawn square to a valid terrain grid size so what the user
+    // sees on the map is exactly the terrain that will be generated.
+    snapSquareToTerrain(layer);
+
     currentPolygonCoords = boundsToCoords(layer.getBounds());
     onPolygonSelected(currentPolygonCoords);
 
@@ -273,8 +324,14 @@ function enableLiveEditing(layer) {
         updateSelectionDisplay(currentPolygonCoords);
     };
     const finishEdit = () => {
+        // Snap to a valid terrain size, then rebuild the edit handles so the
+        // corner markers sit on the snapped bounds. The re-init is deferred so
+        // the current drag event finishes unwinding before its handler is
+        // torn down.
+        snapSquareToTerrain(layer);
         currentPolygonCoords = boundsToCoords(layer.getBounds());
         onPolygonSelected(currentPolygonCoords);
+        setTimeout(() => enableLiveEditing(layer), 0);
     };
 
     markers.forEach((m) => {
@@ -306,12 +363,6 @@ document.getElementById('btn-toggle-console').addEventListener('click', function
     }
 });
 
-// Update terrain size display when options change
-document.getElementById('heightmap-size').addEventListener('change', updateTerrainSizeDisplay);
-document.getElementById('grid-resolution').addEventListener('change', updateTerrainSizeDisplay);
-
-const MAX_MAP_EXTENT_KM = 32; // must match MAX_MAP_EXTENT_M in config/terrain.py
-
 function updateSelectionDisplay(coords) {
     document.getElementById('selection-info').classList.remove('d-none');
     document.getElementById('no-selection').classList.add('d-none');
@@ -331,17 +382,10 @@ function updateSelectionDisplay(coords) {
     document.getElementById('info-size').textContent =
         `~${lngKm.toFixed(1)} x ${latKm.toFixed(1)} km`;
 
-    const warning = document.getElementById('area-warning');
-    const warningText = document.getElementById('area-warning-text');
-    if (lngKm > MAX_MAP_EXTENT_KM || latKm > MAX_MAP_EXTENT_KM) {
-        warningText.textContent =
-            `Area too large (${lngKm.toFixed(1)} x ${latKm.toFixed(1)} km). Max ${MAX_MAP_EXTENT_KM} x ${MAX_MAP_EXTENT_KM} km.`;
-        warning.classList.remove('d-none');
-        document.getElementById('btn-generate').disabled = true;
-    } else {
-        warning.classList.add('d-none');
-        document.getElementById('btn-generate').disabled = false;
-    }
+    // The square auto-snaps to a valid terrain size and is clamped to the
+    // maximum, so any drawn selection is generatable.
+    document.getElementById('btn-generate').disabled = false;
+    updateTerrainSizeDisplay();
 }
 
 function onPolygonSelected(coords) {
@@ -369,13 +413,37 @@ function clearSelection() {
 }
 
 function updateTerrainSizeDisplay() {
-    const vertices = parseInt(document.getElementById('heightmap-size').value);
-    const res = parseFloat(document.getElementById('grid-resolution').value);
-    const faces = vertices - 1;
-    const terrainM = faces * res;
-    document.getElementById('terrain-size-display').innerHTML =
-        `${faces} faces at ${res}m = up to <strong>${terrainM}m x ${terrainM}m</strong> terrain ` +
-        `<span class="text-muted">(proportional to selection)</span>`;
+    const el = document.getElementById('terrain-size-display');
+    if (!currentPolygonCoords) {
+        el.innerHTML =
+            '<span class="text-muted">Draw an area on the map to size the terrain.</span>';
+        return;
+    }
+
+    const lngs = currentPolygonCoords.map(c => c[0]);
+    const lats = currentPolygonCoords.map(c => c[1]);
+    const west = Math.min(...lngs), east = Math.max(...lngs);
+    const south = Math.min(...lats), north = Math.max(...lats);
+    const midLat = (south + north) / 2;
+    const widthM = (east - west) * mPerDegLng(midLat);
+    const heightM = (north - south) * M_PER_DEG_LAT;
+
+    const t = deriveTerrain(Math.max(widthM, heightM));
+    const km = (t.sideM / 1000).toFixed(2);
+    const advisory = t.N > 8192
+        ? '<div class="alert alert-warning py-1 px-2 mb-0 mt-2 small">'
+          + '<i class="bi bi-exclamation-triangle-fill"></i> Large map &mdash; '
+          + 'generation will be slow and memory-heavy.</div>'
+        : '';
+
+    el.innerHTML =
+        '<table class="table table-sm table-dark mb-0">'
+        + `<tr><td>Terrain grid size</td><td><strong>${t.N} &times; ${t.N}</strong></td></tr>`
+        + `<tr><td>Tiles</td><td>${t.tiles} &times; ${t.tiles}</td></tr>`
+        + `<tr><td>In-game size</td><td>${km} &times; ${km} km</td></tr>`
+        + `<tr><td>Heightmap</td><td>${t.heightmapPx} &times; ${t.heightmapPx} px</td></tr>`
+        + `<tr><td>Grid cell size</td><td>${GRID_CELL_SIZE_M} m</td></tr>`
+        + '</table>' + advisory;
 }
 
 // ===========================================================================
@@ -466,8 +534,6 @@ async function startGeneration() {
     const mapName = rawMapName.replace(/[^A-Za-z0-9_]/g, '').substring(0, 32);
 
     const options = {
-        heightmap_size: parseInt(document.getElementById('heightmap-size').value),
-        grid_resolution: parseFloat(document.getElementById('grid-resolution').value),
         features: {
             roads: document.getElementById('opt-roads').checked,
             water: document.getElementById('opt-water').checked,
