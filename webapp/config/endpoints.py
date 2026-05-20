@@ -1,8 +1,9 @@
 """External API endpoint URLs."""
 
-# Overpass API endpoint pool (tried in order on 429/504 failures)
-# All instances serve identical OSM data — differences are only in capacity/uptime.
-# Order: highest capacity/reliability first, most-overloaded last.
+# Overpass API endpoint pool. All instances serve identical OSM data —
+# differences are only in capacity/uptime. At runtime osm_service probes
+# every mirror and queries the fastest healthy one first; this list order
+# is only the fallback used when the probe itself fails.
 OVERPASS_ENDPOINTS = [
     "https://overpass.private.coffee/api/interpreter",           # Private.coffee — 4 servers, no rate limits
     "https://overpass.osm.ch/api/interpreter",                   # osm.ch — Swiss-hosted, full planet database
@@ -11,6 +12,7 @@ OVERPASS_ENDPOINTS = [
 ]
 OVERPASS_TIMEOUT = 60          # server-side query budget: [timeout:60] in Overpass QL
 OVERPASS_HTTP_TIMEOUT = 75     # httpx client timeout — server budget + 15s network buffer
+OVERPASS_PROBE_TIMEOUT = 12    # pre-flight mirror health probe — trivial query, short budget
 
 # Legacy aliases for backward compatibility
 OVERPASS_ENDPOINT = OVERPASS_ENDPOINTS[0]

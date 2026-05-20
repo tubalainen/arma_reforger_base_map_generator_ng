@@ -7,6 +7,10 @@ features from OpenStreetMap using the Overpass API.
 Uses a pool of public Overpass mirrors for resilience. All mirrors
 serve identical OSM data — the pool provides redundancy when
 individual instances return 429 (rate-limited) or 504 (timeout).
+
+Before each batch of feature queries a cheap pre-flight probe ranks
+the mirrors by live latency, so the fastest healthy one is tried
+first instead of relying on a fixed (and quickly stale) priority list.
 """
 
 from __future__ import annotations
@@ -14,12 +18,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Optional
 
 import httpx
 
-from config import OVERPASS_ENDPOINTS, OVERPASS_TIMEOUT, OVERPASS_HTTP_TIMEOUT
+from config import (
+    OVERPASS_ENDPOINTS, OVERPASS_TIMEOUT, OVERPASS_HTTP_TIMEOUT,
+    OVERPASS_PROBE_TIMEOUT,
+)
 from services.utils.geo import bbox_to_overpass_str
 from services.utils.geojson import (
     extract_coords_from_geometry,
@@ -83,7 +91,115 @@ def _is_valid_iso_timestamp(value: str) -> bool:
         return False
 
 
-async def _run_overpass_query(query: str, max_retries: int = 2, job=None) -> Optional[dict]:
+# Trivial query for the pre-flight health probe. Node 1 has existed in OSM
+# since 2005, so any healthy mirror answers it in well under a second; a
+# broken mirror (issue #131) responds fast with a corrupt timestamp instead.
+_PROBE_QUERY = "[out:json][timeout:25];node(1);out;"
+
+
+def _rank_mirrors(probe_results: list[tuple[str, bool, float]]) -> list[str]:
+    """Order mirrors best-first from probe results.
+
+    Healthy mirrors (probe returned a parseable ISO timestamp) come first,
+    sorted by ascending probe latency. Unhealthy mirrors keep their original
+    pool order and go last — demoted, never dropped, so a transient probe
+    failure can't permanently remove a mirror that may recover.
+
+    Args:
+        probe_results: (endpoint, healthy, latency_seconds) tuples in pool order.
+    """
+    healthy = sorted(
+        ((ep, latency) for ep, ok, latency in probe_results if ok),
+        key=lambda item: item[1],
+    )
+    unhealthy = [ep for ep, ok, _ in probe_results if not ok]
+    return [ep for ep, _ in healthy] + unhealthy
+
+
+async def _probe_one_mirror(endpoint: str) -> tuple[str, bool, float]:
+    """Probe a single mirror with the trivial query.
+
+    Returns (endpoint, healthy, latency_seconds). A mirror counts as healthy
+    when it answers 200 with a parseable ISO `timestamp_osm_base` — the same
+    signal `_run_overpass_query` uses to accept a real response.
+    """
+    label = _endpoint_label(endpoint)
+    start = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=OVERPASS_PROBE_TIMEOUT) as client:
+            resp = await client.post(
+                endpoint,
+                data={"data": _PROBE_QUERY},
+                headers={"User-Agent": "ArmaReforgerMapGenerator/1.0"},
+            )
+        latency = time.monotonic() - start
+        if resp.status_code != 200:
+            logger.info(
+                f"Overpass probe [{label}]: HTTP {resp.status_code} in {latency:.1f}s — skipping"
+            )
+            return endpoint, False, latency
+        timestamp = resp.json().get("osm3s", {}).get("timestamp_osm_base", "")
+        if _is_valid_iso_timestamp(timestamp):
+            logger.info(f"Overpass probe [{label}]: healthy in {latency:.1f}s (data {timestamp})")
+            return endpoint, True, latency
+        logger.info(
+            f"Overpass probe [{label}]: corrupt timestamp {timestamp!r} "
+            f"in {latency:.1f}s — skipping"
+        )
+        return endpoint, False, latency
+    except Exception as e:
+        latency = time.monotonic() - start
+        logger.info(
+            f"Overpass probe [{label}]: {type(e).__name__} after {latency:.1f}s — skipping"
+        )
+        return endpoint, False, latency
+
+
+async def probe_overpass_mirrors(job=None) -> list[str]:
+    """Probe every mirror in parallel and return them ordered fastest-first.
+
+    The fastest healthy Overpass mirror changes hour to hour, so rather than
+    relying on a fixed priority list this measures it: one trivial query to
+    every mirror at once, ranked by latency. Broken mirrors (issue #131) are
+    demoted to the back. Falls back to the configured order if every mirror
+    fails the probe.
+
+    Cheap — a node(1) query is ~0.3s on a healthy mirror — and run once per
+    generation, just before the five real feature queries.
+    """
+    results = await asyncio.gather(
+        *(_probe_one_mirror(ep) for ep in OVERPASS_ENDPOINTS)
+    )
+    healthy_count = sum(1 for _, ok, _ in results if ok)
+
+    if healthy_count == 0:
+        logger.warning(
+            "Overpass probe: every mirror failed — falling back to configured order"
+        )
+        if job:
+            job.add_log(
+                "All Overpass mirrors failed the health probe — using default order",
+                "warning",
+            )
+        return list(OVERPASS_ENDPOINTS)
+
+    ordered = _rank_mirrors(list(results))
+    best = _endpoint_label(ordered[0])
+    logger.info(
+        f"Overpass probe: {healthy_count}/{len(OVERPASS_ENDPOINTS)} mirrors healthy — "
+        f"query order: {[_endpoint_label(ep) for ep in ordered]}"
+    )
+    if job:
+        job.add_log(f"Overpass: {healthy_count} mirror(s) healthy — using [{best}] first")
+    return ordered
+
+
+async def _run_overpass_query(
+    query: str,
+    max_retries: int = 2,
+    job=None,
+    endpoints: Optional[list[str]] = None,
+) -> Optional[dict]:
     """
     Execute an Overpass API query against a pool of public mirrors.
 
@@ -94,8 +210,10 @@ async def _run_overpass_query(query: str, max_retries: int = 2, job=None) -> Opt
     Args:
         query: Overpass QL query string
         max_retries: Number of full passes through the endpoint pool
+        endpoints: Ordered endpoint list (e.g. from probe_overpass_mirrors);
+            defaults to the configured pool order when omitted.
     """
-    endpoints = OVERPASS_ENDPOINTS
+    endpoints = endpoints or OVERPASS_ENDPOINTS
 
     # Extract query type for logging (first element type in the query)
     query_type = "features"
@@ -220,7 +338,7 @@ async def _run_overpass_query(query: str, max_retries: int = 2, job=None) -> Opt
     return None
 
 
-async def fetch_roads(bbox: dict, job = None) -> Optional[dict]:
+async def fetch_roads(bbox: dict, job = None, endpoints = None) -> Optional[dict]:
     """
     Fetch road network from OSM.
     Returns all highway features with classification, surface, width, etc.
@@ -235,7 +353,7 @@ async def fetch_roads(bbox: dict, job = None) -> Optional[dict]:
     """
 
     logger.info(f"Fetching roads from Overpass API (bbox: {bbox_str})...")
-    result = await _run_overpass_query(query, job=job)
+    result = await _run_overpass_query(query, job=job, endpoints=endpoints)
 
     if result and "elements" in result:
         roads = _process_road_elements(result["elements"])
@@ -299,7 +417,7 @@ def _process_road_elements(elements: list) -> list:
     return features
 
 
-async def fetch_water(bbox: dict, job = None) -> Optional[dict]:
+async def fetch_water(bbox: dict, job = None, endpoints = None) -> Optional[dict]:
     """
     Fetch water features from OSM.
     Includes lakes, rivers, streams, ponds, reservoirs, coastline.
@@ -323,7 +441,7 @@ async def fetch_water(bbox: dict, job = None) -> Optional[dict]:
     """
 
     logger.info(f"Fetching water features from Overpass API (bbox: {bbox_str})...")
-    result = await _run_overpass_query(query, job=job)
+    result = await _run_overpass_query(query, job=job, endpoints=endpoints)
 
     if result and "elements" in result:
         features = _process_water_elements(result["elements"])
@@ -411,7 +529,7 @@ def _process_water_elements(elements: list) -> list:
     return features
 
 
-async def fetch_forests(bbox: dict, job = None) -> Optional[dict]:
+async def fetch_forests(bbox: dict, job = None, endpoints = None) -> Optional[dict]:
     """
     Fetch forest and woodland areas from OSM.
     Includes forest, wood, scrub, and tree rows.
@@ -432,7 +550,7 @@ async def fetch_forests(bbox: dict, job = None) -> Optional[dict]:
     """
 
     logger.info(f"Fetching forests from Overpass API (bbox: {bbox_str})...")
-    result = await _run_overpass_query(query, job=job)
+    result = await _run_overpass_query(query, job=job, endpoints=endpoints)
 
     if result and "elements" in result:
         features = _process_area_elements(result["elements"], "forest")
@@ -455,7 +573,7 @@ async def fetch_forests(bbox: dict, job = None) -> Optional[dict]:
     return None
 
 
-async def fetch_buildings(bbox: dict, job = None) -> Optional[dict]:
+async def fetch_buildings(bbox: dict, job = None, endpoints = None) -> Optional[dict]:
     """
     Fetch building footprints from OSM.
     Includes building type, height, levels.
@@ -471,7 +589,7 @@ async def fetch_buildings(bbox: dict, job = None) -> Optional[dict]:
     """
 
     logger.info(f"Fetching buildings from Overpass API (bbox: {bbox_str})...")
-    result = await _run_overpass_query(query, job=job)
+    result = await _run_overpass_query(query, job=job, endpoints=endpoints)
 
     if result and "elements" in result:
         features = _process_building_elements(result["elements"])
@@ -552,7 +670,7 @@ def _process_building_elements(elements: list) -> list:
     return features
 
 
-async def fetch_land_use(bbox: dict, job = None) -> Optional[dict]:
+async def fetch_land_use(bbox: dict, job = None, endpoints = None) -> Optional[dict]:
     """
     Fetch land use areas from OSM.
     Includes farmland, meadow, residential, industrial, commercial, etc.
@@ -570,7 +688,7 @@ async def fetch_land_use(bbox: dict, job = None) -> Optional[dict]:
     """
 
     logger.info(f"Fetching land use from Overpass API (bbox: {bbox_str})...")
-    result = await _run_overpass_query(query, job=job)
+    result = await _run_overpass_query(query, job=job, endpoints=endpoints)
 
     if result and "elements" in result:
         features = _process_area_elements(result["elements"], "land_use")
@@ -666,28 +784,33 @@ async def fetch_all_features(bbox: dict, job = None) -> dict:
     Fetch all OSM features for a bounding box.
     Returns dict with roads, water, forests, buildings, land_use collections.
 
-    Runs all 5 queries concurrently with asyncio.gather.
+    Probes the mirror pool once, then runs all 5 queries concurrently
+    against the fastest healthy mirror with asyncio.gather.
     """
+    if job:
+        job.add_log("Checking Overpass mirror health...")
+    endpoints = await probe_overpass_mirrors(job)
+
     if job:
         job.add_log("Fetching roads from OpenStreetMap...")
         job.progress = 27
-    roads_task = fetch_roads(bbox, job)
+    roads_task = fetch_roads(bbox, job, endpoints)
     if job:
         job.add_log("Fetching water features from OpenStreetMap...")
         job.progress = 29
-    water_task = fetch_water(bbox, job)
+    water_task = fetch_water(bbox, job, endpoints)
     if job:
         job.add_log("Fetching forests from OpenStreetMap...")
         job.progress = 31
-    forests_task = fetch_forests(bbox, job)
+    forests_task = fetch_forests(bbox, job, endpoints)
     if job:
         job.add_log("Fetching buildings from OpenStreetMap...")
         job.progress = 33
-    buildings_task = fetch_buildings(bbox, job)
+    buildings_task = fetch_buildings(bbox, job, endpoints)
     if job:
         job.add_log("Fetching land use data from OpenStreetMap...")
         job.progress = 35
-    land_use_task = fetch_land_use(bbox, job)
+    land_use_task = fetch_land_use(bbox, job, endpoints)
 
     roads, water, forests, buildings, land_use = await asyncio.gather(
         roads_task, water_task, forests_task, buildings_task, land_use_task,
