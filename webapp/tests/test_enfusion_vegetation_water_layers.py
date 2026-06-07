@@ -179,6 +179,93 @@ class TestVegetationLayer:
         assert "SplineShapeEntity" not in out
 
 
+import re
+
+
+def _abs_shapepoints(layer_text: str) -> list[tuple[float, float]]:
+    """Return absolute (x, z) of every ShapePoint across all entities."""
+    pts: list[tuple[float, float]] = []
+    for block in re.split(r"SplineShapeEntity ", layer_text)[1:]:
+        m = re.search(r"coords\s+([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)", block)
+        if not m:
+            continue
+        ox, oz = float(m.group(1)), float(m.group(3))
+        for pm in re.finditer(
+            r"Position\s+([\-\d.]+)\s+([\-\d.]+)\s+([\-\d.]+)", block
+        ):
+            pts.append((ox + float(pm.group(1)), oz + float(pm.group(3))))
+    return pts
+
+
+class TestForestClipping:
+    """Issue #139 — forests crossing the terrain edge must be clipped to the
+    terrain rectangle (follow the edge), NOT point-filtered and re-closed with a
+    chord across the map."""
+
+    # Identity transformer ×1000, terrain is 4096 m → bound + 1 m margin.
+    BOUND = 4096 + 1.0
+
+    def test_boundary_crossing_forest_is_clipped_in_bounds(self, generator_factory):
+        # Spans lon 1..6 → local x 1000..6000; the east edge is at 4096.
+        ring = [[1.0, 1.0], [6.0, 1.0], [6.0, 3.0], [1.0, 3.0], [1.0, 1.0]]
+        gen = generator_factory(forest_features={
+            "type": "FeatureCollection",
+            "features": [_polygon_feature([ring], type="forest")],
+        })
+        out = gen._generate_vegetation_layer()
+        assert "SplineShapeEntity Forest_" in out  # not skipped
+        pts = _abs_shapepoints(out)
+        assert pts, "expected at least one ShapePoint"
+        # No vertex may sit near the original far-outside x=6000 corner.
+        assert max(x for x, _ in pts) <= self.BOUND + 1e-3
+
+    def test_clip_helper_returns_bounded_rings(self, generator_factory):
+        gen = generator_factory()
+        local = [
+            {"x": 1000.0, "y": 0.0, "z": 1000.0},
+            {"x": 6000.0, "y": 0.0, "z": 1000.0},
+            {"x": 6000.0, "y": 0.0, "z": 3000.0},
+            {"x": 1000.0, "y": 0.0, "z": 3000.0},
+        ]
+        rings = gen._clip_ring_to_terrain(local)
+        assert rings
+        for ring in rings:
+            for p in ring:
+                assert -1.001 <= p["x"] <= self.BOUND + 1e-3
+                assert -1.001 <= p["z"] <= self.BOUND + 1e-3
+
+
+class TestSimpleRingGuarantee:
+    """Issue #105 — never emit a self-intersecting ring (trees spray outside)."""
+
+    def test_valid_square_passes_through(self, generator_factory):
+        gen = generator_factory()
+        sq = [
+            {"x": 0.0, "y": 0.0, "z": 0.0},
+            {"x": 10.0, "y": 0.0, "z": 0.0},
+            {"x": 10.0, "y": 0.0, "z": 10.0},
+            {"x": 0.0, "y": 0.0, "z": 10.0},
+        ]
+        out = gen._ensure_simple_ring(sq)
+        assert out is not None and len(out) == 4
+
+    def test_bowtie_is_repaired_or_dropped(self, generator_factory):
+        from shapely.geometry import Polygon
+        gen = generator_factory()
+        # A classic self-intersecting "bowtie".
+        bowtie = [
+            {"x": 0.0, "y": 0.0, "z": 0.0},
+            {"x": 10.0, "y": 0.0, "z": 10.0},
+            {"x": 10.0, "y": 0.0, "z": 0.0},
+            {"x": 0.0, "y": 0.0, "z": 10.0},
+        ]
+        out = gen._ensure_simple_ring(bowtie)
+        # Either dropped, or returned as a valid simple polygon — never invalid.
+        if out is not None:
+            poly = Polygon([(p["x"], p["z"]) for p in out])
+            assert poly.is_valid
+
+
 # ---------------------------------------------------------------------------
 # Water layer tests
 # ---------------------------------------------------------------------------
