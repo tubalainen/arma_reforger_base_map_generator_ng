@@ -273,12 +273,33 @@ You should see this structure inside:
 
 6. Click **Import**
 
+> **About Invert in Z axis:** real-world `.asc` rows run north→south, but
+> Workbench's importer reads them south→north, so we leave **Invert in Z axis
+> checked** to keep north at the top. If your terrain looks mirrored against
+> `heightmap_preview.png` after import, re-import with this box **unchecked** —
+> Atlas 2 notes the correct setting can vary by data source.
+
+### Step 2.3: Generate the Normal Map
+
+After importing, generate the normal map so lighting and the paint tool have
+valid surface normals to work with:
+
+1. In the **Terrain Tool**, click **Generate normal map**
+2. If a **"Set normal map options"** dialog appears, click **OK** to accept the defaults
+3. Wait for it to finish
+
+> **Why this matters:** Atlas 2 lists this as a required post-import step, and a
+> missing/stale normal map is the documented cause of the "big square over part
+> of the terrain" artifact — regenerating the normal map fixes it.
+
+### Step 2.4: Save and Reopen
+
 > **CRITICAL**: After import, you **MUST** save the *world* (not just the terrain) and reopen it:
 > 1. **File > Save World** (Ctrl+S) — *not* the Terrain Tool's Save button, which only writes the .terr file
 > 2. Wait for the save to complete (watch the progress bar in the upper right corner)
 > 3. Close and reopen the world (double-click the .ent file again in the Resource Browser)
 
-### Step 2.3: Verify Terrain Shape
+### Step 2.5: Verify Terrain Shape
 
 After reopening, you should see your terrain with real-world elevation:
 - Mountains/hills at the correct positions
@@ -286,10 +307,7 @@ After reopening, you should see your terrain with real-world elevation:
 
 > **Tip**: Use the **heightmap_preview.png** in Sourcefiles/ as a visual reference
 > to verify the terrain shape matches expectations. You may need to navigate the
-> camera to see the terrain — try pressing **F** to focus on the selected entity.
-
-> **Note**: If a **"Set normal map options"** dialog appears, click **OK** to accept
-> the defaults."""
+> camera to see the terrain — try pressing **F** to focus on the selected entity."""
 
     def _phase_bootstrap_entities(self) -> str:
         """
@@ -398,8 +416,21 @@ The default surface covers 100% of your terrain as the base layer.
         lines.append("""
 ### Step 3.4: Import Surface Masks
 
-Import masks in this specific order (most specific surfaces first):
+Import masks in this specific order (most specific surfaces first).
 
+> **Mask file → material reference (issue #103):** the generated PNG file names
+> describe the *surface class*, while the Paint panel shows the *material* name.
+> They map like this:
+
+| Source mask file | World Editor material (.emat) |
+|------------------|-------------------------------|""")
+
+        for surface_name in present_ordered:
+            material = SURFACE_MATERIAL_MAP.get(surface_name, "Unknown.emat")
+            material_short = material.split("/")[-1]
+            lines.append(f"| `surface_{surface_name}.png` | `{material_short}` |")
+
+        lines.append("""
 > **Batch Import Option**: Right-click in the surface list > **Batch import surface masks**
 > to import all masks at once. If using batch import, ensure files are named to match
 > the surface materials. Otherwise, import individually:""")
@@ -467,8 +498,18 @@ manually later via Terrain Tool (Ctrl+T) > Manage tab > Import Satellite Map."""
 2. Go to the **Manage** tab
 3. Click **Import Satellite Map...**
 4. Navigate to: `{self.map_name}/Sourcefiles/satellite_map.png`
-5. Click **Import**
-6. **File > Save World** (Ctrl+S)
+5. **Turn OFF "Linear Color Space"** — the PNG is already in sRGB, so leaving
+   this on darkens the imagery. (If it still looks too dark, re-import with it on.)
+6. Click **Import**
+
+> **CRITICAL — Save and reopen before doing anything else:** Atlas 2 (p.8)
+> requires this after a satellite import.
+> 1. **File > Save World** (Ctrl+S)
+> 2. Close and reopen the world (double-click the .ent file in the Resource Browser)
+>
+> Do **not** start painting surfaces on the freshly-imported, not-yet-reopened
+> satellite state — re-baking the terrain in that state has been a source of
+> Workbench crashes on the first paint stroke.
 
 ### Step 4.2: Verify Alignment
 
@@ -476,6 +517,10 @@ The satellite image should align with your terrain features:
 - Roads visible in the satellite should match the terrain surface masks
 - Water bodies should align with terrain low points
 - Forest areas should match the forest floor surface mask
+
+> **Tip (Atlas 2 p.21):** to see the satellite imagery up close instead of only
+> from altitude, select the **Terrain** entity and turn its **Middle Distance
+> Max** all the way down in Object Properties.
 
 > **Source**: {self.satellite.get('source', 'Sentinel-2 Cloudless')} imagery ({self.satellite.get('dimensions', 'unknown')} pixels)"""
 
