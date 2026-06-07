@@ -7,10 +7,10 @@ is 6400). These tests pin snap_to_tile_multiple() and the size constants it
 depends on.
 """
 
-from config.enfusion import snap_to_tile_multiple
+from config.enfusion import snap_to_tile_multiple, pick_clean_height_scale
 from config.terrain import (
     TERRAIN_TILE_FACES, MAX_TERRAIN_GRID_SIZE, MAX_MAP_EXTENT_M,
-    DEFAULT_GRID_CELL_SIZE,
+    DEFAULT_GRID_CELL_SIZE, DEFAULT_HEIGHT_SCALE,
 )
 
 
@@ -41,6 +41,40 @@ class TestSnapToTileMultiple:
     def test_clamped_to_maximum(self):
         assert snap_to_tile_multiple(20_000) == MAX_TERRAIN_GRID_SIZE
         assert snap_to_tile_multiple(10**9) == MAX_TERRAIN_GRID_SIZE
+
+
+class TestPickCleanHeightScale:
+    """Issue #142 — the New Terrain "Height scale" must be a clean, typeable
+    value (default 0.03125), not the old un-typeable ``range / 65535`` fraction.
+    Heightmaps import as absolute metres (sea = 0) with Resample off, so the
+    scale only has to *represent* the span, not rescale it."""
+
+    def test_142_example_returns_engine_default(self):
+        # The exact range from issue #142 (22.4 m – 34.5 m).
+        assert pick_clean_height_scale(22.4, 34.5) == DEFAULT_HEIGHT_SCALE
+
+    def test_typical_maps_use_default(self):
+        for mn, mx in [(0.0, 1.0), (0.0, 1000.0), (-30.0, 1200.0), (200.0, 800.0)]:
+            assert pick_clean_height_scale(mn, mx) == DEFAULT_HEIGHT_SCALE
+
+    def test_climbs_ladder_when_span_exceeds_default_band(self):
+        # max above the default +1843 m ceiling -> next clean value.
+        assert pick_clean_height_scale(400.0, 1900.0) == 0.0625
+        # seabed below the default -205 m floor -> climb as well.
+        assert pick_clean_height_scale(-300.0, 1500.0) == 0.0625
+
+    def test_result_always_represents_the_span(self):
+        for mn, mx in [(22.4, 34.5), (400.0, 1900.0), (-300.0, 1500.0),
+                       (0.0, 6000.0), (-1000.0, 5000.0)]:
+            hs = pick_clean_height_scale(mn, mx)
+            upper = hs * 65535.0 * 0.9
+            lower = -hs * 65535.0 * 0.1
+            assert mx <= upper + 1e-6
+            assert mn >= lower - 1e-6
+
+    def test_never_below_engine_default(self):
+        # A flat map must not produce a tiny (un-typeable) scale.
+        assert pick_clean_height_scale(50.0, 50.01) >= DEFAULT_HEIGHT_SCALE
 
 
 class TestTerrainConstants:

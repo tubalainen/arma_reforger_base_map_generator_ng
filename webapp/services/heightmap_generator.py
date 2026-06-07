@@ -27,7 +27,7 @@ from scipy.interpolate import NearestNDInterpolator
 # Re-exported here for backward compatibility (surface_mask_generator imports from here).
 from services.utils.rasterize import rasterize_features_to_mask  # noqa: F401
 from services.utils.parallel import parallel_gaussian_filter, parallel_zoom
-from config.enfusion import snap_to_tile_multiple
+from config.enfusion import snap_to_tile_multiple, pick_clean_height_scale
 
 logger = logging.getLogger(__name__)
 
@@ -267,6 +267,7 @@ def generate_heightmap_from_array(
         return np.zeros_like(elevation, dtype=np.uint16), {
             "min_elevation": 0, "max_elevation": 0,
             "elevation_range": 0, "height_scale": 0, "height_offset": 0,
+            "dialog_height_scale": pick_clean_height_scale(0.0, 0.0),
             "width": elevation.shape[1], "height": elevation.shape[0],
         }
 
@@ -285,8 +286,13 @@ def generate_heightmap_from_array(
         "min_elevation": min_elev,
         "max_elevation": max_elev,
         "elevation_range": elev_range,
+        # Encoding scale: round-trips the normalised 16-bit grid back to absolute
+        # metres when writing the .asc (do NOT show this to the user — #142).
         "height_scale": height_scale,
         "height_offset": min_elev,
+        # Dialog scale: the clean value the user types into the "New Terrain"
+        # dialog. Defaults to the engine default (0.03125) per Atlas 2 (#142).
+        "dialog_height_scale": pick_clean_height_scale(min_elev, max_elev),
         "width": heightmap.shape[1],
         "height": heightmap.shape[0],
     }
