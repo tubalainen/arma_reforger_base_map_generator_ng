@@ -130,7 +130,7 @@ class SetupGuideGenerator:
         cell_size = self.hm.get("grid_cell_size_m", 2.0)
         min_elev = self.elev.get("min_elevation_m", 0)
         max_elev = self.elev.get("max_elevation_m", 0)
-        height_scale = self.elev.get("height_scale", 0.03125)
+        height_scale = self.elev.get("dialog_height_scale", 0.03125)
         mask_count = self.surf.get("count", 5)
         road_count = self.roads.get("total_segments", 0)
         country_codes = self.input_data.get("countries", []) or []
@@ -148,8 +148,8 @@ class SetupGuideGenerator:
 | **Terrain Size** | {terrain_size} |
 | **Heightmap** | {dims} pixels |
 | **Grid Cell Size** | {cell_size}m |
-| **Height Range** | {min_elev:.1f}m to {max_elev:.1f}m |
-| **Height Scale** | {height_scale:.6g} |
+| **Height Range** | {min_elev:.1f}m to {max_elev:.1f}m (absolute, sea level = 0) |
+| **Height Scale** | {height_scale:.6g} (New Terrain dialog — default) |
 | **Surface Masks** | {mask_count} included |
 | **Recommended Default** | {self.recommended_default} ({self.default_material}) |
 | **Block Violations** | {block_violations}/{total_blocks} blocks |
@@ -214,9 +214,10 @@ You should see this structure inside:
         face_x = vertex_x - 1
         face_z = vertex_z - 1
         cell_size = self.hm.get("grid_cell_size_m", 2.0)
-        height_scale = self.elev.get("height_scale", 0.03125)
+        height_scale = self.elev.get("dialog_height_scale", 0.03125)
         min_elev = self.elev.get("min_elevation_m", 0.0)
         max_elev = self.elev.get("max_elevation_m", 1.0)
+        is_default_scale = abs(height_scale - 0.03125) < 1e-9
 
         return f"""## Phase 2: Terrain Creation (10 minutes)
 
@@ -233,13 +234,23 @@ You should see this structure inside:
 | **Terrain grid size** | **{face_x}** = **{face_z}** |
 | **Blocks per tile** | **4** (default) |
 | **Grid cell size (meters)** | **{cell_size}** |
-| **Height scale (meters)** | **{height_scale:.6g}** |
+| **Height scale (meters)** | **{height_scale:.6g}** {'(leave at the **default** — do not change it)' if is_default_scale else '(this map needs a larger-than-default scale — see note below)'} |
 | **"Zero" height to entity coord** | **10%** (default) |
 | **Surface layer weight bits** | **8 bits (5 surfaces)** (default) |
 
 4. Verify the summary at the bottom of the dialog shows the expected terrain size
 5. Click **Create**
 6. Wait for the terrain to generate (may take a few seconds)
+
+> **About Height scale (issue #142):** the heightmap is imported as **absolute
+> metres above sea level** — sea level is world **0**, land rises above it and
+> any seabed goes below it. With *Resample heights* left **off** (Step 2.2),
+> Workbench reads those metres directly, so **Height scale only sets the vertical
+> precision/range, not the data**. The engine default **0.03125** represents
+> roughly **-205 m to +1843 m**, which covers this map (range
+> **{min_elev:.1f} m to {max_elev:.1f} m**){'' if is_default_scale else f', except its span needs the larger value **{height_scale:.6g}** shown above'}.
+> Do **not** type the old computed fraction (e.g. `0.000185247`) — that value
+> was unnecessary and could not be entered in the dialog.
 
 ### Step 2.2: Import Heightmap
 
@@ -803,8 +814,8 @@ Terrain Grid Size X:    {face_x}
 Terrain Grid Size Z:    {face_x}
 Grid Cell Size:         {self.hm.get('grid_cell_size_m', 2.0)}m
 Terrain Size:           {self.hm.get('terrain_size_m', 'unknown')}
-Height Scale:           {self.elev.get('height_scale', 0.03125):.6g}
-Min Elevation:          {self.elev.get('min_elevation_m', 0):.1f}m
+Height Scale:           {self.elev.get('dialog_height_scale', 0.03125):.6g}  (New Terrain dialog value — leave at default)
+Min Elevation:          {self.elev.get('min_elevation_m', 0):.1f}m  (absolute; sea level = 0)
 Max Elevation:          {self.elev.get('max_elevation_m', 0):.1f}m
 Elevation Range:        {self.elev.get('max_elevation_m', 0) - self.elev.get('min_elevation_m', 0):.1f}m
 
@@ -883,7 +894,10 @@ changes, which is a separate hazard documented in Step 2.2.
 ### Terrain is flat after heightmap import
 - Did you **Save** and reopen the world after import? This is required.
 - Check that you imported `heightmap.asc` (not the preview PNG)
-- Verify the **Height scale** value in the New Terrain dialog was entered correctly
+- Make sure **Resample heights** was left **unchecked** — enabling it with the
+  default Lowest/Highest fields rescales the whole map into a 0–1 m strip
+- Leave **Height scale** at the dialog default (0.03125). It does **not** rescale
+  an `.asc` imported with Resample off, so a non-default value is not the cause
 
 ### Surface masks look wrong
 - Did you import in the correct order? (rock -> forest -> asphalt -> sand/dirt)

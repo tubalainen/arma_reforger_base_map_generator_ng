@@ -371,6 +371,7 @@ class TestBuildMetadataFeatureSources:
                 "min_elevation": 0,
                 "max_elevation": 100,
                 "height_scale": 0.03125,
+                "dialog_height_scale": 0.03125,
                 "height_offset": 0,
             },
             "surface_result": {"mask_count": 1, "surfaces": ["grass"]},

@@ -90,4 +90,5 @@ from config.enfusion import (
     BLOCK_FACE_SIZE, BLOCK_VERTEX_SIZE, MAX_SURFACES_PER_BLOCK,
     RECOMMENDED_MAX_EXTERNAL_MASKS, BLOCK_SURFACE_THRESHOLD,
     snap_to_tile_multiple, compute_height_scale, compute_terrain_size,
+    pick_clean_height_scale,
 )

@@ -599,6 +599,8 @@ def build_metadata(
     feature_sources: dict = None,
 ) -> dict:
     """Assemble the output metadata.json content."""
+    from config.enfusion import pick_clean_height_scale
+
     metadata = {
         "generator": "Arma Reforger Base Map Generator",
         "version": "1.0.0",
@@ -616,7 +618,17 @@ def build_metadata(
             "resolution_m": elevation_result["resolution_m"],
             "min_elevation_m": heightmap_result["min_elevation"],
             "max_elevation_m": heightmap_result["max_elevation"],
+            # Encoding scale (round-trips the .asc); not user-facing.
             "height_scale": heightmap_result["height_scale"],
+            # Value the user types into the New Terrain dialog (#142). Derived
+            # from the absolute elevation span; defaults to the engine default.
+            "dialog_height_scale": heightmap_result.get(
+                "dialog_height_scale",
+                pick_clean_height_scale(
+                    heightmap_result["min_elevation"],
+                    heightmap_result["max_elevation"],
+                ),
+            ),
             "height_offset": heightmap_result["height_offset"],
         },
         "heightmap": {
@@ -651,7 +663,7 @@ def build_metadata(
                 "heightmap_resolution_px": heightmap_result["dimensions"],
                 "terrain_size": heightmap_result["terrain_size_m"],
                 "grid_cell_size": heightmap_result["grid_cell_size_m"],
-                "height_scale": heightmap_result["height_scale"],
+                "height_scale": heightmap_result["dialog_height_scale"],
                 "height_offset": heightmap_result["height_offset"],
                 "invert_x_axis": False,
                 "invert_z_axis": True,

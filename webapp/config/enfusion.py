@@ -8,7 +8,11 @@ All paths and GUIDs are verified against the official Bohemia Interactive
 Community Wiki (community.bistudio.com) as of 2025-02-09.
 """
 
-from config.terrain import TERRAIN_TILE_FACES, MAX_TERRAIN_GRID_SIZE
+from config.terrain import (
+    TERRAIN_TILE_FACES,
+    MAX_TERRAIN_GRID_SIZE,
+    DEFAULT_HEIGHT_SCALE,
+)
 
 # ---------------------------------------------------------------------------
 # Generator version
@@ -17,7 +21,7 @@ from config.terrain import TERRAIN_TILE_FACES, MAX_TERRAIN_GRID_SIZE
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
@@ -408,6 +412,59 @@ def compute_height_scale(min_elevation: float, max_elevation: float) -> float:
     """
     elev_range = max(max_elevation - min_elevation, 0.01)
     return elev_range / 65535.0
+
+
+# Fraction of the vertical range reserved below world zero by the New Terrain
+# dialog's "Zero height to entity coord" field (default 10%). This is how much
+# of the 16-bit band can represent below-sea-level (negative) elevations.
+ZERO_HEIGHT_TO_ENTITY_FRACTION = 0.10
+
+# Clean, typeable height-scale values to climb when the engine default cannot
+# represent the map's absolute elevation span. Each is a power-of-two fraction
+# so it reads cleanly in the World Editor dialog.
+HEIGHT_SCALE_LADDER = (0.03125, 0.0625, 0.125, 0.25, 0.5, 1.0)
+
+
+def pick_clean_height_scale(
+    min_elevation: float,
+    max_elevation: float,
+    zero_fraction: float = ZERO_HEIGHT_TO_ENTITY_FRACTION,
+) -> float:
+    """
+    Pick the height-scale value the user should type into the "New Terrain"
+    dialog.
+
+    Heightmaps are imported as **absolute metres above sea level** (sea = world
+    Y = 0) with *Resample heights* off, so the dialog's height scale only needs
+    to be large enough to *represent* the elevation span — it does not rescale
+    the data. Per Atlas 2 (p.4) the engine default ``0.03125`` is correct for
+    almost every real-world map, so we return it unless the absolute span
+    genuinely does not fit, in which case we climb a ladder of clean
+    power-of-two fractions. Avoids the un-typeable ``range / 65535`` (issue #142).
+
+    With height scale ``hs`` and a "Zero height to entity coord" reserve of
+    ``zero_fraction`` (default 10%), the representable band is::
+
+        [ -hs * 65535 * zero_fraction ,  +hs * 65535 * (1 - zero_fraction) ]
+
+    Args:
+        min_elevation: Minimum absolute elevation in metres (may be negative).
+        max_elevation: Maximum absolute elevation in metres.
+        zero_fraction: Fraction of the range reserved below zero.
+
+    Returns:
+        A clean height-scale value that represents the span, defaulting to the
+        engine default ``DEFAULT_HEIGHT_SCALE``.
+    """
+    for hs in HEIGHT_SCALE_LADDER:
+        upper = hs * 65535.0 * (1.0 - zero_fraction)
+        lower = -hs * 65535.0 * zero_fraction
+        if max_elevation <= upper and min_elevation >= lower:
+            return hs
+    # Span exceeds the cleanest ladder value (e.g. >5800 m of relief); fall back
+    # to the smallest scale that physically represents the full span.
+    span = max(max_elevation - min_elevation, 0.01)
+    return max(DEFAULT_HEIGHT_SCALE, span / 65535.0)
 
 
 def compute_terrain_size(face_count: int, cell_size: float) -> float:
