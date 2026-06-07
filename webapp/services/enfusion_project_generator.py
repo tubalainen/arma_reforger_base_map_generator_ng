@@ -1341,16 +1341,16 @@ class EnfusionProjectGenerator:
 
             feature_props = feature.get("properties", {}) or {}
             for ring in exterior_rings:
-                entity = self._closed_spline_entity_from_ring(
+                pieces = self._closed_spline_entities_from_ring(
                     ring, entity_prefix, len(entities),
                     child_prefab=child_prefab,
                     naming_kind=naming_kind,
                     feature_properties=feature_props,
                 )
-                if entity is None:
+                if not pieces:
                     skipped_clipped += 1
                     continue
-                entities.append(entity)
+                entities.extend(pieces)
 
         if skipped_clipped:
             logger.info(
@@ -1547,7 +1547,7 @@ class EnfusionProjectGenerator:
                 decimated.append(pts[-1])
         return decimated
 
-    def _closed_spline_entity_from_ring(
+    def _closed_spline_entities_from_ring(
         self,
         ring: list[list[float]],
         entity_prefix: str,
@@ -1556,14 +1556,22 @@ class EnfusionProjectGenerator:
         child_prefab: Optional[str] = None,
         naming_kind: Optional[str] = None,
         feature_properties: Optional[dict] = None,
-    ) -> Optional[str]:
+    ) -> list[str]:
         """
-        Project a single GeoJSON ring (list of [lon, lat] pairs) to a closed
-        SplineShapeEntity. Returns None if the ring has fewer than 3 in-bounds
-        points after clipping to the terrain.
+        Project a single GeoJSON ring (list of [lon, lat] pairs) to one or more
+        closed SplineShapeEntity blocks. Returns an empty list if nothing
+        usable survives clipping.
 
-        ``comment_suffix`` is appended to the entity declaration line as a
-        trailing ``// ...`` comment so callers can label the spline.
+        The ring is projected to local terrain XZ, then **clipped to the terrain
+        rectangle as a polygon** (shapely intersection). A forest that crosses
+        the terrain edge therefore follows the edge and may split into several
+        in-bounds pieces — instead of the old behaviour, which point-filtered to
+        in-bounds vertices and re-closed by joining the last kept vertex straight
+        back to the first, drawing a chord across the map (the diagonal artefact
+        in issue #139). Every emitted ring is simplified and validated; a piece
+        that cannot be made into a simple (non-self-intersecting) polygon is
+        dropped rather than emitted (prevents the Forest Generator from spraying
+        trees outside the patch — issue #105).
 
         ``child_prefab``: when not None, a generator child block is appended
         inside the entity using the ``${guid}path.et { coords 0 0 0 }`` syntax.
@@ -1576,7 +1584,7 @@ class EnfusionProjectGenerator:
         may re-arm the same hang. Verify in Workbench before merging entries.
         """
         if len(ring) < 3:
-            return None
+            return []
 
         # GeoJSON rings are typically explicitly closed (first==last). Drop the
         # duplicate last point before projection; we'll re-close the spline below.
@@ -1585,27 +1593,146 @@ class EnfusionProjectGenerator:
 
         wgs_points = [{"x": float(p[0]), "y": float(p[1])} for p in ring if len(p) >= 2]
         if len(wgs_points) < 3:
-            return None
+            return []
 
         local_points = self.transformer.transform_points(
             wgs_points,
             elevation_array=self.elevation_array,
         )
 
-        # Clip to terrain bounds with a small margin
+        pieces = self._clip_ring_to_terrain(local_points)
+
+        entities: list[str] = []
+        for piece in pieces:
+            simplified = self._simplify_local_ring(piece)
+            simplified = self._ensure_simple_ring(simplified)
+            if simplified is None or len(simplified) < 3:
+                continue
+            entities.append(
+                self._render_closed_spline(
+                    simplified,
+                    entity_prefix,
+                    index + len(entities),
+                    comment_suffix=comment_suffix,
+                    child_prefab=child_prefab,
+                    naming_kind=naming_kind,
+                    feature_properties=feature_properties,
+                )
+            )
+        return entities
+
+    def _clip_ring_to_terrain(
+        self, local_points: list[dict]
+    ) -> list[list[dict]]:
+        """
+        Clip a projected ring (list of ``{x,y,z}`` local-metre dicts) to the
+        terrain rectangle, returning a list of valid closed rings (no closing
+        duplicate). Uses shapely polygon intersection so boundary crossings
+        follow the terrain edge instead of producing a chord across the map.
+
+        Falls back to the legacy in-bounds point filter when shapely is
+        unavailable.
+        """
         margin = 1.0
-        in_bounds = [
-            pt for pt in local_points
-            if -margin <= pt["x"] <= self.terrain_width + margin
-            and -margin <= pt["z"] <= self.terrain_depth + margin
-        ]
-        if len(in_bounds) < 3:
+        try:
+            from shapely.geometry import Polygon, box, MultiPolygon
+            from shapely.validation import make_valid
+        except ImportError:
+            in_bounds = [
+                pt for pt in local_points
+                if -margin <= pt["x"] <= self.terrain_width + margin
+                and -margin <= pt["z"] <= self.terrain_depth + margin
+            ]
+            return [in_bounds] if len(in_bounds) >= 3 else []
+
+        if len(local_points) < 3:
+            return []
+
+        poly = Polygon([(p["x"], p["z"]) for p in local_points])
+        if not poly.is_valid:
+            poly = make_valid(poly)
+        clip_box = box(-margin, -margin,
+                       self.terrain_width + margin, self.terrain_depth + margin)
+        try:
+            clipped = poly.intersection(clip_box)
+        except Exception:  # noqa: BLE001 - geometry op blew up; drop the ring
+            return []
+        if clipped.is_empty:
+            return []
+
+        if isinstance(clipped, Polygon):
+            polys = [clipped]
+        elif isinstance(clipped, MultiPolygon):
+            polys = list(clipped.geoms)
+        elif hasattr(clipped, "geoms"):  # GeometryCollection
+            polys = [g for g in clipped.geoms if isinstance(g, Polygon)]
+        else:
+            return []
+
+        rings: list[list[dict]] = []
+        for part in polys:
+            if part.is_empty or part.exterior is None:
+                continue
+            coords = list(part.exterior.coords)[:-1]  # drop closing dup
+            if len(coords) < 3:
+                continue
+            rings.append([
+                {"x": cx, "y": self._nearest_y(local_points, cx, cz), "z": cz}
+                for cx, cz in coords
+            ])
+        return rings
+
+    @staticmethod
+    def _nearest_y(points: list[dict], x: float, z: float) -> float:
+        """Elevation of the original projected point nearest ``(x, z)``."""
+        if not points:
+            return 0.0
+        nearest = min(
+            points, key=lambda p: (p["x"] - x) ** 2 + (p["z"] - z) ** 2
+        )
+        return nearest["y"]
+
+    @staticmethod
+    def _ensure_simple_ring(pts: Optional[list[dict]]) -> Optional[list[dict]]:
+        """
+        Guarantee the ring is a valid, simple (non-self-intersecting) polygon.
+
+        Returns the (possibly buffer(0)-repaired) ring, or ``None`` if it cannot
+        be made simple. Without shapely the ring is returned unchanged.
+        """
+        if not pts or len(pts) < 3:
             return None
+        try:
+            from shapely.geometry import Polygon
+        except ImportError:
+            return pts
+        poly = Polygon([(p["x"], p["z"]) for p in pts])
+        if poly.is_valid:
+            return pts
+        repaired = poly.buffer(0)
+        if repaired.is_empty or getattr(repaired, "geom_type", "") != "Polygon":
+            return None
+        coords = list(repaired.exterior.coords)[:-1]
+        if len(coords) < 3:
+            return None
+        return [
+            {"x": cx, "y": EnfusionProjectGenerator._nearest_y(pts, cx, cz), "z": cz}
+            for cx, cz in coords
+        ]
 
-        in_bounds = self._simplify_local_ring(in_bounds)
-
+    def _render_closed_spline(
+        self,
+        ring_pts: list[dict],
+        entity_prefix: str,
+        index: int,
+        comment_suffix: str = "",
+        child_prefab: Optional[str] = None,
+        naming_kind: Optional[str] = None,
+        feature_properties: Optional[dict] = None,
+    ) -> str:
+        """Render a closed SplineShapeEntity from a local-metre ring."""
         # Close the spline: append a final ShapePoint that repeats the origin
-        local_points = in_bounds + [in_bounds[0]]
+        local_points = ring_pts + [ring_pts[0]]
 
         origin = local_points[0]
         point_defs = []
