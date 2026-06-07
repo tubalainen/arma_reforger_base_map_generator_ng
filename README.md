@@ -4,6 +4,13 @@
 
 Instead of manually sourcing elevation data, painting surface masks by hand, placing roads one-by-one, and sculpting terrain around features, simply draw a square or rectangle on the interactive map and get Enfusion-ready heightmaps, surface masks, and vector data in minutes.
 
+> **Tested with Arma Reforger Tools 1.7.0.41.** The generated project layout,
+> heightmap `.asc`, surface masks, and `.layer`/`.ent`/`.gproj` files load in the
+> 1.7 World Editor with no format changes required (1.7 added non-power-of-2 /
+> non-square terrain grids and a CSV-import option, and fixed a
+> `RoadNetworkBuilderTool` crash when reloading a world — none of which require
+> changes here).
+
 <img width="1920" height="1152" alt="image" src="https://github.com/user-attachments/assets/31b9a3de-3581-47aa-b060-ee56fbcf73f6" />
 
 ## Features
