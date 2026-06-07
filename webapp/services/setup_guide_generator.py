@@ -162,7 +162,7 @@ class SetupGuideGenerator:
     def _prerequisites(self) -> str:
         return """## Prerequisites
 
-- **Arma Reforger Tools** installed via Steam (free DLC)
+- **Arma Reforger Tools** installed via Steam (free DLC) — tested with **1.7.0.41**
 - At least **8 GB RAM** recommended for terrain operations
 - **Do NOT** place the project folder inside a OneDrive directory — it will fail to load"""
 
