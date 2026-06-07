@@ -50,6 +50,27 @@ from services.lantmateriet.auth import get_basic_auth_header
 logger = logging.getLogger(__name__)
 
 
+def _is_raster_asset(asset: Optional[dict]) -> bool:
+    """
+    True if a STAC 'data' asset is a raster GeoTIFF we can merge.
+
+    The STAC Höjd catalog mixes raster grid products (grid1m, mhm — served as
+    .tif under /grid1m/ and /grid/mhm/) with LiDAR point clouds (COPC LAS/LAZ —
+    served as .copc.laz under /pointcloud/). The point clouds are not rasters:
+    downloading them wastes hundreds of MB and they are then rejected by the
+    TIFF magic-byte check. Filter them out up front (see issue #149).
+    """
+    if not asset:
+        return False
+    href = (asset.get("href") or "").lower()
+    media = (asset.get("type") or "").lower()
+    if href.endswith((".tif", ".tiff")):
+        return True
+    if "tiff" in media or "geotiff" in media:
+        return True
+    return False
+
+
 def _get_download_headers() -> dict:
     """
     Get headers for downloading assets from dl1.lantmateriet.se.
@@ -143,6 +164,27 @@ async def fetch_stac_elevation(
                 return None
 
             logger.info(f"STAC Höjd returned {len(features)} item(s)")
+
+            # Keep only items whose 'data' asset is a raster GeoTIFF. The catalog
+            # also returns LiDAR point-cloud (.copc.laz) items for the same bbox;
+            # those are not mergeable rasters and downloading them just wastes
+            # bandwidth before the TIFF check rejects them (see issue #149).
+            raster_features = [
+                feat for feat in features
+                if _is_raster_asset(feat.get("assets", {}).get("data"))
+            ]
+            skipped_nonraster = len(features) - len(raster_features)
+            if skipped_nonraster:
+                logger.info(
+                    f"STAC Höjd: skipping {skipped_nonraster} non-raster "
+                    f"(point-cloud) item(s), {len(raster_features)} raster tile(s) remain"
+                )
+            features = raster_features
+
+            if not features:
+                logger.warning("No raster elevation tiles found in STAC Höjd search")
+                return None
+
             if job:
                 job.add_log(f"Found {len(features)} elevation tiles to download")
 
