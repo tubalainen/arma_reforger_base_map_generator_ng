@@ -1229,6 +1229,36 @@ async def run_generation(job: MapGenerationJob):
             feature_sources=job.feature_sources,
         )
 
+        # Step 10b: Validate the raster dimension/encoding contract and harden
+        # PNG encodings. A mismatched mask/heightmap size or an unexpected
+        # channel/profile is a documented first-paint crash trigger
+        # (#100/#111/#115/#138). Non-fatal: log loudly, record in metadata.
+        try:
+            from services.raster_contract import validate_and_harden_rasters
+
+            grid = str(heightmap_result.get("terrain_grid_size", "")).split("x")
+            faces_x = int(grid[0])
+            faces_z = int(grid[1]) if len(grid) > 1 else faces_x
+            raster_report = validate_and_harden_rasters(
+                output_dir, faces_x, faces_z, job=job
+            )
+            metadata["raster_validation"] = raster_report
+            if raster_report["fixes"]:
+                job.add_log(
+                    f"Hardened raster encodings: {', '.join(raster_report['fixes'])}",
+                    "info",
+                )
+            if raster_report["ok"]:
+                job.add_log("Raster dimension/encoding contract OK", "success")
+            else:
+                job.add_log(
+                    f"Raster contract found {len(raster_report['issues'])} "
+                    f"issue(s) — see metadata.json raster_validation",
+                    "warning",
+                )
+        except Exception as exc:  # noqa: BLE001 - validation must never abort
+            logger.warning(f"[{job.job_id}] Raster contract validation skipped: {exc}")
+
         with open(output_dir / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)
 
