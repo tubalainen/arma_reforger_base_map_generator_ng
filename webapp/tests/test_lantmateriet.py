@@ -822,6 +822,58 @@ class TestMarktackeTranslation:
 
 
 # ---------------------------------------------------------------------------
+# STAC Höjd asset filtering unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestStacElevationAssetFilter:
+    """Test _is_raster_asset() — keeps GeoTIFF tiles, drops point clouds (#149)."""
+
+    def test_grid1m_tif_is_raster(self):
+        from services.lantmateriet.stac_elevation import _is_raster_asset
+
+        asset = {
+            "href": "https://dl1.lantmateriet.se/hojd/data/grid1m/65_5/50/65600_5425_25.tif",
+            "type": "image/tiff; application=geotiff",
+        }
+        assert _is_raster_asset(asset) is True
+
+    def test_mhm_grid_tif_is_raster(self):
+        from services.lantmateriet.stac_elevation import _is_raster_asset
+
+        asset = {"href": "https://dl1.lantmateriet.se/hojd/data/grid/mhm/65_5/m656_54.tif"}
+        assert _is_raster_asset(asset) is True
+
+    def test_copc_laz_pointcloud_is_not_raster(self):
+        """The exact asset that failed in issue #149."""
+        from services.lantmateriet.stac_elevation import _is_raster_asset
+
+        asset = {
+            "href": "https://dl1.lantmateriet.se/hojd/data/pointcloud/sls/23c024/m23c024-656_53.copc.laz",
+            "type": "application/vnd.laszip+copc",
+        }
+        assert _is_raster_asset(asset) is False
+
+    def test_plain_laz_is_not_raster(self):
+        from services.lantmateriet.stac_elevation import _is_raster_asset
+
+        assert _is_raster_asset({"href": "https://example/tile.laz"}) is False
+
+    def test_raster_detected_via_media_type_only(self):
+        """Href without a clear extension still passes on a TIFF media type."""
+        from services.lantmateriet.stac_elevation import _is_raster_asset
+
+        asset = {"href": "https://example/download?id=42", "type": "image/tiff"}
+        assert _is_raster_asset(asset) is True
+
+    def test_none_asset_is_not_raster(self):
+        from services.lantmateriet.stac_elevation import _is_raster_asset
+
+        assert _is_raster_asset(None) is False
+        assert _is_raster_asset({}) is False
+
+
+# ---------------------------------------------------------------------------
 # Feature dispatch unit tests
 # ---------------------------------------------------------------------------
 
