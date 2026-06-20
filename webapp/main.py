@@ -103,7 +103,9 @@ async def startup_event():
     """
     from services.session_service import clear_all_sessions
 
-    logger.info("Application starting up...")
+    logger.info(f"==================================================")
+    logger.info(f"  Arma Reforger Base Map Generator NG  v{APP_VERSION}")
+    logger.info(f"==================================================")
     cleared_count = clear_all_sessions()
     logger.info(f"Startup cleanup: cleared {cleared_count} hanging sessions")
 

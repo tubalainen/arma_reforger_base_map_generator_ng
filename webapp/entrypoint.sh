@@ -1,6 +1,14 @@
 #!/bin/bash
 set -e
 
+# Print app version up front so `docker compose logs -f` immediately shows
+# which build of the generator is running (issue #153). Reads from the
+# single source of truth in config/enfusion.py.
+APP_VERSION=$(python -c "from config.enfusion import APP_VERSION; print(APP_VERSION)" 2>/dev/null || echo "unknown")
+echo "=================================================="
+echo "  Arma Reforger Base Map Generator NG  v${APP_VERSION}"
+echo "=================================================="
+
 # Create images directory if it doesn't exist
 mkdir -p /app/static/images
 
