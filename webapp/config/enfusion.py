@@ -21,7 +21,7 @@ from config.terrain import (
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
@@ -95,53 +95,64 @@ WORLD_ENV_LENS_FLARES_CONFIG = (
 # Base path for all Enfusion surface materials
 SURFACE_MATERIAL_BASE = "ArmaReforger/Terrains/Common/Surfaces"
 
-# Map from our generated mask name -> Enfusion material resource path
+# Map from our generated mask name -> Enfusion material resource path.
+# Entries marked in SURFACE_MATERIAL_VERIFIED below have been confirmed to
+# exist in the Resource Browser under ArmaReforger/Terrains/Common/Surfaces/.
+# Unverified entries are flagged in the SETUP_GUIDE with a "browse to find"
+# note rather than a hardcoded path the user may not have.
 SURFACE_MATERIAL_MAP = {
-    "grass": f"{SURFACE_MATERIAL_BASE}/Grass_01.emat",
-    "forest_floor": f"{SURFACE_MATERIAL_BASE}/ForestFloor_01.emat",
-    "pine_floor": f"{SURFACE_MATERIAL_BASE}/ForestFloor_Pine_01.emat",
-    "asphalt": f"{SURFACE_MATERIAL_BASE}/Asphalt_01.emat",
-    "gravel": f"{SURFACE_MATERIAL_BASE}/Gravel_01.emat",
-    "dirt": f"{SURFACE_MATERIAL_BASE}/Dirt_01.emat",
-    "rock": f"{SURFACE_MATERIAL_BASE}/Rock_01.emat",
-    "sand": f"{SURFACE_MATERIAL_BASE}/Sand_01.emat",
-    "water_edge": f"{SURFACE_MATERIAL_BASE}/Mud_01.emat",
+    "grass":        f"{SURFACE_MATERIAL_BASE}/Grass_01.emat",
+    "forest_floor": f"{SURFACE_MATERIAL_BASE}/ForestFloor_01.emat",  # UNVERIFIED — see #151
+    "pine_floor":   f"{SURFACE_MATERIAL_BASE}/ForestFloor_Pine_01.emat",  # UNVERIFIED — see #151
+    "asphalt":      f"{SURFACE_MATERIAL_BASE}/Asphalt_01.emat",
+    "gravel":       f"{SURFACE_MATERIAL_BASE}/Gravel_01.emat",
+    "crop":         f"{SURFACE_MATERIAL_BASE}/Crop_01.emat",
+    "dirt":         f"{SURFACE_MATERIAL_BASE}/Dirt_01.emat",
+    "rock":         f"{SURFACE_MATERIAL_BASE}/Rock_01.emat",
+    "sand":         f"{SURFACE_MATERIAL_BASE}/Sand_01.emat",
+    "water_edge":   f"{SURFACE_MATERIAL_BASE}/Mud_01.emat",  # UNVERIFIED — see #151
 }
 
-# Alternative materials the user can swap to (for SETUP_GUIDE reference)
+# Materials confirmed to exist in a vanilla Reforger install's Resource Browser
+# under ArmaReforger/Terrains/Common/Surfaces/. Names NOT in this set are shown
+# with a "browse to find" instruction in the SETUP_GUIDE instead of a hardcoded
+# path. Update this set when a user confirms a name is valid.
+SURFACE_MATERIAL_VERIFIED: frozenset[str] = frozenset({
+    "grass",
+    "asphalt",
+    "gravel",
+    "crop",
+    "dirt",
+    "rock",
+    "sand",
+})
+
+# Alternative materials the user can swap to (for SETUP_GUIDE reference).
+# Only list alternatives that are confirmed to exist; remove any that have
+# been reported as non-existent (Mud_01, Asphalt_Cracked_01, Rock_Granite_01
+# were unverified — removed in v1.7.2, issue #151).
 SURFACE_MATERIAL_ALTERNATIVES = {
     "grass": [
         f"{SURFACE_MATERIAL_BASE}/Grass_02.emat",
         f"{SURFACE_MATERIAL_BASE}/Grass_03.emat",
     ],
-    "forest_floor": [
-        f"{SURFACE_MATERIAL_BASE}/Moss_01.emat",
-    ],
-    "pine_floor": [
-        f"{SURFACE_MATERIAL_BASE}/ForestFloor_01.emat",
-        f"{SURFACE_MATERIAL_BASE}/Moss_01.emat",
-    ],
     "asphalt": [
         f"{SURFACE_MATERIAL_BASE}/Concrete_01.emat",
-        f"{SURFACE_MATERIAL_BASE}/Asphalt_Cracked_01.emat",
     ],
     "gravel": [
         f"{SURFACE_MATERIAL_BASE}/Rock_01.emat",
         f"{SURFACE_MATERIAL_BASE}/Dirt_01.emat",
     ],
+    "crop": [
+        f"{SURFACE_MATERIAL_BASE}/Crop_02.emat",
+    ],
     "dirt": [
-        f"{SURFACE_MATERIAL_BASE}/Mud_01.emat",
         f"{SURFACE_MATERIAL_BASE}/Sand_01.emat",
     ],
     "rock": [
-        f"{SURFACE_MATERIAL_BASE}/Rock_Granite_01.emat",
         f"{SURFACE_MATERIAL_BASE}/Gravel_01.emat",
     ],
     "sand": [
-        f"{SURFACE_MATERIAL_BASE}/Dirt_01.emat",
-    ],
-    "water_edge": [
-        f"{SURFACE_MATERIAL_BASE}/Sand_01.emat",
         f"{SURFACE_MATERIAL_BASE}/Dirt_01.emat",
     ],
 }
@@ -149,7 +160,7 @@ SURFACE_MATERIAL_ALTERNATIVES = {
 # Recommended import order (most specific -> least specific)
 SURFACE_IMPORT_ORDER = [
     "rock", "pine_floor", "forest_floor", "asphalt",
-    "gravel", "dirt", "sand", "water_edge",
+    "gravel", "crop", "dirt", "sand", "water_edge",
 ]
 
 # ---------------------------------------------------------------------------

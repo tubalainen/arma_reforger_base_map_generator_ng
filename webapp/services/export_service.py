@@ -165,6 +165,7 @@ def organize_export_structure(output_dir: Path, map_name: str, job=None):
         "surface_pine_floor.png",
         "surface_asphalt.png",
         "surface_gravel.png",
+        "surface_crop.png",
         "surface_dirt.png",
         "surface_rock.png",
         "surface_sand.png",

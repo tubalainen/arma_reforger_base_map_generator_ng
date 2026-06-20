@@ -3,7 +3,8 @@
 SURFACE_CLASSES: dict[str, dict] = {
     "asphalt":      {"color": 128, "description": "Paved roads and urban areas"},
     "gravel":       {"color": 160, "description": "Gravel roads and paths"},
-    "dirt":         {"color": 140, "description": "Dirt paths and plowed fields"},
+    "crop":         {"color": 145, "description": "Agricultural land / crop fields"},
+    "dirt":         {"color": 140, "description": "Dirt roads and paths"},
     "grass":        {"color": 100, "description": "Grassland and meadows"},
     "forest_floor": {"color":  80, "description": "Forest floor - deciduous"},
     "pine_floor":   {"color":  70, "description": "Forest floor - coniferous"},
