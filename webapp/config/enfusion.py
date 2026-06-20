@@ -21,7 +21,7 @@ from config.terrain import (
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
@@ -130,7 +130,7 @@ SURFACE_MATERIAL_VERIFIED: frozenset[str] = frozenset({
 # Alternative materials the user can swap to (for SETUP_GUIDE reference).
 # Only list alternatives that are confirmed to exist; remove any that have
 # been reported as non-existent (Mud_01, Asphalt_Cracked_01, Rock_Granite_01
-# were unverified — removed in v1.8.0, issue #151).
+# were unverified — removed in v1.7.2, issue #151).
 SURFACE_MATERIAL_ALTERNATIVES = {
     "grass": [
         f"{SURFACE_MATERIAL_BASE}/Grass_02.emat",
