@@ -642,13 +642,15 @@ def generate_surface_masks(
         """Gravel/unpaved roads."""
         return soft_edge_mask(gravel_binary, transition_px=2) * 0.8
 
+    def _compute_crop():
+        """Agricultural land: farmland polygons (farmland, farmyard, allotments, orchard)."""
+        return soft_edge_mask(farmland_binary, transition_px=8) * 0.7
+
     def _compute_dirt():
-        """Farmland (soft, weighted) plus dirt roads/paths (full strength)."""
-        farmland = soft_edge_mask(farmland_binary, transition_px=5) * 0.6
+        """Dirt roads and paths only (farmland is now classified as crop)."""
         if np.any(dirt_roads_binary):
-            roads = soft_edge_mask(dirt_roads_binary, transition_px=2)
-            return np.maximum(farmland, roads)
-        return farmland
+            return soft_edge_mask(dirt_roads_binary, transition_px=2)
+        return np.zeros((h, w), dtype=np.float32)
 
     def _compute_sand():
         """Sandy shoreline transition zone around water polygons.
@@ -675,13 +677,14 @@ def generate_surface_masks(
             return soft_edge_mask(edge_only, transition_px=sand_transition_px) * 0.7
         return np.zeros((h, w), dtype=np.float32)
 
-    # Run all 8 mask computations in parallel threads
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    # Run all 9 mask computations in parallel threads
+    with ThreadPoolExecutor(max_workers=9) as pool:
         future_rock = pool.submit(_compute_rock)
         future_forest = pool.submit(_compute_forest_floor)
         future_pine = pool.submit(_compute_pine_floor)
         future_asphalt = pool.submit(_compute_asphalt)
         future_gravel = pool.submit(_compute_gravel)
+        future_crop = pool.submit(_compute_crop)
         future_dirt = pool.submit(_compute_dirt)
         future_sand = pool.submit(_compute_sand)
         future_water_edge = pool.submit(_compute_water_edge)
@@ -691,6 +694,7 @@ def generate_surface_masks(
         pine_float = future_pine.result()
         asphalt_float = future_asphalt.result()
         gravel_float = future_gravel.result()
+        crop_float = future_crop.result()
         dirt_float = future_dirt.result()
         sand_float = future_sand.result()
         water_edge_float = future_water_edge.result()
@@ -715,6 +719,7 @@ def generate_surface_masks(
     pine_float[water_mask_bool] = 0
     asphalt_float[water_mask_bool] = 0
     gravel_float[water_mask_bool] = 0
+    crop_float[water_mask_bool] = 0
     dirt_float[water_mask_bool] = 0
     sand_float[water_mask_bool] = 0
     water_edge_float[water_mask_bool] = 0
@@ -722,7 +727,7 @@ def generate_surface_masks(
     # Stack all non-grass masks
     mask_stack = np.stack([
         rock_float, forest_float, pine_float, asphalt_float,
-        gravel_float, dirt_float, sand_float, water_edge_float,
+        gravel_float, crop_float, dirt_float, sand_float, water_edge_float,
     ], axis=-1)
 
     # Total of all non-grass masks at each pixel
@@ -750,9 +755,10 @@ def generate_surface_masks(
     pine_float = mask_stack[..., 2]
     asphalt_float = mask_stack[..., 3]
     gravel_float = mask_stack[..., 4]
-    dirt_float = mask_stack[..., 5]
-    sand_float = mask_stack[..., 6]
-    water_edge_float = mask_stack[..., 7]
+    crop_float = mask_stack[..., 5]
+    dirt_float = mask_stack[..., 6]
+    sand_float = mask_stack[..., 7]
+    water_edge_float = mask_stack[..., 8]
 
     # =========================================================================
     # Step 5: Convert to uint8 and save
@@ -770,6 +776,7 @@ def generate_surface_masks(
         "pine_floor": to_uint8(pine_float),
         "asphalt": to_uint8(asphalt_float),
         "gravel": to_uint8(gravel_float),
+        "crop": to_uint8(crop_float),
         "dirt": to_uint8(dirt_float),
         "rock": to_uint8(rock_float),
         "sand": to_uint8(sand_float),

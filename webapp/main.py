@@ -617,10 +617,19 @@ async def download_result(request: Request, job_id: str, token: Optional[str] = 
 
         logger.info(f"Download started for job {job_id[:8]}... via {auth_method}")
 
+        # Use the map name as the download filename so the user sees e.g.
+        # "SE_59N_18E.zip" rather than a random job-ID string.
+        raw_map_name = (job.result or {}).get("metadata", {}).get("map_name", "")
+        if raw_map_name:
+            from services.enfusion_project_generator import sanitize_project_name as _san
+            download_name = f"{_san(raw_map_name)}.zip"
+        else:
+            download_name = f"arma_reforger_map_{job_id[:8]}.zip"
+
         return FileResponse(
             path=str(zip_path),
             media_type="application/zip",
-            filename=f"arma_reforger_map_{job_id[:16]}.zip",
+            filename=download_name,
             headers={
                 "X-File-Retention": retention_msg,
             },

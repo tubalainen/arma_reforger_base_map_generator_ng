@@ -21,6 +21,7 @@ from config.enfusion import (
     APP_VERSION,
     SURFACE_MATERIAL_MAP,
     SURFACE_MATERIAL_ALTERNATIVES,
+    SURFACE_MATERIAL_VERIFIED,
     SURFACE_IMPORT_ORDER,
     DEFAULT_ADDON_DIR,
     MANDATORY_BOOTSTRAP_KEYS,
@@ -91,6 +92,7 @@ class SetupGuideGenerator:
         sections = [
             self._header(),
             self._quick_reference(),
+            self._quick_path(),
             self._prerequisites(),
             self._phase_project_setup(),
             self._phase_terrain_creation(),
@@ -159,6 +161,29 @@ class SetupGuideGenerator:
 | **Ambient Sound** | {ambient_prefab} |
 | **Estimated Setup Time** | ~20-30 minutes |"""
 
+    def _quick_path(self) -> str:
+        """Compact 8-step summary for experienced World Editor creators."""
+        dims = self.hm.get("dimensions", "")
+        parts = dims.split("x")
+        face_x = int(parts[0]) - 1 if parts and parts[0].isdigit() else "?"
+        cell_size = self.hm.get("grid_cell_size_m", 2.0)
+        height_scale = self.elev.get("dialog_height_scale", 0.03125)
+
+        return f"""## Quick Path (experienced users)
+
+> Skip straight to the number you need. Every value is pre-computed — nothing to calculate.
+
+1. **Copy** `{self.map_name}/` from the ZIP → `{DEFAULT_ADDON_DIR}\\`
+2. **Add project** in Workbench launcher → `{self.map_name}\\addon.gproj` → open `{self.map_name}.ent`
+3. **Create terrain** (right-click **Terrain** in hierarchy): grid `{face_x}×{face_x}`, cell `{cell_size}m`, height scale `{height_scale:.6g}` (default)
+4. **Import heightmap**: `Sourcefiles/heightmap.asc` — ✓ Invert Z axis, ✗ Resample heights → **Generate normal map** → **File > Save World** → reopen
+5. **Paint surfaces** (Terrain Tool → Paint tab): for each surface, right-click the `.emat` in the Resource Browser → **Fill surface layer** → right-click surface in panel → **Priority Surface Mask Import** → pick `Sourcefiles/surface_<name>.png`
+6. **Import satellite**: `Sourcefiles/satellite_map.png` — turn **off** Linear Color Space → **File > Save World** → reopen
+7. **Roads**: each `SplineShapeEntity` in the `roads` layer needs a **RoadGeneratorEntity** child; prefab names are in `Reference/roads_reference.csv`
+8. **Play** (F5) — spawn in Game Master mode to verify terrain, surfaces, and roads
+
+> Full step-by-step instructions with screenshots references start at **Phase 1** below."""
+
     def _prerequisites(self) -> str:
         return """## Prerequisites
 
@@ -223,9 +248,9 @@ You should see this structure inside:
 
 ### Step 2.1: Create New Terrain
 
-1. In the World Editor, select the **GenericTerrainEntity** in the hierarchy
-   (it should already be at position 0, 0, 0)
-2. Right-click the terrain entity > **Create new terrain...**
+1. In the World Editor, select the **Terrain** entity in the hierarchy
+   (its class type is `GenericTerrainEntity` — should be at position 0, 0, 0)
+2. Right-click the **Terrain** entity > **Create new terrain...**
 3. In the **New Terrain** dialog, enter these **exact** values:
 
 | Parameter | Value |
@@ -372,11 +397,13 @@ We'll import pre-generated surface masks to paint it with realistic materials.
 
 The default surface covers 100% of your terrain as the base layer.
 
-1. The first surface in the Paint panel is the default — it cannot be removed
-2. Right-click it > **Change layer's material...**
-3. In the Resource Browser, navigate to:
-   `{self.default_material}`
-4. Select it and click **OK**
+> ⚠️ **Do NOT use "Change layer's material..." on the first (default) layer.** That action
+> has triggered Workbench NVTT crashes on multiple reports. Use **Fill surface layer** instead:
+
+1. In the **Resource Browser**, navigate to `ArmaReforger/Terrains/Common/Surfaces/`
+2. Find **`{self.default_material.split("/")[-1]}`** (search by name if needed)
+3. Right-click it → **Fill surface layer**
+4. The default layer now shows the correct material — no dialog interaction needed
 
 > **Why {self.recommended_default}?** Your terrain is {self.coverage_per_surface.get(self.recommended_default, {}).get('percentage', 'N/A')}% {self.recommended_default},
 > making it the optimal default surface."""]
@@ -406,11 +433,17 @@ The default surface covers 100% of your terrain as the base layer.
 
         for i, surface_name in enumerate(present_ordered, 1):
             material = SURFACE_MATERIAL_MAP.get(surface_name, "Unknown.emat")
+            material_short = material.split("/")[-1]
+            verified = surface_name in SURFACE_MATERIAL_VERIFIED
             alternatives = SURFACE_MATERIAL_ALTERNATIVES.get(surface_name, [])
             alt_str = f" (alternatives: {', '.join(a.split('/')[-1] for a in alternatives)})" if alternatives else ""
 
-            lines.append(f"""
-{i}. Drag **`{material}`** from the Resource Browser into the surface layer list{alt_str}""")
+            if verified:
+                lines.append(f"""
+{i}. Drag **`{material_short}`** from the Resource Browser into the surface layer list{alt_str}""")
+            else:
+                lines.append(f"""
+{i}. In the Resource Browser navigate to `ArmaReforger/Terrains/Common/Surfaces/` and find the **{surface_name.replace('_', ' ')}** material (suggested name: `{material_short}` — verify it exists in your install){alt_str}. Drag it into the surface layer list.""")
 
         # Step 3.4: Import masks
         lines.append("""
@@ -882,6 +915,28 @@ Countries:              {', '.join(self.input_data.get('countries', ['Unknown'])
 
     def _appendix_troubleshooting(self) -> str:
         return """## Appendix C: Troubleshooting
+
+### World crashes when reopening after surface painting (issue #151)
+Symptom: surface painting works normally, but the next time you double-click the world
+`.ent` to reopen, Workbench crashes.
+
+Most likely cause: one or more materials in the Paint panel do not exist in your
+Resource Browser. Workbench silently saves a reference to the missing path; on reload
+NVTT fails to resolve it and crashes. This can happen if you followed an older guide
+that mentioned `ForestFloor_01.emat` or `Mud_01.emat` — those names do not exist in all
+Reforger installs.
+
+Fix:
+1. Open the project in Workbench (if it won't open, create a new empty world first to get
+   access to the Resource Browser)
+2. In the Resource Browser, confirm every material listed in your Paint panel exists under
+   `ArmaReforger/Terrains/Common/Surfaces/`
+3. Remove any unrecognised materials from the Paint panel before saving
+4. Use **Fill surface layer** (right-click `.emat` in Resource Browser) rather than
+   "Change layer's material..." on the default layer — the latter has been a crash trigger
+
+If the world will not open at all, restore from a backup before the surface painting
+step, or regenerate the map and follow the updated Step 3.2 instructions.
 
 ### Workbench crashes the instant you brush any surface paint (issue #111)
 Look in `error.log` for lines like:

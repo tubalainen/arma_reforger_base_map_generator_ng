@@ -23,6 +23,7 @@ import math
 import secrets
 import shutil
 import threading
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -1355,11 +1356,17 @@ async def run_generation(job: MapGenerationJob):
 
         job.progress = 95
         job.add_log("Creating ZIP archive...")
-        zip_path = OUTPUT_DIR / f"map_{job.job_id}"
-        shutil.make_archive(str(zip_path), "zip", output_dir)
-
-        # Verify ZIP file exists before marking as completed
         zip_file = OUTPUT_DIR / f"map_{job.job_id}.zip"
+
+        # Write ZIP with {sanitized_name}/ as top-level folder so the user
+        # can copy that named folder straight into their addons directory,
+        # matching the SETUP_GUIDE "Copy the {map_name}/ folder" instruction.
+        with zipfile.ZipFile(str(zip_file), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for fpath in output_dir.rglob("*"):
+                if fpath.is_file():
+                    arcname = sanitized_name + "/" + str(fpath.relative_to(output_dir))
+                    zf.write(str(fpath), arcname)
+
         if not zip_file.exists():
             raise RuntimeError("ZIP file was not created successfully")
 
