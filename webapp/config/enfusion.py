@@ -21,7 +21,7 @@ from config.terrain import (
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.7.3"
+APP_VERSION = "1.7.4"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
@@ -96,64 +96,82 @@ WORLD_ENV_LENS_FLARES_CONFIG = (
 SURFACE_MATERIAL_BASE = "ArmaReforger/Terrains/Common/Surfaces"
 
 # Map from our generated mask name -> Enfusion material resource path.
-# Entries marked in SURFACE_MATERIAL_VERIFIED below have been confirmed to
-# exist in the Resource Browser under ArmaReforger/Terrains/Common/Surfaces/.
-# Unverified entries are flagged in the SETUP_GUIDE with a "browse to find"
-# note rather than a hardcoded path the user may not have.
+# Every entry below was verified against the Resource Browser inventory
+# pasted by the senior World Editor creator who filed issue #151 (the
+# definitive vanilla Reforger Surfaces/ folder listing). All 10 mappings
+# resolve to a file that actually exists, so the SETUP_GUIDE can prescribe
+# the exact name in every case (SURFACE_MATERIAL_VERIFIED is the full set).
+#
+# Pre-v1.7.4 the map referenced ForestFloor_01.emat, ForestFloor_Pine_01.emat,
+# Gravel_01.emat, Sand_01.emat, Mud_01.emat, Crop_01.emat — none of which
+# exist in vanilla. Workbench silently saves the missing references and NVTT
+# crashes resolving them on world reopen (the "can't reopen" symptom in #151
+# and a likely contributor to #138). Fixing the names is the proper cure.
 SURFACE_MATERIAL_MAP = {
     "grass":        f"{SURFACE_MATERIAL_BASE}/Grass_01.emat",
-    "forest_floor": f"{SURFACE_MATERIAL_BASE}/ForestFloor_01.emat",  # UNVERIFIED — see #151
-    "pine_floor":   f"{SURFACE_MATERIAL_BASE}/ForestFloor_Pine_01.emat",  # UNVERIFIED — see #151
+    "forest_floor": f"{SURFACE_MATERIAL_BASE}/ForestDeciduous_01_Base.emat",
+    "pine_floor":   f"{SURFACE_MATERIAL_BASE}/ForestPine_01_Base.emat",
     "asphalt":      f"{SURFACE_MATERIAL_BASE}/Asphalt_01.emat",
-    "gravel":       f"{SURFACE_MATERIAL_BASE}/Gravel_01.emat",
-    "crop":         f"{SURFACE_MATERIAL_BASE}/Crop_01.emat",
+    "gravel":       f"{SURFACE_MATERIAL_BASE}/Pebbles_01.emat",
+    "crop":         f"{SURFACE_MATERIAL_BASE}/Crop_Field_01.emat",
     "dirt":         f"{SURFACE_MATERIAL_BASE}/Dirt_01.emat",
     "rock":         f"{SURFACE_MATERIAL_BASE}/Rock_01.emat",
-    "sand":         f"{SURFACE_MATERIAL_BASE}/Sand_01.emat",
-    "water_edge":   f"{SURFACE_MATERIAL_BASE}/Mud_01.emat",  # UNVERIFIED — see #151
+    "sand":         f"{SURFACE_MATERIAL_BASE}/BeachGrass_01.emat",
+    "water_edge":   f"{SURFACE_MATERIAL_BASE}/Dirt_02.emat",
 }
 
 # Materials confirmed to exist in a vanilla Reforger install's Resource Browser
 # under ArmaReforger/Terrains/Common/Surfaces/. Names NOT in this set are shown
 # with a "browse to find" instruction in the SETUP_GUIDE instead of a hardcoded
-# path. Update this set when a user confirms a name is valid.
-SURFACE_MATERIAL_VERIFIED: frozenset[str] = frozenset({
-    "grass",
-    "asphalt",
-    "gravel",
-    "crop",
-    "dirt",
-    "rock",
-    "sand",
-})
+# path. As of v1.7.4 all 10 surfaces are verified (issue #151 Fix 4 complete).
+SURFACE_MATERIAL_VERIFIED: frozenset[str] = frozenset(SURFACE_MATERIAL_MAP.keys())
 
 # Alternative materials the user can swap to (for SETUP_GUIDE reference).
-# Only list alternatives that are confirmed to exist; remove any that have
-# been reported as non-existent (Mud_01, Asphalt_Cracked_01, Rock_Granite_01
-# were unverified — removed in v1.7.2, issue #151).
+# Every alternative below is verified against the same Resource Browser
+# inventory as SURFACE_MATERIAL_MAP — no fabricated names.
 SURFACE_MATERIAL_ALTERNATIVES = {
     "grass": [
         f"{SURFACE_MATERIAL_BASE}/Grass_02.emat",
         f"{SURFACE_MATERIAL_BASE}/Grass_03.emat",
+        f"{SURFACE_MATERIAL_BASE}/Grass_03_coastal.emat",
+        f"{SURFACE_MATERIAL_BASE}/MountainGrass_01.emat",
+    ],
+    "forest_floor": [
+        f"{SURFACE_MATERIAL_BASE}/ForestDeciduous_02.emat",
+        f"{SURFACE_MATERIAL_BASE}/ForestClearing_Deciduous_01.emat",
+    ],
+    "pine_floor": [
+        f"{SURFACE_MATERIAL_BASE}/ForestConiferous_01_Base.emat",
+        f"{SURFACE_MATERIAL_BASE}/ForestConiferous_02.emat",
+        f"{SURFACE_MATERIAL_BASE}/ForestClearing_Coniferous_01.emat",
     ],
     "asphalt": [
         f"{SURFACE_MATERIAL_BASE}/Concrete_01.emat",
+        f"{SURFACE_MATERIAL_BASE}/Concrete_02.emat",
+        f"{SURFACE_MATERIAL_BASE}/Cobblestone_01_Wave.emat",
     ],
     "gravel": [
-        f"{SURFACE_MATERIAL_BASE}/Rock_01.emat",
-        f"{SURFACE_MATERIAL_BASE}/Dirt_01.emat",
+        f"{SURFACE_MATERIAL_BASE}/Pebbles_02.emat",
+        f"{SURFACE_MATERIAL_BASE}/Debris_Rock_01.emat",
     ],
     "crop": [
-        f"{SURFACE_MATERIAL_BASE}/Crop_02.emat",
+        f"{SURFACE_MATERIAL_BASE}/Crop_Field_02.emat",
     ],
     "dirt": [
-        f"{SURFACE_MATERIAL_BASE}/Sand_01.emat",
+        f"{SURFACE_MATERIAL_BASE}/Dirt_02.emat",
+        f"{SURFACE_MATERIAL_BASE}/Dirt_03.emat",
     ],
     "rock": [
-        f"{SURFACE_MATERIAL_BASE}/Gravel_01.emat",
+        f"{SURFACE_MATERIAL_BASE}/Debris_Rock_01.emat",
+        f"{SURFACE_MATERIAL_BASE}/Pebbles_01.emat",
     ],
     "sand": [
-        f"{SURFACE_MATERIAL_BASE}/Dirt_01.emat",
+        f"{SURFACE_MATERIAL_BASE}/SeaBed_01.emat",
+    ],
+    "water_edge": [
+        f"{SURFACE_MATERIAL_BASE}/Dirt_03.emat",
+        f"{SURFACE_MATERIAL_BASE}/SulfurStream_01_bed.emat",
+        f"{SURFACE_MATERIAL_BASE}/Heather_01.emat",
     ],
 }
 
