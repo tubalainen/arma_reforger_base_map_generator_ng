@@ -91,6 +91,7 @@ class SetupGuideGenerator:
         """
         sections = [
             self._header(),
+            self._for_experts(),
             self._quick_reference(),
             self._quick_path(),
             self._prerequisites(),
@@ -125,6 +126,167 @@ class SetupGuideGenerator:
 
     def _header(self) -> str:
         return f"# {self.map_name} — Enfusion Workbench Setup Guide"
+
+    def _for_experts(self) -> str:
+        """Expert section (issue #156).
+
+        Goal: a Reforger-map veteran can take this addon all the way through
+        Workbench without reading the step-by-step phases below. Pure
+        information — no how-to. Values, paths, dialog flags, gotchas.
+        """
+        dims = self.hm.get("dimensions", "unknown")
+        parts = dims.split("x")
+        vertex_x = int(parts[0]) if parts and parts[0].isdigit() else 0
+        face_x = vertex_x - 1 if vertex_x > 0 else "?"
+        cell_size = self.hm.get("grid_cell_size_m", 2.0)
+        terrain_size = self.hm.get("terrain_size_m", "unknown")
+        height_scale = self.elev.get("dialog_height_scale", 0.03125)
+        min_elev = self.elev.get("min_elevation_m", 0.0)
+        max_elev = self.elev.get("max_elevation_m", 0.0)
+        is_default_scale = abs(height_scale - 0.03125) < 1e-9
+
+        country_codes = self.input_data.get("countries", []) or []
+        countries = ", ".join(country_codes) or "Unknown"
+        crs = self.input_data.get("crs", "Unknown")
+        ambient_prefab = resolve_ambient_prefab(country_codes).split("/")[-1]
+
+        road_count = self.roads.get("total_segments", 0)
+        by_surface = self.roads.get("by_surface", {})
+        road_surface_str = (
+            ", ".join(f"{k}: {v}" for k, v in by_surface.items()) if by_surface else "none"
+        )
+
+        lakes = self.features.get("lakes", 0)
+        rivers = self.features.get("rivers", 0)
+        forests = self.features.get("forest_areas", 0)
+        buildings = self.features.get("buildings", 0)
+
+        block_violations = self.surf.get("block_saturation", {}).get("violations", 0)
+        total_blocks = self.surf.get("block_saturation", {}).get("total_blocks", 0)
+
+        # Material table — only surfaces actually generated for this area.
+        present_ordered = ["grass"] + [
+            s for s in SURFACE_IMPORT_ORDER if s in self.surfaces_present and s != "grass"
+        ]
+        mat_rows = []
+        for surface_name in present_ordered:
+            material = SURFACE_MATERIAL_MAP.get(surface_name, "Unknown.emat")
+            material_short = material.split("/")[-1]
+            pct = self.coverage_per_surface.get(surface_name, {}).get("percentage", "?")
+            mark = " *(default — Fill surface layer)*" if surface_name == self.recommended_default else ""
+            mat_rows.append(
+                f"| `Sourcefiles/surface_{surface_name}.png` | `{material_short}` | {pct}%{mark} |"
+            )
+        mat_table = "\n".join(mat_rows)
+
+        sat_line = (
+            f"`Sourcefiles/satellite_map.png` — {self.satellite.get('source', 'Sentinel-2')}"
+            if self.satellite.get("file")
+            else "*not generated for this area*"
+        )
+
+        height_scale_note = (
+            "engine default — leave as-is"
+            if is_default_scale
+            else "non-default — this map's elevation span needs the larger value"
+        )
+
+        return f"""## For Experts
+
+Everything you need to take this addon through Workbench without reading the
+phases below. All numeric values are pre-computed for **this** generation.
+
+### Map facts
+
+| Property | Value |
+|----------|-------|
+| Project name / addon dir | `{self.map_name}` |
+| Region | {countries} ({crs}) |
+| Terrain grid size (faces) | **{face_x} × {face_x}** |
+| Grid cell size | **{cell_size} m** |
+| Terrain size | {terrain_size} |
+| Heightmap dimensions | {dims} px (faces+1, 16-bit) |
+| Heightmap units | **absolute metres above sea level** (sea = 0) |
+| Min / max elevation | **{min_elev:.1f} m** / **{max_elev:.1f} m** |
+| Default surface | **{self.recommended_default}** → `{self.default_material.split('/')[-1]}` |
+| Surface masks present | {len(present_ordered)} (`{', '.join(present_ordered)}`) |
+| Block saturation violations | {block_violations} / {total_blocks} blocks |
+| Road segments | {road_count} ({road_surface_str}) |
+| Forests / lakes / rivers / buildings | {forests} / {lakes} / {rivers} / {buildings} |
+| Bootstrap entities | auto-wired in `managers.layer` ({len(MANDATORY_BOOTSTRAP_KEYS)} + ambient `{ambient_prefab}`) |
+
+### Dialog values that aren't the default
+
+**New Terrain** (right-click `Terrain` entity → *Create new terrain…*)
+- Terrain grid size X = Z: **{face_x}**
+- Grid cell size: **{cell_size} m**
+- Height scale: **{height_scale:.6g}** — {height_scale_note}
+- Everything else: defaults
+
+**Import Height Map** (Terrain Tool → Manage → *Import Height Map…*)
+- File: `Sourcefiles/heightmap.asc`
+- **Invert in Z axis: CHECK** (rows run N→S in source; importer reads S→N)
+- **Resample heights: UNCHECK** (the .asc carries absolute metres — do not rescale)
+- *Lowest / Highest source height* fields are greyed out while Resample is off; ignore them
+- Then: **Generate normal map** (accept defaults)
+
+**Import Satellite Map** (Terrain Tool → Manage → *Import Satellite Map…*)
+- File: {sat_line}
+- **Linear Color Space: OFF** (PNG is already sRGB)
+
+### Mandatory `File > Save World` + reopen
+
+After **both** the heightmap import *and* the satellite map import:
+1. `File > Save World` (Ctrl+S) — **not** the Terrain Tool's Save button (that only writes `.terr`)
+2. Close and reopen the world (double-click the `.ent` again)
+
+Skipping either has been the documented root cause of NVTT crashes on reopen / first paint stroke (issues #120, #122, Atlas 2 p.8).
+
+### Surface mask → material mapping
+
+| Source mask | World Editor material | Coverage |
+|-------------|-----------------------|----------|
+{mat_table}
+
+Import order is in `surface_assignments.json` (`surface_import_order`). Per Atlas 2, dirt-type surfaces are imported **before** grass-type surfaces. Apply masks via right-click on the material in the Paint panel → *Priority Surface Mask Import…*. For the default layer use *Fill surface layer* on the `.emat` in the Resource Browser — never *Change layer's material…* on the default layer (NVTT crash trigger, issue #151).
+
+### Roads
+
+- One `SplineShapeEntity` per OSM segment in `Worlds/{self.map_name}_Layers/roads.layer`.
+- Each spline header carries `// prefab: <name> | fq: {{GUID}}path.et` — the `fq:` token is paste-ready into a child `RoadGeneratorEntity`'s **Prefab** field.
+- No `RoadGeneratorEntity` is pre-attached (v1.1.0 tried; the nested-prefab syntax hung world load at 4% → reverted in v1.2.3). Attach it manually per spline, or script in bulk from `Reference/roads_reference.csv`.
+- Optional: enable **Adjust Height Map** on the generator to carve roads into the terrain.
+
+### Vegetation, water, buildings
+
+- `vegetation.layer` — one closed spline per forest area (`Forest_<species>_<quadrant>_<NNN>`). Drag a `Prefabs/WEGenerators/Forest/FG_*.et` onto each, or populate `webapp/config/forests.py::KNOWN_FOREST_PREFABS` for auto-attach on next generation.
+- `water.layer` — closed splines for lakes (`Lake_<name|quadrant>_NNN`), open splines for rivers. Drag a `LG_*.et` (lakes) / `R_RiverMedium_01.et` (rivers) per spline, or populate `webapp/config/lakes.py::KNOWN_LAKE_PREFABS`.
+- `buildings.layer` — every OSM building footprint is **already placed** as a stock Reforger prefab (`House_Village_E_1I01`, `Church_01`, etc.). Buildings whose centroid landed on an asphalt road have been dropped (L12 de-conflict). Override per-category in `webapp/config/buildings.py::KNOWN_BUILDING_PREFABS`.
+
+### Files you'll actually touch
+
+| File | Purpose |
+|------|---------|
+| `addon.gproj` | Add via Workbench → *Add Existing Project* |
+| `Worlds/{self.map_name}.ent` | Open this world |
+| `Sourcefiles/heightmap.asc` | Heightmap import (16-bit `.png` alternative present) |
+| `Sourcefiles/satellite_map.png` | Sat map import |
+| `Sourcefiles/surface_*.png` | Per-material masks |
+| `Sourcefiles/heightmap_preview.png` | Visual sanity-check before/after import |
+| `surface_assignments.json` | Mask → material map + Atlas 2 import order |
+| `Reference/roads_reference.csv` | Per-segment road prefab list |
+| `Reference/metadata.json` | Full per-generation data-source record |
+
+### Gotchas worth re-reading
+
+- **Do not put the project inside OneDrive** — it fails to load.
+- **Do not use *Change layer's material…* on the default surface layer** — NVTT crash on save/reopen (issue #151). Use *Fill surface layer* on the `.emat` in the Resource Browser.
+- **Do not enable *Resample heights*** on `.asc` import — the default Lowest/Highest fields rescale the map to a 0–1 m strip and have crashed Workbench on reopen (issue #120).
+- **`File > Save World`, not the Terrain Tool's Save button** — the latter only writes `.terr` and leaves the world unpersisted.
+- **Block saturation**: if any block exceeds 5 surfaces, *Info & Diags* → Ctrl+X in the viewport shows red 3×3 indicators. Use *Merge* to reduce. Current violations: **{block_violations} / {total_blocks}**.
+- **Sky / atmosphere** comes from the `GenericWorldEntity world {{ … }}` block written at the top of `default.layer` (v1.5.7+). Ocean materials are intentionally not shipped — drag one in if your map has coastline (Atlas 2 p.5).
+
+If anything in this section is unclear, the step-by-step phases below have the longer form with screenshots references. Otherwise, you're done with this section — open the project and go."""
 
     def _quick_reference(self) -> str:
         terrain_size = self.hm.get("terrain_size_m", "unknown")

@@ -447,3 +447,76 @@ class TestTroubleshootingAppendix:
         guide must not perpetuate the old 'Workbench rebuilds it' story."""
         guide = self._gen()._appendix_troubleshooting()
         assert "Workbench rebuilds it on first" not in guide
+
+
+class TestForExpertsSection:
+    """Issue #156 — the SETUP_GUIDE must open with an information-only
+    section for experts so they can take the addon through Workbench
+    without reading the step-by-step phases. The full step-by-step guide
+    must still be present below."""
+
+    def _gen(self, **overrides):
+        from services.setup_guide_generator import SetupGuideGenerator
+        meta = _metadata(
+            surfaces_present=["grass", "asphalt", "rock"],
+            coverage_per_surface={
+                "grass": {"percentage": 70.0},
+                "asphalt": {"percentage": 20.0},
+                "rock": {"percentage": 10.0},
+            },
+            road_count=42,
+        )
+        meta["input"]["countries"] = ["SE"]
+        meta["input"]["crs"] = "EPSG:3006"
+        meta["features"] = {"lakes": 3, "rivers": 1, "forest_areas": 7, "buildings": 91}
+        meta["satellite"] = {"file": "satellite_map.png", "source": "Sentinel-2"}
+        for k, v in overrides.items():
+            meta[k] = v
+        return SetupGuideGenerator("TestMap", meta)
+
+    def test_for_experts_section_is_first_after_header(self, tmp_path):
+        body = self._gen().generate(tmp_path).read_text(encoding="utf-8")
+        first_h2 = body.index("\n## ")
+        # The very first H2 must be the For Experts section.
+        assert body[first_h2 : first_h2 + 20].startswith("\n## For Experts"), (
+            "For Experts must be the first ## section after the title (issue #156)"
+        )
+
+    def test_for_experts_precedes_step_by_step(self, tmp_path):
+        body = self._gen().generate(tmp_path).read_text(encoding="utf-8")
+        assert body.index("## For Experts") < body.index("## Phase 1"), (
+            "For Experts must appear before the step-by-step phases (issue #156)"
+        )
+
+    def test_step_by_step_guide_is_preserved(self, tmp_path):
+        """The issue text is explicit: 'Keep the step by step guide as is.'
+        All eight phases must still be present in the rendered output."""
+        body = self._gen().generate(tmp_path).read_text(encoding="utf-8")
+        for phase in (
+            "## Phase 1:",
+            "## Phase 2:",
+            "## Phase 3:",
+            "## Phase 4:",
+            "## Phase 5:",
+            "## Phase 6:",
+            "## Phase 7:",
+            "## Phase 8:",
+        ):
+            assert phase in body, f"step-by-step phase missing: {phase}"
+
+    def test_for_experts_carries_facts_not_steps(self):
+        """Experts get values and gotchas — not numbered steps."""
+        section = self._gen()._for_experts()
+        # Hard facts the section must surface.
+        assert "Terrain grid size" in section
+        assert "Grid cell size" in section
+        assert "Height scale" in section
+        assert "Invert in Z axis" in section
+        assert "Resample heights" in section
+        assert "Linear Color Space" in section
+        assert "surface_assignments.json" in section
+        assert "RoadGeneratorEntity" in section
+        # Must NOT regress into step-by-step prose.
+        assert "Step 1." not in section
+        assert "Step 2." not in section
+        assert "click **Create**" not in section.lower()
