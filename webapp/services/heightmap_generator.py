@@ -28,6 +28,7 @@ from scipy.interpolate import NearestNDInterpolator
 from services.utils.rasterize import rasterize_features_to_mask  # noqa: F401
 from services.utils.parallel import parallel_gaussian_filter, parallel_zoom
 from config.enfusion import snap_to_tile_multiple, pick_clean_height_scale
+from config.lakes import LAKE_MAX_DEPTH_M, LAKE_SHORE_SLOPE_M_PER_M
 
 logger = logging.getLogger(__name__)
 
@@ -734,17 +735,28 @@ def generate_heightmap(
             # Carve each type with its own depth ceiling. Order matters only
             # where masks overlap (a river crossing a lake gets overwritten
             # by the lake pass — desirable).
-            for mask, max_depth, label in (
-                (river_mask, 2.0, "river/stream"),
-                (wetland_mask, 1.0, "wetland"),
-                (sea_mask, 30.0, "sea"),
-                (lake_mask, 8.0, "lake/pond/reservoir"),
+            # Shore slope, not max depth, is what decides how deep a small
+            # water body actually gets: depth ramps linearly from the shore, so
+            # a lake only reaches max_depth if it is max_depth/slope metres from
+            # shore to centre. Lakes were carved at 0.3 m/m before #160, which
+            # left typical inland lakes far shallower than their 8 m ceiling.
+            for mask, max_depth, slope, label in (
+                (river_mask, 2.0, 0.3, "river/stream"),
+                (wetland_mask, 1.0, 0.3, "wetland"),
+                (sea_mask, 30.0, 0.3, "sea"),
+                (
+                    lake_mask,
+                    LAKE_MAX_DEPTH_M,
+                    LAKE_SHORE_SLOPE_M_PER_M,
+                    "lake/pond/reservoir",
+                ),
             ):
                 if mask.sum() == 0:
                     continue
                 logger.info(
                     f"Carving bathymetry for {label} mask: "
-                    f"{int(mask.sum())} px, max_depth={max_depth} m"
+                    f"{int(mask.sum())} px, max_depth={max_depth} m, "
+                    f"shore_slope={slope} m/m"
                 )
                 elevation = flatten_water_in_heightmap(
                     elevation,
@@ -752,6 +764,7 @@ def generate_heightmap(
                     transition_px=3,
                     pixel_size_m=target_resolution_m,
                     max_depth_m=max_depth,
+                    shore_slope_m_per_m=slope,
                 )
 
     # 5. Light smoothing pass

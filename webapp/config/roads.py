@@ -260,3 +260,57 @@ def validate_road_prefab(name: str) -> str:
             return candidate
 
     return "RG_Road_Asphalt_E_01_Narrow"
+
+
+# ---------------------------------------------------------------------------
+# Road topology / spline geometry (issue #161)
+# ---------------------------------------------------------------------------
+# OSM splits a road into a new way whenever any tag changes — a speed limit, a
+# bridge, a name — so a single real road arrives as many fragments. Emitting one
+# spline per way produced splines that "end in the middle" with a visible seam
+# between them. These constants drive the stitch → rank → snap → densify
+# pipeline in services/road_topology.py.
+
+# Roads are merged through a shared endpoint only when both fragments agree on
+# every property in this tuple, so a merged spline still maps to one prefab and
+# one width.
+ROAD_MERGE_KEY_PROPS: tuple[str, ...] = (
+    "highway", "surface", "bridge", "tunnel", "ref", "name",
+)
+
+# Importance ranking — lower wins. A "huvudled" (main road) keeps its geometry
+# and side roads are snapped onto it, never the other way round.
+ROAD_CLASS_RANK: dict[str, int] = {
+    "motorway": 0, "trunk": 0,
+    "motorway_link": 1, "trunk_link": 1,
+    "primary": 2, "primary_link": 3,
+    "secondary": 4, "secondary_link": 5,
+    "tertiary": 6, "tertiary_link": 7,
+    "unclassified": 8, "residential": 8,
+    "living_street": 9, "service": 10,
+    "track": 11,
+    "path": 12, "footway": 12, "cycleway": 12, "bridleway": 12,
+}
+ROAD_RANK_DEFAULT = 8
+
+# A road end this close to a more important road is treated as a junction and
+# snapped onto that road's exact vertex, so the two splines share a coordinate
+# and leave no seam. Wide enough to cover OSM geometry noise, narrow enough not
+# to grab a parallel road across a verge.
+ROAD_JUNCTION_SNAP_M = 12.0
+
+# Target spacing between spline control points *before* elevation sampling.
+# Enfusion interpolates straight between control points, so a sparse spline
+# cuts into rising ground and flies over falling ground (#161). 8 m tracks
+# terrain closely without exploding the point budget.
+ROAD_POINT_SPACING_M = 8.0
+
+# Never densify a single road beyond this many points, whatever its length.
+ROAD_MAX_DENSIFIED_POINTS = 5000
+
+# Simplification tolerances applied after elevation sampling. A point is
+# dropped only when BOTH the horizontal deviation and the vertical deviation
+# from the chord stay inside these bounds — the vertical term is what keeps the
+# spline on the ground.
+ROAD_HORIZONTAL_TOLERANCE_M = 1.0
+ROAD_VERTICAL_TOLERANCE_M = 0.25

@@ -20,6 +20,7 @@ from config import (
     validate_road_prefab,
 )
 from config.roads import ROAD_PREFAB_BY_CLASS
+from services.road_topology import build_road_network
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,19 @@ def process_roads(
     if job:
         job.add_log(f"Processing {len(road_features['features'])} road segments...")
 
+    # #161 — stitch OSM way fragments into junction-to-junction roads, snap
+    # side-road ends onto the main road they join, and densify so the spline
+    # has enough control points to follow the terrain. Runs before projection
+    # so every point gets a real DEM elevation downstream.
+    source_features, topo_stats = build_road_network(road_features["features"])
+    if job and topo_stats.get("merged_roads"):
+        job.add_log(
+            f"Road topology: {topo_stats['input_ways']} OSM ways → "
+            f"{topo_stats['merged_roads']} continuous roads, "
+            f"{topo_stats['snapped_ends']} junction end(s) snapped, "
+            f"{topo_stats['points_before']} → {topo_stats['points_after']} points"
+        )
+
     processed = []
     stats = {
         "total": 0,
@@ -185,7 +199,7 @@ def process_roads(
         "by_type": {},
     }
 
-    for feature in road_features["features"]:
+    for feature in source_features:
         props = feature.get("properties", {})
         geom = feature.get("geometry", {})
 
