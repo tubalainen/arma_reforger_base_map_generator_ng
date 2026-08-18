@@ -176,11 +176,11 @@ def stitch_ways(features: list[dict]) -> list[dict]:
             "properties": props,
         })
 
-    if len(merged) != len(lines):
-        logger.info(
-            f"Road stitching: {len(lines)} OSM ways -> {len(merged)} continuous "
-            f"roads (#161)"
-        )
+    junction_nodes = sum(1 for deg in end_degree.values() if deg >= 3)
+    logger.info(
+        f"Road stitching: {len(lines)} OSM way(s) -> {len(merged)} continuous "
+        f"road(s); {junction_nodes} junction node(s) left intact"
+    )
     return merged + passthrough
 
 
@@ -218,6 +218,9 @@ def snap_junctions(
         and len(((f.get("geometry") or {}).get("coordinates") or [])) >= 2
     ]
     if len(lines) < 2:
+        logger.info(
+            "Road junctions: %d road(s) — nothing to snap against", len(lines)
+        )
         return 0
 
     ranks = rank_roads(lines)
@@ -265,9 +268,11 @@ def snap_junctions(
             coords[end_idx] = [float(best[1][0]), float(best[1][1])]
             snapped += 1
 
-    if snapped:
-        logger.info(f"Road junctions: snapped {snapped} road end(s) onto a "
-                    f"more important road (#161)")
+    logger.info(
+        f"Road junctions: checked {len(lines) * 2} road end(s) against a "
+        f"{tolerance_m:.0f} m tolerance — snapped {snapped} onto a more "
+        f"important road"
+    )
     return snapped
 
 
@@ -350,6 +355,11 @@ def build_road_network(
         stats["points_after"] = sum(
             len((f.get("geometry") or {}).get("coordinates") or [])
             for f in merged
+        )
+        logger.info(
+            f"Road densification: {stats['points_before']} -> "
+            f"{stats['points_after']} control point(s) at {spacing_m:.0f} m "
+            f"spacing, so each one samples a real terrain height"
         )
         return merged, stats
     except Exception as exc:  # pragma: no cover - defensive

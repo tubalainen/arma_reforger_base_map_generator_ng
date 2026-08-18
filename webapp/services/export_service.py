@@ -190,12 +190,15 @@ def organize_export_structure(output_dir: Path, map_name: str, job=None):
     ]
     reference_patterns.extend(osm_files)
 
+    moved: dict[str, int] = {}
+
     def _safe_move(src: Path, dst_dir: Path):
         """Move file to directory if it exists, skip silently otherwise."""
         if src.exists() and src.is_file():
             dst = dst_dir / src.name
             if not dst.exists():  # Don't overwrite if already in place
                 shutil.move(str(src), str(dst))
+                moved[dst_dir.name] = moved.get(dst_dir.name, 0) + 1
                 logger.debug(f"Moved {src.name} -> {dst_dir.name}/")
 
     for pattern in sourcefiles_patterns:
@@ -203,6 +206,9 @@ def organize_export_structure(output_dir: Path, map_name: str, job=None):
 
     for pattern in reference_patterns:
         _safe_move(output_dir / pattern, reference_dir)
+
+    for folder, count in sorted(moved.items()):
+        logger.info(f"Export layout: moved {count} file(s) into {folder}/")
 
     # Remove old IMPORT_GUIDE.md if it exists (replaced by SETUP_GUIDE.md)
     old_guide = output_dir / "IMPORT_GUIDE.md"

@@ -429,7 +429,7 @@ def generate_surface_masks(
     forest_transition_px = max(3, int(20.0 / cell_size_m))  # ~20m forest edge transition
     sand_transition_px = max(2, int(10.0 / cell_size_m))    # ~10m shoreline transition
 
-    logger.debug(
+    logger.info(
         f"Resolution-scaled params: sigma={sigma:.1f}, "
         f"forest_edge={forest_transition_px}px"
     )
@@ -439,12 +439,12 @@ def generate_surface_masks(
     # =========================================================================
     if job:
         job.add_log("Computing slope and aspect from elevation...")
-    logger.debug("Computing slope mask from DEM...")
+    logger.info("Computing slope mask from DEM...")
     slope = generate_slope_mask(elevation, cell_size_m)
 
     # Get treeline for this country (latitude-interpolated if possible)
     treeline = _get_treeline_elevation(country_code, bounds)
-    logger.debug(f"Using treeline elevation: {treeline}m for country {country_code}")
+    logger.info(f"Using treeline elevation: {treeline}m for country {country_code}")
     if job:
         job.add_log(f"Using treeline elevation: {treeline}m for {country_code}")
 
@@ -466,11 +466,11 @@ def generate_surface_masks(
         job.progress = 62
 
     # Forest polygons (all types)
-    logger.debug("Rasterizing forest areas...")
+    logger.info("Rasterizing forest areas...")
     forest_binary = _rasterize_polygons(osm_data.get("forests"), bounds, w, h)
 
     # Coniferous forests (leaf_type=needleleaved)
-    logger.debug("Rasterizing coniferous forest areas...")
+    logger.info("Rasterizing coniferous forest areas...")
     coniferous_binary = _rasterize_polygons(
         osm_data.get("forests"), bounds, w, h,
         filter_tags={"leaf_type": ["needleleaved"]},
@@ -524,7 +524,7 @@ def generate_surface_masks(
     # dirt) classify each feature through `infer_road_surface()` and share
     # the same width function, so each OSM road ends up in exactly the mask
     # that matches its exported spline surface.
-    logger.debug("Rasterizing road network (per-feature widths)...")
+    logger.info("Rasterizing road network (per-feature widths)...")
     if job:
         job.progress = 64
 
@@ -609,7 +609,7 @@ def generate_surface_masks(
         job.add_log("Computing soft-edge surface transitions (parallel)...")
         job.progress = 68
 
-    logger.debug("Computing soft-edge masks (parallel)...")
+    logger.info("Computing soft-edge masks (parallel)...")
 
     # Precompute treeline mask (needed by rock and forest)
     treeline_mask = np.clip((elevation - treeline) / 200.0, 0.0, 1.0)
@@ -706,7 +706,7 @@ def generate_surface_masks(
         job.add_log("Normalizing surface masks (ensuring clean Enfusion import)...")
         job.progress = 70
 
-    logger.debug("Normalizing surface masks...")
+    logger.info("Normalizing surface masks...")
 
     # Zero all surface masks on water pixels — the water layer covers the
     # underwater terrain in-game, so what we paint there isn't visible.
@@ -859,10 +859,20 @@ def generate_surface_masks(
         # Grass is always saved (it's the complement/default surface).
         if name == "grass":
             _save_mask(name, array)
+            logger.info(
+                f"Wrote surface_{name}.png — {array.shape[1]}x{array.shape[0]} px, "
+                f"{float((array >= meaningful_intensity_threshold).mean()) * 100:.1f}% "
+                f"coverage (always written as the base surface)"
+            )
             continue
         meaningful_pixels = int((array >= meaningful_intensity_threshold).sum())
         if meaningful_pixels >= min_meaningful_pixels:
             _save_mask(name, array)
+            logger.info(
+                f"Wrote surface_{name}.png — {array.shape[1]}x{array.shape[0]} px, "
+                f"{meaningful_pixels} painted px "
+                f"({meaningful_pixels / total_pixels * 100:.1f}% coverage)"
+            )
         else:
             skipped_surfaces.append(name)
             logger.info(
@@ -1020,7 +1030,7 @@ def _get_treeline_elevation(country_code: str, bounds: tuple) -> int:
         # Interpolate: south has higher treeline, north has lower
         treeline = int(treeline_south + t * (treeline_north - treeline_south))
 
-        logger.debug(
+        logger.info(
             f"Treeline interpolation for {country_code}: "
             f"lat={center_lat:.1f} -> treeline={treeline}m "
             f"(range: {treeline_south}m @ {min_lat}N to {treeline_north}m @ {max_lat}N)"
