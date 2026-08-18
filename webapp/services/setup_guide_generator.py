@@ -285,6 +285,8 @@ Import order is in `surface_assignments.json` (`surface_import_order`). Per Atla
 - **`File > Save World`, not the Terrain Tool's Save button** — the latter only writes `.terr` and leaves the world unpersisted.
 - **Block saturation**: if any block exceeds 5 surfaces, *Info & Diags* → Ctrl+X in the viewport shows red 3×3 indicators. Use *Merge* to reduce. Current violations: **{block_violations} / {total_blocks}**.
 - **Sky / atmosphere** comes from the `GenericWorldEntity world {{ … }}` block written at the top of `default.layer` (v1.5.7+). Ocean materials are intentionally not shipped — drag one in if your map has coastline (Atlas 2 p.5).
+- **Do not run *World Editor Plugins → World Setup → Entities Setup* on this project** (new in Reforger 1.8). That plugin populates a *fresh* terrain with the basic world entities from `Configs/Workbench/WorldEditor/WorldSetupPlugin/1_BaseWorldSetup.conf`. This project already ships those entities in `default.layer` and `managers.layer`, so running it would duplicate them.
+- **Normal map now feeds Far Hide (1.8)** — its alpha channel carries the grass coverage mask, so a stale normal map breaks long-range concealment as well as lighting. Regenerate via *Terrain Tool → Generate normal map* after any change to terrain height.
 
 If anything in this section is unclear, the step-by-step phases below have the longer form with screenshots references. Otherwise, you're done with this section — open the project and go."""
 
@@ -349,7 +351,7 @@ If anything in this section is unclear, the step-by-step phases below have the l
     def _prerequisites(self) -> str:
         return """## Prerequisites
 
-- **Arma Reforger Tools** installed via Steam (free DLC) — tested with **1.7.0.41**
+- **Arma Reforger Tools** installed via Steam (free DLC) — tested with **1.8.0.10**
 - At least **8 GB RAM** recommended for terrain operations
 - **Do NOT** place the project folder inside a OneDrive directory — it will fail to load"""
 
@@ -478,6 +480,14 @@ valid surface normals to work with:
 > **Why this matters:** Atlas 2 lists this as a required post-import step, and a
 > missing/stale normal map is the documented cause of the "big square over part
 > of the terrain" artifact — regenerating the normal map fixes it.
+>
+> **New in Arma Reforger 1.8:** the normal map now also carries the **grass
+> coverage mask in its alpha channel**, which drives the new **Far Hide**
+> system (concealing distant characters lying in grass). The 1.8 changelog
+> states plainly that "terrain makers need to compile normal maps". On 1.8 a
+> missing or stale normal map therefore breaks long-range concealment across
+> the whole terrain, on top of the lighting artifact above. Do not skip this
+> step, and re-run it after any change that alters terrain height.
 
 ### Step 2.4: Save and Reopen
 
