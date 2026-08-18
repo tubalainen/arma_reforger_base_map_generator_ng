@@ -21,7 +21,7 @@ from config.terrain import (
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.7.5"
+APP_VERSION = "1.7.6"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
@@ -191,6 +191,7 @@ SURFACE_IMPORT_ORDER = [
 # ---------------------------------------------------------------------------
 
 WORLD_PREFABS = {
+    "world":            "Prefabs/World/DefaultWorld/GenericWorld_Default.et",
     "terrain":          "Prefabs/World/DefaultWorld/GenericTerrain_Default.et",
     "lighting":         "Prefabs/World/DefaultWorld/Lighting_Default.et",
     "fog":              "Prefabs/World/DefaultWorld/FogHaze_Default.et",
@@ -219,6 +220,11 @@ WORLD_PREFABS = {
 # prefab, which left the terrain entity uninitialised and crashed the NVTT
 # bake on first brush stroke (issue #111).
 WORLD_PREFAB_GUIDS: dict[str, str] = {
+    # Confirmed by the maintainer on issue #159 against a correct layer file;
+    # v1.7.5 and earlier emitted the world entity WITHOUT any prefab reference
+    # (a bare `GenericWorldEntity world {`), the only entity we did not write
+    # as a prefab instance.
+    "world":            "08A95D735ECC517F",
     "terrain":          "221ABC927C672E4E",
     "lighting":         "5B2B348D9520F7C7",
     "fog":              "78D9BBF0F423FEB4",
@@ -239,6 +245,7 @@ WORLD_PREFAB_GUIDS: dict[str, str] = {
 # Some prefabs are instantiated by their concrete component class, others
 # by generic wrappers — both forms appear verbatim in the reference layer.
 WORLD_PREFAB_CLASS: dict[str, str] = {
+    "world":            "GenericWorldEntity",
     "terrain":          "GenericTerrainEntity",
     "lighting":         "GenericWorldLightEntity",
     "fog":              "GenericWorldFogEntity",
@@ -259,6 +266,7 @@ WORLD_PREFAB_CLASS: dict[str, str] = {
 # between the class and the `:` — i.e. `<class> <instance> : "{GUID}path"`.
 # All others are anonymous singletons.
 WORLD_PREFAB_INSTANCE_NAME: dict[str, str] = {
+    "world":    "world",
     "camera":   "SCR_CameraManager1",
     "preload":  "PreloadManager1",
 }

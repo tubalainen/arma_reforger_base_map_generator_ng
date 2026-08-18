@@ -277,8 +277,12 @@ class TestBootstrapEntities:
             map_name="TestMap", metadata=_metadata_for_4km(),
         )
         layer = gen._generate_default_layer()
-        assert layer.startswith("GenericWorldEntity world {\n"), (
-            "default.layer must begin with the world-entity block"
+        assert layer.startswith(
+            'GenericWorldEntity world : '
+            '"{08A95D735ECC517F}Prefabs/World/DefaultWorld/GenericWorld_Default.et" {\n'
+        ), (
+            "default.layer must begin with the world-entity block, and the "
+            "world entity must reference its prefab (issue #159)"
         )
         # Required environment property assignments — exact spelling matters,
         # Workbench rejects "PlanetPresets" (plural) as Unknown class.
@@ -299,6 +303,59 @@ class TestBootstrapEntities:
             assert absent not in layer, (
                 f"Ocean material {absent} was emitted but policy says omit"
             )
+
+    def test_every_bootstrap_entity_is_a_prefab_instance(self):
+        """Issue #159: the world entity was the only entity emitted without a
+        prefab reference (a bare ``GenericWorldEntity world {``). Every entity
+        line that opens a block must carry a ``: "{GUID}path.et"`` reference —
+        an entity with no prefab behind it is the #111 failure mode.
+        """
+        import re
+
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        gen = EnfusionProjectGenerator(
+            map_name="TestMap", metadata=_metadata_for_4km(),
+        )
+        layer = gen._generate_default_layer()
+
+        # Top-level entity lines: no leading whitespace, ends with " {".
+        entity_lines = [
+            line for line in layer.splitlines()
+            if line.endswith(" {") and not line[:1].isspace()
+            and not line.startswith("//")
+        ]
+        assert entity_lines, "no entity lines found in default.layer"
+        for line in entity_lines:
+            assert re.search(r' : "\{[0-9A-F]{16}\}\S+\.et"', line), (
+                f"entity emitted without a prefab reference (#159): {line!r}"
+            )
+
+    def test_world_entity_guid_matches_config(self):
+        """The world prefab GUID must come from the shared config table, not a
+        literal in the generator — one source of truth per #159.
+        """
+        from config.enfusion import (
+            WORLD_PREFABS,
+            WORLD_PREFAB_CLASS,
+            WORLD_PREFAB_GUIDS,
+            WORLD_PREFAB_INSTANCE_NAME,
+        )
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        assert WORLD_PREFAB_GUIDS["world"] == "08A95D735ECC517F"
+        assert WORLD_PREFABS["world"].endswith("GenericWorld_Default.et")
+        assert WORLD_PREFAB_CLASS["world"] == "GenericWorldEntity"
+        assert WORLD_PREFAB_INSTANCE_NAME["world"] == "world"
+
+        gen = EnfusionProjectGenerator(
+            map_name="TestMap", metadata=_metadata_for_4km(),
+        )
+        block = gen._render_world_env_block()
+        assert WORLD_PREFAB_GUIDS["world"] in block
+        assert "GenericWorldEntity world {" not in block, (
+            "#159 regression: bare world entity form is back"
+        )
 
     def test_default_layer_terrain_has_instance_name(self):
         """The two reference layers both give the terrain entity an explicit
