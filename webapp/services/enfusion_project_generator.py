@@ -520,11 +520,19 @@ class EnfusionProjectGenerator:
         )
 
     def _render_world_env_block(self) -> str:
-        """Render the ``GenericWorldEntity world { … }`` block.
+        """Render the ``GenericWorldEntity world : "{GUID}…" { … }`` block.
 
-        Verified verbatim against BohemiaInteractive/Arma-Reforger-Samples
-        (Assets_Showcase_Base) and the Utflandia community map. Both reference
-        files begin their default.layer with this exact shape.
+        The world entity is a *prefab instance* like every other bootstrap
+        entity — it inherits from ``GenericWorld_Default.et``. Up to and
+        including v1.7.5 this method emitted a bare ``GenericWorldEntity
+        world {`` with no prefab reference at all, making it the only entity
+        in the layer without one (issue #159). The header is now built from
+        the same ``WORLD_PREFAB*`` tables every other entity uses, so the
+        GUID has a single source of truth.
+
+        Env property values are verified against
+        BohemiaInteractive/Arma-Reforger-Samples (Assets_Showcase_Base) and
+        the Utflandia community map.
 
         BSP / boundMins / boundMaxs / blockSize are intentionally omitted —
         they are Workbench-authored spatial data, rebuilt on first save.
@@ -532,8 +540,12 @@ class EnfusionProjectGenerator:
         Environment tab per Atlas 2 p.5.
         """
         planets = "\n".join(f'  "{p}"' for p in WORLD_ENV_PLANET_PRESET)
+        head = (
+            f'{WORLD_PREFAB_CLASS["world"]} {WORLD_PREFAB_INSTANCE_NAME["world"]}'
+            f' : "{{{WORLD_PREFAB_GUIDS["world"]}}}{WORLD_PREFABS["world"]}"'
+        )
         return (
-            "GenericWorldEntity world {\n"
+            f"{head} {{\n"
             f' SkyPreset "{WORLD_ENV_SKY_PRESET}"\n'
             " PlanetPreset {\n"
             f"{planets}\n"
