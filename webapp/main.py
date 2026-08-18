@@ -28,9 +28,17 @@ from middleware.rate_limit import RateLimitMiddleware
 from services.validators import validate_job_id, validate_image_type, validate_polygon
 from services.utils.parallel import configure_gdal_threading
 
-# Configure logging
+# Configure logging. LOG_LEVEL raises or lowers the detail in BOTH
+# `docker compose logs` and the browser Activity Log — they are fed from the
+# same records, so they can't drift apart. DEBUG adds per-tile / per-feature
+# tracing that is useful when diagnosing a specific map but far too noisy for
+# normal use.
+_LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
+_LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
+if not isinstance(_LOG_LEVEL, int):  # e.g. LOG_LEVEL=BANANA
+    _LOG_LEVEL = logging.INFO
 logging.basicConfig(
-    level=logging.INFO,
+    level=_LOG_LEVEL,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("main")
@@ -39,7 +47,7 @@ logger = logging.getLogger("main")
 # panel mirrors `docker compose logs -f`.
 from services.job_log_handler import install_job_log_handler
 
-install_job_log_handler()
+install_job_log_handler(level=_LOG_LEVEL)
 
 # Enable multi-threaded GDAL for rasterio.warp.reproject operations
 configure_gdal_threading()

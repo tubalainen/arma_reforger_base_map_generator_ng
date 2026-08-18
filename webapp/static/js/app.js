@@ -264,6 +264,10 @@ let lastCurrentStep = '';
 // Server returns logs[since:], so we advance by the number of entries received.
 let logsSinceCursor = 0;
 
+// Upper bound on rendered Activity Log lines. The server caps job.logs at
+// 5000; the DOM only needs enough scrollback to be useful.
+const MAX_CONSOLE_ENTRIES = 2000;
+
 // ===========================================================================
 // Event handlers
 // ===========================================================================
@@ -618,13 +622,30 @@ function addConsoleLog(message, level = 'info') {
     const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
     const levelLabel = level.toUpperCase().padEnd(7, ' ');
 
-    entry.innerHTML = `
-        <span class="console-timestamp">[${timestamp}]</span>
-        <span class="console-level ${level}">${levelLabel}</span>
-        <span class="console-message">${message}</span>
-    `;
+    // Build with textContent, not innerHTML: log lines carry OSM-derived text
+    // (place names, file names, upstream error strings) that we don't control.
+    const tsSpan = document.createElement('span');
+    tsSpan.className = 'console-timestamp';
+    tsSpan.textContent = `[${timestamp}]`;
+
+    const lvlSpan = document.createElement('span');
+    lvlSpan.className = `console-level ${level}`;
+    lvlSpan.textContent = levelLabel;
+
+    const msgSpan = document.createElement('span');
+    msgSpan.className = 'console-message';
+    msgSpan.textContent = message;
+
+    entry.append(tsSpan, document.createTextNode(' '), lvlSpan,
+                 document.createTextNode(' '), msgSpan);
 
     consoleLog.appendChild(entry);
+
+    // Keep the panel bounded — a DEBUG-level run can emit thousands of lines
+    // and an unbounded DOM list makes the browser crawl.
+    while (consoleLog.childElementCount > MAX_CONSOLE_ENTRIES) {
+        consoleLog.removeChild(consoleLog.firstElementChild);
+    }
 
     // Auto-scroll to bottom
     consoleLog.scrollTop = consoleLog.scrollHeight;

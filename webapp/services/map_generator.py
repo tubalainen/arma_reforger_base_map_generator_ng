@@ -1361,11 +1361,33 @@ async def run_generation(job: MapGenerationJob):
         # Write ZIP with {sanitized_name}/ as top-level folder so the user
         # can copy that named folder straight into their addons directory,
         # matching the SETUP_GUIDE "Copy the {map_name}/ folder" instruction.
+        files_to_zip = [p for p in output_dir.rglob("*") if p.is_file()]
+        raw_bytes = sum(p.stat().st_size for p in files_to_zip)
+        logger.info(
+            f"[{job.job_id}] Packing {len(files_to_zip)} file(s), "
+            f"{raw_bytes / (1024 * 1024):.1f} MB uncompressed, into "
+            f"{zip_file.name} under {sanitized_name}/"
+        )
         with zipfile.ZipFile(str(zip_file), "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for fpath in output_dir.rglob("*"):
-                if fpath.is_file():
-                    arcname = sanitized_name + "/" + str(fpath.relative_to(output_dir))
-                    zf.write(str(fpath), arcname)
+            for done, fpath in enumerate(files_to_zip, start=1):
+                arcname = sanitized_name + "/" + str(fpath.relative_to(output_dir))
+                zf.write(str(fpath), arcname)
+                # Narrate the long files individually — a single 200 MB
+                # satellite image otherwise looks like the job has hung.
+                if fpath.stat().st_size > 5 * 1024 * 1024:
+                    logger.info(
+                        f"  + {arcname} ({fpath.stat().st_size / (1024 * 1024):.1f} MB)"
+                    )
+                if done % 25 == 0:
+                    logger.info(f"  … zipped {done}/{len(files_to_zip)} files")
+
+        packed = zip_file.stat().st_size
+        ratio = (100.0 - packed / raw_bytes * 100.0) if raw_bytes else 0.0
+        logger.info(
+            f"[{job.job_id}] ZIP written: {packed / (1024 * 1024):.1f} MB "
+            f"({ratio:.0f}% smaller than the {raw_bytes / (1024 * 1024):.1f} MB "
+            f"source tree)"
+        )
 
         if not zip_file.exists():
             raise RuntimeError("ZIP file was not created successfully")

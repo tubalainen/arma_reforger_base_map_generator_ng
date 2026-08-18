@@ -142,15 +142,22 @@ def normalize_polygons(
     n_out_polys = len(out) - len(passthrough)
     n_in_polys = len(polygonal)
     merged = n_in_polys - n_out_polys
-    if merged > 0 or dropped_slivers > 0:
-        logger.info(
-            "spline_cleanup[%s]: %d in → %d out (merged %d, dropped %d slivers)",
-            kind,
-            n_in,
-            len(out),
-            merged,
-            dropped_slivers,
-        )
+    # Always report, even for a no-op run: silence used to make it look like
+    # the cleanup stage never ran at all.
+    logger.info(
+        "Spline cleanup [%s]: %d feature(s) in → %d out — %d polygon(s) unioned "
+        "into %d, %d merged away, %d sliver(s) dropped (<%.0f m²), "
+        "%d non-polygon passthrough",
+        kind,
+        n_in,
+        len(out),
+        n_in_polys,
+        n_out_polys,
+        max(0, merged),
+        dropped_slivers,
+        min_area_m2,
+        len(passthrough),
+    )
     return out
 
 
@@ -195,13 +202,15 @@ def normalize_polylines(
         new_feat["geometry"] = {"type": "LineString", "coordinates": cleaned}
         out.append(new_feat)
 
-    if total_dropped > 0:
-        logger.info(
-            "spline_cleanup[%s]: dropped %d hairpin vertices across %d polylines",
-            kind,
-            total_dropped,
-            len(features),
-        )
+    collapsed = len(features) - len(out)
+    logger.info(
+        "Spline cleanup [%s]: %d polyline(s) checked for hairpins — "
+        "%d vertex/vertices dropped, %d feature(s) collapsed and removed",
+        kind,
+        len(features),
+        total_dropped,
+        max(0, collapsed),
+    )
     return out
 
 

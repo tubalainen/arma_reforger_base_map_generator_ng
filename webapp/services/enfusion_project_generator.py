@@ -408,7 +408,20 @@ class EnfusionProjectGenerator:
             content = self._GENERATOR_BANNER + content
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
-        logger.debug(f"Wrote: {path}")
+        # Report every project file as it lands. This used to be DEBUG, which
+        # made the whole export phase look like dead air in the Activity Log.
+        detail = f"{len(content.encode('utf-8')) / 1024:.1f} KB"
+        if suffix == ".layer":
+            entities = content.count("SplineShapeEntity ")
+            prefabs = content.count(' : "{')
+            parts = []
+            if entities:
+                parts.append(f"{entities} spline entit{'y' if entities == 1 else 'ies'}")
+            if prefabs:
+                parts.append(f"{prefabs} prefab instance(s)")
+            if parts:
+                detail += ", " + ", ".join(parts)
+        logger.info(f"Wrote {path.name} ({detail})")
         return str(path)
 
     # -----------------------------------------------------------------------

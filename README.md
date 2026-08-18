@@ -364,6 +364,11 @@ RATE_LIMIT_GENERATE_PER_HOUR=10
 
 # Trusted proxy IPs
 FORWARDED_ALLOW_IPS=127.0.0.1
+
+# Log verbosity — applies to `docker compose logs` AND the in-browser
+# Activity Log, which are fed from the same records.
+# DEBUG adds per-tile / per-feature tracing (noisy but thorough).
+LOG_LEVEL=INFO
 ```
 
 ## Reverse Proxy Setup (nginx + Cloudflare)

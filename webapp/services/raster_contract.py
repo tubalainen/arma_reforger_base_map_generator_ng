@@ -166,4 +166,28 @@ def validate_and_harden_rasters(
         faces_x, faces_z, report["heightmap"], len(report["masks"]),
         report["satellite"], len(issues), len(fixes),
     )
+    # Spell the verdict out — a dimension mismatch here is a documented cause
+    # of the first-paint crash, so it must not be buried in a stats line.
+    for fix in fixes:
+        logger.info("Raster contract: auto-fixed %s", fix)
+    if issues:
+        logger.error(
+            "Raster contract FAILED with %d issue(s) — the generated project "
+            "may crash the World Editor on import",
+            len(issues),
+        )
+    else:
+        logger.info(
+            "Raster contract PASSED — heightmap %dx%d, %d mask(s) at %dx%d, "
+            "satellite %s",
+            faces_x + 1, faces_z + 1, len(report["masks"]), faces_x, faces_z,
+            "present" if report["satellite"] else "absent",
+        )
+    if job is not None and hasattr(job, "add_log"):
+        job.add_log(
+            f"Raster contract {'PASSED' if not issues else 'FAILED'}: "
+            f"{len(report['masks'])} mask(s), {len(fixes)} auto-fix(es), "
+            f"{len(issues)} issue(s)",
+            "success" if not issues else "warning",
+        )
     return report
