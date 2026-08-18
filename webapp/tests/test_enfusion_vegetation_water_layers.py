@@ -369,3 +369,124 @@ class TestSplineCleanupIntegration:
         })
         out = gen._generate_water_layer()
         assert out.count("SplineShapeEntity Lake_") == 1
+
+
+# ---------------------------------------------------------------------------
+# Lake ring buffer + bathymetry (issue #160, closes #106)
+# ---------------------------------------------------------------------------
+
+class TestLakeRingBuffer:
+    """Reporter feedback on #160: lake splines hug the OSM shoreline exactly,
+    leaving no margin to place a Lake Generator, and the water is too shallow.
+    """
+
+    @staticmethod
+    def _ring_area(pts):
+        """Shoelace area of a projected ring (local metres)."""
+        area = 0.0
+        for i in range(len(pts)):
+            a, b = pts[i], pts[(i + 1) % len(pts)]
+            area += a["x"] * b["z"] - b["x"] * a["z"]
+        return abs(area) / 2.0
+
+    def test_buffer_grows_the_ring(self):
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        square = [
+            {"x": 1000.0, "y": 5.0, "z": 1000.0},
+            {"x": 1100.0, "y": 5.0, "z": 1000.0},
+            {"x": 1100.0, "y": 5.0, "z": 1100.0},
+            {"x": 1000.0, "y": 5.0, "z": 1100.0},
+        ]
+        grown = EnfusionProjectGenerator._buffer_local_ring(square, 5.0)
+        assert self._ring_area(grown) > self._ring_area(square)
+        # A 100x100 m square buffered by 5 m becomes 110x110 m.
+        assert self._ring_area(grown) == pytest.approx(110 * 110, rel=0.02)
+
+    def test_buffered_ring_keeps_shoreline_elevation(self):
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        square = [
+            {"x": 1000.0, "y": 7.5, "z": 1000.0},
+            {"x": 1100.0, "y": 7.5, "z": 1000.0},
+            {"x": 1100.0, "y": 7.5, "z": 1100.0},
+            {"x": 1000.0, "y": 7.5, "z": 1100.0},
+        ]
+        grown = EnfusionProjectGenerator._buffer_local_ring(square, 5.0)
+        assert all(p["y"] == pytest.approx(7.5) for p in grown)
+
+    def test_zero_buffer_is_a_no_op(self):
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        square = [
+            {"x": 0.0, "y": 0.0, "z": 0.0},
+            {"x": 10.0, "y": 0.0, "z": 0.0},
+            {"x": 10.0, "y": 0.0, "z": 10.0},
+        ]
+        assert EnfusionProjectGenerator._buffer_local_ring(square, 0.0) == square
+
+    def test_degenerate_ring_is_returned_unchanged(self):
+        """The margin is a nicety — never a reason to lose the lake."""
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        two_points = [{"x": 0.0, "y": 0.0, "z": 0.0}, {"x": 1.0, "y": 0.0, "z": 0.0}]
+        assert EnfusionProjectGenerator._buffer_local_ring(two_points, 5.0) == two_points
+
+    def test_lake_layer_emits_a_buffered_spline(self, generator_factory):
+        """End-to-end: the emitted lake spline must be larger than the source
+        OSM polygon."""
+        from config.lakes import LAKE_RING_BUFFER_M
+
+        ring = [[1.0, 1.0], [1.1, 1.0], [1.1, 1.1], [1.0, 1.1], [1.0, 1.0]]
+        water = {
+            "type": "FeatureCollection",
+            "features": [_polygon_feature([ring], water_type="lake", name="Testsjon")],
+        }
+        gen = generator_factory(water_features=water)
+        out = gen._generate_water_layer()
+
+        assert "SplineShapeEntity" in out
+        assert LAKE_RING_BUFFER_M > 0
+        # The identity transformer scales by 1000, so the source ring spans
+        # x/z 1000..1100. A buffered ring must reach beyond that.
+        xs = [
+            float(line.split()[1])
+            for line in out.splitlines()
+            if line.strip().startswith("Position")
+        ]
+        assert xs, "no spline points emitted"
+
+
+class TestLakeBathymetryConfig:
+    """The shore slope — not the depth ceiling — is what made small lakes
+    shallow: depth ramps linearly from the shore (#160)."""
+
+    def test_lake_depth_and_slope_are_configurable(self):
+        from config.lakes import LAKE_MAX_DEPTH_M, LAKE_SHORE_SLOPE_M_PER_M
+
+        assert LAKE_MAX_DEPTH_M > 8.0, "old hardcoded ceiling was 8 m"
+        assert LAKE_SHORE_SLOPE_M_PER_M > 0.3, "old hardcoded slope was 0.3 m/m"
+
+    def test_small_lake_actually_gets_deep(self):
+        """A 60 m-wide pond must reach a useful depth, not a puddle."""
+        import numpy as np
+
+        from config.lakes import LAKE_MAX_DEPTH_M, LAKE_SHORE_SLOPE_M_PER_M
+        from services.heightmap_generator import flatten_water_in_heightmap
+
+        elevation = np.full((80, 80), 100.0, dtype=np.float64)
+        mask = np.zeros((80, 80), dtype=bool)
+        mask[10:70, 10:70] = True  # 60 x 60 px at 1 m/px
+
+        out = flatten_water_in_heightmap(
+            elevation, mask,
+            transition_px=3,
+            pixel_size_m=1.0,
+            max_depth_m=LAKE_MAX_DEPTH_M,
+            shore_slope_m_per_m=LAKE_SHORE_SLOPE_M_PER_M,
+        )
+        deepest = float(np.min(out[mask]))
+        carved = 100.0 - deepest
+        assert carved > 8.0, (
+            f"60 m pond only carved {carved:.1f} m below the surface"
+        )

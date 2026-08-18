@@ -46,9 +46,14 @@ from config.enfusion import (
     resolve_ambient_prefab,
     compute_height_scale,
 )
-from config.roads import validate_road_prefab, fully_qualified_road_prefab
+from config.roads import (
+    ROAD_HORIZONTAL_TOLERANCE_M,
+    ROAD_VERTICAL_TOLERANCE_M,
+    fully_qualified_road_prefab,
+    validate_road_prefab,
+)
 from config.forests import validate_forest_prefab, forest_type_from_osm
-from config.lakes import validate_lake_prefab
+from config.lakes import LAKE_RING_BUFFER_M, validate_lake_prefab
 from services.entity_naming import EntityNamer, expected_surface
 from services.spline_cleanup import (
     normalize_polygons,
@@ -714,6 +719,7 @@ class EnfusionProjectGenerator:
         entities = []
         skipped = 0
         clipped = 0
+        chunked = 0
 
         for i, road in enumerate(roads):
             points = road.get("spline_points", [])
@@ -739,28 +745,16 @@ class EnfusionProjectGenerator:
                 clipped += 1
                 continue
 
-            # Cap spline length so long OSM ways don't hang the Workbench
-            # loader. Roads keep the looser MAX_SPLINE_POINTS budget because
-            # their geometry is dictated by real-world surveys (natural
-            # forest/lake/river splines use the tighter NATURAL cap — v1.4.4).
-            local_points = self._simplify_local_polyline(
+            # Simplify on horizontal *and* vertical error so the spline keeps
+            # the control points that hold it on the ground (#161), then chunk
+            # anything still over the Workbench-safe cap into splines that
+            # share their boundary vertex.
+            simplified = self._simplify_road_polyline(
                 in_bounds, max_pts=MAX_SPLINE_POINTS
             )
-
-            # First point is the entity origin
-            origin = local_points[0]
-
-            # Build ShapePoint definitions (relative to entity origin)
-            point_defs = []
-            for j, pt in enumerate(local_points):
-                rel_x = pt["x"] - origin["x"]
-                rel_y = pt["y"] - origin["y"]
-                rel_z = pt["z"] - origin["z"]
-                point_defs.append(
-                    f'   ShapePoint sp_{j} {{\n'
-                    f'    Position {rel_x:.3f} {rel_y:.3f} {rel_z:.3f}\n'
-                    f'   }}'
-                )
+            chunks = self._chunk_polyline(simplified, max_pts=MAX_SPLINE_POINTS)
+            if len(chunks) > 1:
+                chunked += 1
 
             road_name = road.get("name", "").replace('"', "'")
             prefab_name = validate_road_prefab(
@@ -773,44 +767,74 @@ class EnfusionProjectGenerator:
                 "name": road_name,
                 "surface": road.get("surface", "asphalt"),
             }
-            entity_name = self._namer.make_name(
-                "Road",
-                properties=namer_props,
-                x_local=origin["x"],
-                z_local=origin["z"],
-            )
             paints = expected_surface("Road", namer_props)
-            self._record_surface(entity_name, paints)
 
-            comment_parts = []
-            if road_name:
-                comment_parts.append(road_name)
-            comment_parts.append(f"prefab: {prefab_name}")
-            if paints:
-                comment_parts.append(f"paints: {paints}")
-            # When the prefab is in the Atlas 2 catalogue, also surface its
-            # fully-qualified `{guid}path.et` form so the editor user can
-            # paste it directly into the RoadGeneratorEntity Prefab field
-            # (saves a Resource Browser search).
-            fq = fully_qualified_road_prefab(prefab_name)
-            if fq:
-                comment_parts.append(f"fq: {fq}")
-            comment = " // " + " | ".join(comment_parts)
+            # One entity per chunk. Chunks share their boundary vertex, so a
+            # split road still reads as one continuous road in the editor; the
+            # `_partN` suffix keeps the relationship obvious in the hierarchy.
+            for part_idx, local_points in enumerate(chunks):
+                origin = local_points[0]
 
-            entity = (
-                f'SplineShapeEntity {entity_name} {{{comment}\n'
-                f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
-                f' Points {{\n'
-                + "\n".join(point_defs) + "\n"
-                f' }}\n'
-                f'}}'
-            )
-            entities.append(entity)
+                point_defs = []
+                for j, pt in enumerate(local_points):
+                    rel_x = pt["x"] - origin["x"]
+                    rel_y = pt["y"] - origin["y"]
+                    rel_z = pt["z"] - origin["z"]
+                    point_defs.append(
+                        f'   ShapePoint sp_{j} {{\n'
+                        f'    Position {rel_x:.3f} {rel_y:.3f} {rel_z:.3f}\n'
+                        f'   }}'
+                    )
+
+                # Descriptive entity name (v1.4.0 — Atlas 2 alignment).
+                entity_name = self._namer.make_name(
+                    "Road",
+                    properties=namer_props,
+                    x_local=origin["x"],
+                    z_local=origin["z"],
+                )
+                if len(chunks) > 1:
+                    entity_name = f"{entity_name}_part{part_idx + 1}"
+                self._record_surface(entity_name, paints)
+
+                comment_parts = []
+                if road_name:
+                    comment_parts.append(road_name)
+                comment_parts.append(f"prefab: {prefab_name}")
+                if paints:
+                    comment_parts.append(f"paints: {paints}")
+                if len(chunks) > 1:
+                    comment_parts.append(
+                        f"part {part_idx + 1}/{len(chunks)} — shares its end "
+                        f"vertex with the neighbouring part"
+                    )
+                # When the prefab is in the Atlas 2 catalogue, also surface its
+                # fully-qualified `{guid}path.et` form so the editor user can
+                # paste it directly into the RoadGeneratorEntity Prefab field
+                # (saves a Resource Browser search).
+                fq = fully_qualified_road_prefab(prefab_name)
+                if fq:
+                    comment_parts.append(f"fq: {fq}")
+                comment = " // " + " | ".join(comment_parts)
+
+                entities.append(
+                    f'SplineShapeEntity {entity_name} {{{comment}\n'
+                    f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}\n'
+                    f' Points {{\n'
+                    + "\n".join(point_defs) + "\n"
+                    f' }}\n'
+                    f'}}'
+                )
 
         if skipped > 0:
             logger.info(f"Skipped {skipped} road segments with < 2 points")
         if clipped > 0:
             logger.info(f"Clipped {clipped} road segments outside terrain bounds")
+        if chunked > 0:
+            logger.info(
+                f"Split {chunked} long road(s) into point-capped parts that "
+                f"share their boundary vertex (#161)"
+            )
 
         logger.info(
             f"Generated {len(entities)} spline-only road entities for roads "
@@ -919,6 +943,9 @@ class EnfusionProjectGenerator:
             empty_message="// No standing-water polygons found in this area.\n",
             child_prefab_fn=_lake_child,
             naming_kind="Lake",
+            # #160: give the Lake Generator margin instead of hugging the OSM
+            # shoreline exactly.
+            ring_buffer_m=LAKE_RING_BUFFER_M,
         )
         river_body = self._generate_river_splines()
         return header + lake_body + river_body
@@ -1291,6 +1318,7 @@ class EnfusionProjectGenerator:
         filter_values: tuple[str, ...] = (),
         child_prefab_fn=None,
         naming_kind: Optional[str] = None,
+        ring_buffer_m: float = 0.0,
     ) -> str:
         """
         Convert GeoJSON polygon features into closed SplineShapeEntity blocks.
@@ -1358,6 +1386,7 @@ class EnfusionProjectGenerator:
                     child_prefab=child_prefab,
                     naming_kind=naming_kind,
                     feature_properties=feature_props,
+                    ring_buffer_m=ring_buffer_m,
                 )
                 if not pieces:
                     skipped_clipped += 1
@@ -1469,6 +1498,94 @@ class EnfusionProjectGenerator:
         return pts[::step][:max_pts]
 
     @staticmethod
+    def _simplify_road_polyline(
+        pts: list[dict],
+        max_pts: int = MAX_SPLINE_POINTS,
+        h_tol: float = ROAD_HORIZONTAL_TOLERANCE_M,
+        v_tol: float = ROAD_VERTICAL_TOLERANCE_M,
+    ) -> list[dict]:
+        """
+        Simplify a road polyline on **horizontal and vertical** error (#161).
+
+        The general :py:meth:`_simplify_local_polyline` measures deviation in
+        the XZ plane only, so it happily drops the point at the top of a rise:
+        the plan view barely changes, but Enfusion then interpolates a straight
+        line through the hill and the road cuts into the ground (or flies over
+        the dip on the other side). Here a point survives if *either* its
+        horizontal deviation exceeds ``h_tol`` **or** its height deviates from
+        the chord by more than ``v_tol``.
+
+        Tolerances escalate together if the result still exceeds ``max_pts``;
+        callers chunk anything that remains too long rather than decimating it.
+        """
+        if len(pts) < 3:
+            return pts
+
+        def _rdp(points, ht, vt):
+            if len(points) <= 2:
+                return list(points)
+            ax, ay, az = points[0]["x"], points[0]["y"], points[0]["z"]
+            bx, by, bz = points[-1]["x"], points[-1]["y"], points[-1]["z"]
+            dx, dz = bx - ax, bz - az
+            seg_len_sq = dx * dx + dz * dz
+
+            worst_ratio, idx = 0.0, 0
+            for i in range(1, len(points) - 1):
+                p = points[i]
+                if seg_len_sq == 0:
+                    t = 0.0
+                    h_dev = math.hypot(p["x"] - ax, p["z"] - az)
+                else:
+                    t = max(0.0, min(1.0, (
+                        (p["x"] - ax) * dx + (p["z"] - az) * dz
+                    ) / seg_len_sq))
+                    h_dev = math.hypot(
+                        p["x"] - (ax + t * dx), p["z"] - (az + t * dz)
+                    )
+                v_dev = abs(p["y"] - (ay + t * (by - ay)))
+                # Normalise both errors so one RDP pass honours both budgets.
+                ratio = max(h_dev / ht if ht > 0 else 0.0,
+                            v_dev / vt if vt > 0 else 0.0)
+                if ratio > worst_ratio:
+                    worst_ratio, idx = ratio, i
+            if worst_ratio > 1.0:
+                return (_rdp(points[:idx + 1], ht, vt)[:-1]
+                        + _rdp(points[idx:], ht, vt))
+            return [points[0], points[-1]]
+
+        result = _rdp(pts, h_tol, v_tol)
+        scale = 2.0
+        while len(result) > max_pts and scale <= 32.0:
+            result = _rdp(pts, h_tol * scale, v_tol * scale)
+            scale *= 2.0
+        return result
+
+    @staticmethod
+    def _chunk_polyline(
+        pts: list[dict], max_pts: int = MAX_SPLINE_POINTS
+    ) -> list[list[dict]]:
+        """
+        Split an over-long road into consecutive splines that **share their
+        boundary vertex** (#161).
+
+        The point cap exists because long splines choke the Workbench loader,
+        but a naive split leaves a visible gap. Repeating the boundary point as
+        the last vertex of one chunk and the first of the next means the two
+        splines meet exactly, with no seam to clean up by hand.
+        """
+        if len(pts) <= max_pts:
+            return [pts]
+        chunks: list[list[dict]] = []
+        start = 0
+        while start < len(pts) - 1:
+            end = min(start + max_pts, len(pts))
+            chunks.append(pts[start:end])
+            if end >= len(pts):
+                break
+            start = end - 1  # shared vertex
+        return chunks
+
+    @staticmethod
     def _simplify_local_polyline(
         pts: list[dict],
         max_pts: int = MAX_SPLINE_POINTS_NATURAL,
@@ -1568,11 +1685,18 @@ class EnfusionProjectGenerator:
         child_prefab: Optional[str] = None,
         naming_kind: Optional[str] = None,
         feature_properties: Optional[dict] = None,
+        ring_buffer_m: float = 0.0,
     ) -> list[str]:
         """
         Project a single GeoJSON ring (list of [lon, lat] pairs) to one or more
         closed SplineShapeEntity blocks. Returns an empty list if nothing
         usable survives clipping.
+
+        ``ring_buffer_m`` (issue #160) dilates the ring outward by that many
+        metres before clipping — used for standing water so the Lake Generator
+        has margin to work with. Buffering happens in projected local metres so
+        the distance is exact, and *before* clipping so a dilated ring can never
+        escape the terrain rectangle.
 
         The ring is projected to local terrain XZ, then **clipped to the terrain
         rectangle as a polygon** (shapely intersection). A forest that crosses
@@ -1612,6 +1736,11 @@ class EnfusionProjectGenerator:
             elevation_array=self.elevation_array,
         )
 
+        if ring_buffer_m:
+            local_points = self._buffer_local_ring(local_points, ring_buffer_m)
+            if len(local_points) < 3:
+                return []
+
         pieces = self._clip_ring_to_terrain(local_points)
 
         entities: list[str] = []
@@ -1632,6 +1761,58 @@ class EnfusionProjectGenerator:
                 )
             )
         return entities
+
+    @staticmethod
+    def _buffer_local_ring(
+        local_points: list[dict], buffer_m: float
+    ) -> list[dict]:
+        """
+        Dilate a projected ring outward by *buffer_m* metres in the XZ plane
+        (issue #160 — lake splines were flush with the OSM shoreline, leaving
+        no margin for the Lake Generator).
+
+        Elevation for each new vertex is taken from the nearest source vertex:
+        the shoreline is at a near-constant level by definition, and the
+        bathymetry pass owns the bed below it, so re-sampling the DEM outside
+        the original ring would only pull in bank terrain that the water
+        surface should sit below.
+
+        A buffer that fails or degenerates returns the input unchanged — the
+        margin is a nicety, never a reason to lose the lake.
+        """
+        if buffer_m <= 0 or len(local_points) < 3:
+            return local_points
+        try:
+            from shapely.geometry import Polygon
+        except ImportError:  # pragma: no cover - shapely is a hard dep
+            return local_points
+        try:
+            poly = Polygon([(p["x"], p["z"]) for p in local_points])
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            grown = poly.buffer(buffer_m, join_style=2)  # mitre — keeps shape
+            if grown.is_empty:
+                return local_points
+            # A buffer can merge a ring into a MultiPolygon-free single shape;
+            # take the largest exterior if shapely hands back a collection.
+            if grown.geom_type == "MultiPolygon":
+                grown = max(grown.geoms, key=lambda g: g.area)
+            if not hasattr(grown, "exterior") or grown.exterior is None:
+                return local_points
+            coords = list(grown.exterior.coords)[:-1]  # drop closing duplicate
+            if len(coords) < 3:
+                return local_points
+            out: list[dict] = []
+            for cx, cz in coords:
+                nearest = min(
+                    local_points,
+                    key=lambda p, cx=cx, cz=cz: (p["x"] - cx) ** 2 + (p["z"] - cz) ** 2,
+                )
+                out.append({"x": cx, "y": nearest["y"], "z": cz})
+            return out
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("Lake ring buffer failed; emitting unbuffered ring")
+            return local_points
 
     def _clip_ring_to_terrain(
         self, local_points: list[dict]

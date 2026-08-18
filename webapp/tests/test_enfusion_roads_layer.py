@@ -201,3 +201,125 @@ class TestRoadsLayerVertexCap:
         # All 3 points survive because the middle vertex is a true corner,
         # not a collinear filler. Confirms simplification doesn't over-cull.
         assert out.count("ShapePoint sp_") == 3
+
+
+class _HillTransformer:
+    """Identity transformer that puts the road over a hill.
+
+    Elevation follows a sine wave along x so the polyline has real vertical
+    structure — the situation issue #161 describes, where a spline with too
+    few control points cuts into rising ground and flies over the dip.
+    """
+
+    def transform_points(self, points, elevation_array=None):
+        import math
+
+        out = []
+        for p in points:
+            x = round(p["x"] * 1000, 3)
+            out.append({
+                "x": x,
+                "y": round(20.0 * math.sin(x / 200.0), 3),
+                "z": round(p["y"] * 1000, 3),
+            })
+        return out
+
+
+class TestRoadsFollowTerrain:
+    """Issue #161: control points must be kept where the ground moves under
+    the road, not only where the road turns in plan view."""
+
+    def _hill_generator(self, road):
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        gen = EnfusionProjectGenerator(
+            map_name="TestMap",
+            metadata=_metadata_for_4km_terrain(),
+            road_data={"roads": [road]},
+            transformer=_HillTransformer(),
+            elevation_array=None,
+        )
+        gen._reset_naming_state()
+        return gen
+
+    def _straight_road_over_hill(self, n=400):
+        road = _road(0, "RG_Road_Asphalt_E_01", name="HillRoad")
+        road["spline_points"] = [
+            {"x": 0.001 + (i / (n - 1)) * 3.998, "y": 1.0, "z": 0}
+            for i in range(n)
+        ]
+        road["point_count"] = n
+        return road
+
+    def test_vertical_structure_keeps_control_points(self):
+        """A road that is dead straight in plan view but rides over hills must
+        NOT collapse to two points — the pre-#161 XZ-only simplifier did."""
+        gen = self._hill_generator(self._straight_road_over_hill())
+        out = gen._generate_roads_layer()
+        sp_count = out.count("ShapePoint sp_")
+        assert sp_count > 10, (
+            f"straight-but-hilly road collapsed to {sp_count} points; the "
+            f"spline would cut through the terrain"
+        )
+
+    def test_simplified_spline_stays_within_vertical_tolerance(self):
+        """Every dropped point must leave the spline within tolerance of the
+        real ground height."""
+        from config.roads import ROAD_VERTICAL_TOLERANCE_M
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        pts = []
+        for i in range(300):
+            x = i * 10.0
+            pts.append({"x": x, "y": 20.0 * __import__("math").sin(x / 200.0),
+                        "z": 0.0})
+
+        kept = EnfusionProjectGenerator._simplify_road_polyline(pts)
+        kept_by_x = {round(p["x"], 3): p["y"] for p in kept}
+
+        # Walk the original points and check each against the chord between
+        # its surrounding kept points.
+        kept_xs = sorted(kept_by_x)
+        worst = 0.0
+        for p in pts:
+            x = p["x"]
+            lo = max((k for k in kept_xs if k <= x), default=kept_xs[0])
+            hi = min((k for k in kept_xs if k >= x), default=kept_xs[-1])
+            if hi == lo:
+                continue
+            t = (x - lo) / (hi - lo)
+            interp = kept_by_x[lo] + t * (kept_by_x[hi] - kept_by_x[lo])
+            worst = max(worst, abs(p["y"] - interp))
+        assert worst <= ROAD_VERTICAL_TOLERANCE_M * 1.5, (
+            f"spline deviates {worst:.2f} m from the ground"
+        )
+
+    def test_long_road_is_chunked_with_a_shared_vertex(self):
+        """Chunks must share their boundary vertex so there is no gap — the
+        'onaturlig söm' in #161."""
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        pts = [{"x": float(i), "y": 0.0, "z": 0.0} for i in range(450)]
+        chunks = EnfusionProjectGenerator._chunk_polyline(pts, max_pts=200)
+
+        assert len(chunks) == 3
+        assert all(len(c) <= 200 for c in chunks)
+        for a, b in zip(chunks, chunks[1:]):
+            assert a[-1] == b[0], "adjacent chunks must share their end vertex"
+        # No points lost or duplicated beyond the shared vertices.
+        total = sum(len(c) for c in chunks) - (len(chunks) - 1)
+        assert total == len(pts)
+
+    def test_chunked_road_parts_are_named_and_commented(self):
+        road = self._straight_road_over_hill(n=3000)
+        gen = self._hill_generator(road)
+        out = gen._generate_roads_layer()
+        if "_part1" in out:
+            assert "_part2" in out
+            assert "shares its end vertex" in out
+
+    def test_short_polyline_is_not_chunked(self):
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+
+        pts = [{"x": float(i), "y": 0.0, "z": 0.0} for i in range(10)]
+        assert EnfusionProjectGenerator._chunk_polyline(pts, max_pts=200) == [pts]

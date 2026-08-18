@@ -53,6 +53,7 @@ from config.forests import (
 # Lake / water-body classification
 from config.lakes import (
     KNOWN_LAKE_PREFABS, validate_lake_prefab,
+    LAKE_RING_BUFFER_M, LAKE_MAX_DEPTH_M, LAKE_SHORE_SLOPE_M_PER_M,
 )
 
 
