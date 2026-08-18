@@ -321,3 +321,97 @@ class TestSeaSynthesis:
         assert right_fraction == 0.0, (
             f"sea mask leaked into the high (right) half ({right_fraction:.0%})"
         )
+
+
+# ---------------------------------------------------------------------------
+# Land datum / zeroing (issue #165)
+# ---------------------------------------------------------------------------
+
+class TestLandDatum:
+    """Issue #165: the terrain imported hundreds of metres above the engine's
+    ocean plane because heightmaps were exported as absolute metres above sea
+    level. Frösön sits in Storsjön at ~292 m, so the whole island floated."""
+
+    def test_datum_is_lowest_land_not_lowest_water(self):
+        import numpy as np
+        from services.heightmap_generator import compute_land_datum
+
+        elev = np.full((50, 50), 300.0)      # land plateau at 300 m
+        water = np.zeros((50, 50), dtype=bool)
+        water[10:40, 10:40] = True
+        elev[water] = 277.0                  # carved lake bed, 23 m lower
+
+        assert compute_land_datum(elev, water) == 300.0, (
+            "datum must ignore carved lake beds — otherwise land still floats"
+        )
+
+    def test_without_a_water_mask_it_falls_back_to_global_min(self):
+        import numpy as np
+        from services.heightmap_generator import compute_land_datum
+
+        elev = np.full((20, 20), 120.0)
+        elev[5, 5] = 90.0
+        assert compute_land_datum(elev, None) == 90.0
+
+    def test_all_water_tile_does_not_crash(self):
+        """An all-sea tile has no land; fall back rather than fail."""
+        import numpy as np
+        from services.heightmap_generator import compute_land_datum
+
+        elev = np.full((10, 10), -5.0)
+        water = np.ones((10, 10), dtype=bool)
+        assert compute_land_datum(elev, water) == -5.0
+
+    def test_mismatched_mask_shape_is_ignored(self):
+        import numpy as np
+        from services.heightmap_generator import compute_land_datum
+
+        elev = np.full((10, 10), 50.0)
+        elev[0, 0] = 10.0
+        wrong = np.ones((5, 5), dtype=bool)
+        assert compute_land_datum(elev, wrong) == 10.0
+
+    def test_shifted_terrain_puts_lowest_land_on_zero(self):
+        """End state the reporter asked for: land starts at 0, water below it."""
+        import numpy as np
+        from services.heightmap_generator import (
+            compute_land_datum,
+            generate_heightmap_from_array,
+        )
+
+        elev = np.full((60, 60), 292.0)
+        land = np.zeros((60, 60), dtype=bool)
+        land[20:40, 20:40] = True
+        elev[land] = 305.0
+        elev[~land] = 277.0                  # lake bed
+        water = ~land
+
+        datum = compute_land_datum(elev, water)
+        shifted = elev - datum
+
+        assert shifted[land].min() == 0.0
+        assert shifted[water].max() < 0.0, "water must sit below land, not above"
+
+        _, info = generate_heightmap_from_array(shifted)
+        # height_offset is what save_heightmap_asc adds back, i.e. the lowest
+        # value written to the .asc.
+        assert info["height_offset"] < 0.0
+        assert info["max_elevation"] == pytest.approx(0.0, abs=1e-6) or \
+            info["max_elevation"] >= 0.0
+
+    def test_coastal_map_is_effectively_unchanged(self):
+        """A coastal map's lowest land is already ~0 m, so the re-datum must be
+        a no-op there — sea level still meets the engine ocean plane."""
+        import numpy as np
+        from services.heightmap_generator import compute_land_datum
+
+        elev = np.full((40, 40), 25.0)       # coastal hills
+        water = np.zeros((40, 40), dtype=bool)
+        water[:, :10] = True
+        elev[water] = -12.0                  # sea bed
+        elev[:, 10] = 0.4                    # beach, lowest land
+
+        datum = compute_land_datum(elev, water)
+        assert datum == pytest.approx(0.4), (
+            "coastal datum must stay at the beach, near real sea level"
+        )

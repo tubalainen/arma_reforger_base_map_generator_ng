@@ -617,8 +617,20 @@ def build_metadata(
         "elevation": {
             "source": elevation_result["source"],
             "resolution_m": elevation_result["resolution_m"],
+            # Editor-space heights: the terrain is re-datumed so the lowest
+            # LAND point is world Y=0 (#165), so these are metres relative to
+            # that, not absolute altitude. Water beds are negative.
             "min_elevation_m": heightmap_result["min_elevation"],
             "max_elevation_m": heightmap_result["max_elevation"],
+            # Absolute altitude of world Y=0, plus the true real-world span,
+            # so the guide can still tell the user where on Earth this sits.
+            "land_datum_m": heightmap_result.get("land_datum_m", 0.0),
+            "absolute_min_elevation_m": heightmap_result.get(
+                "absolute_min_elevation", heightmap_result["min_elevation"]
+            ),
+            "absolute_max_elevation_m": heightmap_result.get(
+                "absolute_max_elevation", heightmap_result["max_elevation"]
+            ),
             # Encoding scale (round-trips the .asc); not user-facing.
             "height_scale": heightmap_result["height_scale"],
             # Value the user types into the New Terrain dialog (#142). Derived
