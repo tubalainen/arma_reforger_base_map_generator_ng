@@ -249,6 +249,38 @@ def resample_dem(
 # Core heightmap conversion (from app/services/heightmap.py)
 # ---------------------------------------------------------------------------
 
+def compute_land_datum(
+    elevation: np.ndarray,
+    water_mask: np.ndarray | None = None,
+) -> float:
+    """
+    The absolute elevation, in metres, that should become world **Y = 0** in the
+    World Editor — the lowest *land* point (issue #165).
+
+    Before this existed, heightmaps were exported as absolute metres above sea
+    level. That is correct for a coastal map, where the lowest land already sits
+    at ~0 m and meets the engine's ocean plane. It is wrong for an inland map:
+    Frösön sits in Storsjön at ~292 m, so the whole terrain imported 292 m above
+    the ocean plane and floated in the sky.
+
+    Carved lake and sea beds are excluded, otherwise the datum would be the
+    bottom of the deepest water body and every piece of land would still float —
+    made worse by v1.8.0, which deepened lakes from 8 m to 15 m.
+
+    Returns the global minimum when there is no land at all (an all-water tile),
+    which reproduces the previous behaviour rather than failing.
+    """
+    if water_mask is not None and water_mask.shape == elevation.shape and water_mask.any():
+        land = elevation[~water_mask]
+        if land.size:
+            return float(np.min(land))
+        logger.warning(
+            "Land datum: every pixel is water — falling back to the global "
+            "minimum, so the terrain will sit at the deepest point"
+        )
+    return float(np.min(elevation))
+
+
 def generate_heightmap_from_array(
     elevation: np.ndarray,
     nodata: float | None = None,
@@ -701,6 +733,10 @@ def generate_heightmap(
                 elevation, road_mask, road_width_px=3, smooth_radius=5,
             )
 
+    # Union of every water mask, kept for the land-datum shift in step 5b
+    # (issue #165) so "lowest land" ignores carved lake and sea beds.
+    water_mask_union: np.ndarray | None = None
+
     # 4. Level water bodies — four passes, one per water type, so each
     # gets its own depth ceiling and rivers don't get merged into adjacent
     # lakes by the connected-component labelling.
@@ -753,6 +789,10 @@ def generate_heightmap(
             ):
                 if mask.sum() == 0:
                     continue
+                water_mask_union = (
+                    mask.copy() if water_mask_union is None
+                    else (water_mask_union | mask)
+                )
                 logger.info(
                     f"Carving bathymetry for {label} mask: "
                     f"{int(mask.sum())} px, max_depth={max_depth} m, "
@@ -774,10 +814,36 @@ def generate_heightmap(
         job.progress = 55
     elevation = parallel_gaussian_filter(elevation, sigma=0.5)
 
+    # 5b. Re-datum the terrain so the lowest LAND point becomes world Y = 0
+    # (issue #165). For a coastal map the lowest land is already ~0 m, so this
+    # is a no-op and sea level still lines up with the engine ocean plane. For
+    # an inland map it is the difference between a terrain that sits on the
+    # ground and one that floats hundreds of metres above it.
+    absolute_min = float(np.min(elevation))
+    absolute_max = float(np.max(elevation))
+    land_datum = compute_land_datum(elevation, water_mask_union)
+    if land_datum:
+        elevation = elevation - land_datum
+    logger.info(
+        f"Land datum: lowest land {land_datum:.1f} m becomes world Y=0 "
+        f"(absolute terrain span {absolute_min:.1f}–{absolute_max:.1f} m → "
+        f"editor span {absolute_min - land_datum:.1f}–"
+        f"{absolute_max - land_datum:.1f} m)"
+    )
+    if job:
+        job.add_log(
+            f"Zeroed terrain to lowest land: {land_datum:.1f} m above sea level "
+            f"is now world Y=0",
+            "info",
+        )
+
     # 6. Normalise to 16-bit
     if job:
         job.progress = 56
     heightmap, height_info = generate_heightmap_from_array(elevation)
+    height_info["land_datum_m"] = land_datum
+    height_info["absolute_min_elevation"] = absolute_min
+    height_info["absolute_max_elevation"] = absolute_max
 
     # 7. Export
     if job:

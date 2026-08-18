@@ -21,7 +21,7 @@ from config.terrain import (
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.8.3"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
@@ -471,8 +471,9 @@ def pick_clean_height_scale(
     Pick the height-scale value the user should type into the "New Terrain"
     dialog.
 
-    Heightmaps are imported as **absolute metres above sea level** (sea = world
-    Y = 0) with *Resample heights* off, so the dialog's height scale only needs
+    Heightmaps are imported as **metres relative to the lowest land point**,
+    which the generator re-datums to world Y = 0 (issue #165), with *Resample
+    heights* off, so the dialog's height scale only needs
     to be large enough to *represent* the elevation span — it does not rescale
     the data. Per Atlas 2 (p.4) the engine default ``0.03125`` is correct for
     almost every real-world map, so we return it unless the absolute span

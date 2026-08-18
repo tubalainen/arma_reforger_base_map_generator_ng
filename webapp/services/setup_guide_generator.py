@@ -1065,9 +1065,11 @@ Terrain Grid Size Z:    {face_x}
 Grid Cell Size:         {self.hm.get('grid_cell_size_m', 2.0)}m
 Terrain Size:           {self.hm.get('terrain_size_m', 'unknown')}
 Height Scale:           {self.elev.get('dialog_height_scale', 0.03125):.6g}  (New Terrain dialog value — leave at default)
-Min Elevation:          {self.elev.get('min_elevation_m', 0):.1f}m  (absolute; sea level = 0)
+Min Elevation:          {self.elev.get('min_elevation_m', 0):.1f}m  (editor Y; negative = water bed)
 Max Elevation:          {self.elev.get('max_elevation_m', 0):.1f}m
 Elevation Range:        {self.elev.get('max_elevation_m', 0) - self.elev.get('min_elevation_m', 0):.1f}m
+World Y=0 equals:       {self.elev.get('land_datum_m', 0):.1f}m above real sea level (lowest land)
+Real-world Range:       {self.elev.get('absolute_min_elevation_m', 0):.1f}m - {self.elev.get('absolute_max_elevation_m', 0):.1f}m
 
 Heightmap Dimensions:   {dims} pixels
 Heightmap Format:       ESRI ASCII Grid (.asc) — recommended
