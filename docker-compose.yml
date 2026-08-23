@@ -92,7 +92,15 @@ services:
     command: ["sh", "/overpass_meta/start.sh"]
     environment:
       OVERPASS_MODE: init
-      # The public <region>-latest.osm.pbf carries no user metadata, and we
+      # The image downloads OVERPASS_PLANET_URL to /db/planet.osm.bz2 and its
+      # importer runs `bunzip2 < $PLANET_FILE | update_database` — it requires
+      # genuine bzip2-compressed OSM XML. Geofabrik publishes only .osm.pbf
+      # (no .osm.bz2 exists for any country extract), so the file has to be
+      # converted after download. OVERPASS_PLANET_PREPROCESS is eval'd by the
+      # entrypoint between the download and the import, which is exactly the
+      # hook for this. Override in .env to customise.
+      OVERPASS_PLANET_PREPROCESS: ${OVERPASS_PLANET_PREPROCESS:-mv -f /db/planet.osm.bz2 /db/planet.osm.pbf && osmium cat --overwrite -o /db/planet.osm.bz2 /db/planet.osm.pbf && rm -f /db/planet.osm.pbf}
+      # The public <region>-latest.osm.pbf carries no user names or IDs, and we
       # only read geometry and tags, so "no" is correct and much smaller.
       OVERPASS_META: "no"
       # Every query we issue is way/relation under a global [bbox:...]; we
@@ -110,7 +118,10 @@ services:
     volumes:
       - overpass_db:/db
       - overpass_meta:/overpass_meta:ro
-    restart: unless-stopped
+    # NOT unless-stopped: a failing import leaves no database, so the entrypoint
+    # re-downloads the whole extract on every restart. With `unless-stopped` a
+    # broken import becomes an endless re-download loop against Geofabrik.
+    restart: on-failure:3
     deploy:
       resources:
         limits:
