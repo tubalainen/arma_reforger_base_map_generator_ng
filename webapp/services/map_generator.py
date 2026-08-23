@@ -737,6 +737,44 @@ def build_metadata(
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+def _write_zip_archive(
+    output_dir: Path,
+    zip_file: Path,
+    sanitized_name: str,
+    job_id: str,
+) -> int:
+    """
+    Pack *output_dir* into *zip_file* under a ``{sanitized_name}/`` top-level
+    folder, returning the uncompressed byte total.
+
+    Split out of :func:`run_generation` so it can run in a worker thread —
+    zipping tens of megabytes is the single longest synchronous stretch in the
+    pipeline and it sits immediately before completion, so running it inline
+    stalled ``/status`` exactly when the Activity Log had the most to say
+    (#175). Callers must await it via ``asyncio.to_thread``.
+    """
+    files_to_zip = [p for p in output_dir.rglob("*") if p.is_file()]
+    raw_bytes = sum(p.stat().st_size for p in files_to_zip)
+    logger.info(
+        f"[{job_id}] Packing {len(files_to_zip)} file(s), "
+        f"{raw_bytes / (1024 * 1024):.1f} MB uncompressed, into "
+        f"{zip_file.name} under {sanitized_name}/"
+    )
+    with zipfile.ZipFile(str(zip_file), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for done, fpath in enumerate(files_to_zip, start=1):
+            arcname = sanitized_name + "/" + str(fpath.relative_to(output_dir))
+            zf.write(str(fpath), arcname)
+            # Narrate the long files individually — a single 200 MB
+            # satellite image otherwise looks like the job has hung.
+            if fpath.stat().st_size > 5 * 1024 * 1024:
+                logger.info(
+                    f"  + {arcname} ({fpath.stat().st_size / (1024 * 1024):.1f} MB)"
+                )
+            if done % 25 == 0:
+                logger.info(f"  … zipped {done}/{len(files_to_zip)} files")
+    return raw_bytes
+
+
 async def run_generation(job: MapGenerationJob):
     """
     Execute the full map generation pipeline.
@@ -906,7 +944,8 @@ async def run_generation(job: MapGenerationJob):
         from services.heightmap_generator import ElevationTruncatedError
 
         try:
-            heightmap_result = step_generate_heightmap(
+            heightmap_result = await asyncio.to_thread(
+                step_generate_heightmap,
                 dem_bytes=elevation_result["data"],
                 osm_data=osm_data,
                 target_size=target_size,
@@ -952,7 +991,8 @@ async def run_generation(job: MapGenerationJob):
             job.add_log(f"Downloaded fallback elevation from {fallback_source_label} (30m)", "success")
 
             try:
-                heightmap_result = step_generate_heightmap(
+                heightmap_result = await asyncio.to_thread(
+                    step_generate_heightmap,
                     dem_bytes=fallback_data,
                     osm_data=osm_data,
                     target_size=target_size,
@@ -1011,7 +1051,8 @@ async def run_generation(job: MapGenerationJob):
         hm_w, hm_h = (int(p) for p in hm_dims_str.split("x"))
         mask_dims = (hm_w - 1, hm_h - 1)
 
-        surface_result = step_generate_surface_masks(
+        surface_result = await asyncio.to_thread(
+            step_generate_surface_masks,
             elevation_array=heightmap_result["_elevation_array"],
             osm_data=osm_data,
             bbox=bbox,
@@ -1163,7 +1204,8 @@ async def run_generation(job: MapGenerationJob):
                     transformer._ne_projected[0],
                     transformer._ne_projected[1],
                 )
-                reproject_ok = reproject_satellite_to_terrain_crs(
+                reproject_ok = await asyncio.to_thread(
+                    reproject_satellite_to_terrain_crs,
                     satellite_path=satellite_path,
                     src_bbox=(
                         sat_fetch_bbox["west"],
@@ -1226,7 +1268,9 @@ async def run_generation(job: MapGenerationJob):
         logger.info(f"[{job.job_id}] Step 9: Feature extraction")
         job.add_log("Extracting water bodies, forests, and building details...")
 
-        features = step_extract_features(osm_data, primary_country, output_dir, job)
+        features = await asyncio.to_thread(
+            step_extract_features, osm_data, primary_country, output_dir, job
+        )
 
         job.progress = 86
         job.steps_completed.append({"step": "feature_extraction", "summary": features["summary"]})
@@ -1274,8 +1318,8 @@ async def run_generation(job: MapGenerationJob):
             grid = str(heightmap_result.get("terrain_grid_size", "")).split("x")
             faces_x = int(grid[0])
             faces_z = int(grid[1]) if len(grid) > 1 else faces_x
-            raster_report = validate_and_harden_rasters(
-                output_dir, faces_x, faces_z, job=job
+            raster_report = await asyncio.to_thread(
+                validate_and_harden_rasters, output_dir, faces_x, faces_z, job=job
             )
             metadata["raster_validation"] = raster_report
             if raster_report["fixes"]:
@@ -1381,7 +1425,7 @@ async def run_generation(job: MapGenerationJob):
         from services.setup_guide_generator import SetupGuideGenerator
 
         guide_gen = SetupGuideGenerator(sanitized_name, metadata)
-        guide_gen.generate(output_dir)
+        await asyncio.to_thread(guide_gen.generate, output_dir)
         job.add_log("Generated comprehensive SETUP_GUIDE.md", "success")
         job.steps_completed.append({
             "step": "setup_guide",
@@ -1394,7 +1438,9 @@ async def run_generation(job: MapGenerationJob):
         job.add_log("Organizing files into Enfusion project structure...")
 
         from services.export_service import organize_export_structure
-        organize_export_structure(output_dir, sanitized_name, job=job)
+        await asyncio.to_thread(
+            organize_export_structure, output_dir, sanitized_name, job=job
+        )
 
         job.progress = 95
         job.add_log("Creating ZIP archive...")
@@ -1403,25 +1449,9 @@ async def run_generation(job: MapGenerationJob):
         # Write ZIP with {sanitized_name}/ as top-level folder so the user
         # can copy that named folder straight into their addons directory,
         # matching the SETUP_GUIDE "Copy the {map_name}/ folder" instruction.
-        files_to_zip = [p for p in output_dir.rglob("*") if p.is_file()]
-        raw_bytes = sum(p.stat().st_size for p in files_to_zip)
-        logger.info(
-            f"[{job.job_id}] Packing {len(files_to_zip)} file(s), "
-            f"{raw_bytes / (1024 * 1024):.1f} MB uncompressed, into "
-            f"{zip_file.name} under {sanitized_name}/"
+        raw_bytes = await asyncio.to_thread(
+            _write_zip_archive, output_dir, zip_file, sanitized_name, job.job_id
         )
-        with zipfile.ZipFile(str(zip_file), "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for done, fpath in enumerate(files_to_zip, start=1):
-                arcname = sanitized_name + "/" + str(fpath.relative_to(output_dir))
-                zf.write(str(fpath), arcname)
-                # Narrate the long files individually — a single 200 MB
-                # satellite image otherwise looks like the job has hung.
-                if fpath.stat().st_size > 5 * 1024 * 1024:
-                    logger.info(
-                        f"  + {arcname} ({fpath.stat().st_size / (1024 * 1024):.1f} MB)"
-                    )
-                if done % 25 == 0:
-                    logger.info(f"  … zipped {done}/{len(files_to_zip)} files")
 
         packed = zip_file.stat().st_size
         ratio = (100.0 - packed / raw_bytes * 100.0) if raw_bytes else 0.0
