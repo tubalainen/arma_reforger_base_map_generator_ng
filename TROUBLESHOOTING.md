@@ -316,7 +316,7 @@ Failed to process planet file
 
 **Cause**: the Overpass importer runs `bunzip2 < planet.osm.bz2 | update_database` and requires genuine bzip2-compressed OSM XML. Geofabrik publishes only `.osm.pbf`, so the file must be converted after download. This affected v1.10.0, which passed the PBF through unconverted.
 
-**Fix**: upgrade to v1.10.1 or later and make sure your `docker-compose.yml` sets `OVERPASS_PLANET_PREPROCESS` on the `overpass-local` service. Then clear the half-built volume and start again:
+**Fix**: upgrade to v1.10.1 or later. The conversion ships **inside the app image**, so `docker compose pull` is enough — there is nothing to add to `docker-compose.yml`. Clear the half-built volume and start again:
 
 ```bash
 docker compose --profile local-osm down

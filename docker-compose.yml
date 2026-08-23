@@ -92,14 +92,12 @@ services:
     command: ["sh", "/overpass_meta/start.sh"]
     environment:
       OVERPASS_MODE: init
-      # The image downloads OVERPASS_PLANET_URL to /db/planet.osm.bz2 and its
-      # importer runs `bunzip2 < $PLANET_FILE | update_database` — it requires
-      # genuine bzip2-compressed OSM XML. Geofabrik publishes only .osm.pbf
-      # (no .osm.bz2 exists for any country extract), so the file has to be
-      # converted after download. OVERPASS_PLANET_PREPROCESS is eval'd by the
-      # entrypoint between the download and the import, which is exactly the
-      # hook for this. Override in .env to customise.
-      OVERPASS_PLANET_PREPROCESS: ${OVERPASS_PLANET_PREPROCESS:-mv -f /db/planet.osm.bz2 /db/planet.osm.pbf && osmium cat --overwrite -o /db/planet.osm.bz2 /db/planet.osm.pbf && rm -f /db/planet.osm.pbf}
+      # Geofabrik ships .osm.pbf but the importer needs bzip2 XML, so the file
+      # is converted after download. The default conversion lives in the app
+      # image (config/overpass_local.py) and is written into the launcher by
+      # the init step — so `docker compose pull` delivers it and there is
+      # nothing to hand-merge here. This line only passes an override through.
+      OVERPASS_PLANET_PREPROCESS: ${OVERPASS_PLANET_PREPROCESS:-}
       # The public <region>-latest.osm.pbf carries no user names or IDs, and we
       # only read geometry and tags, so "no" is correct and much smaller.
       OVERPASS_META: "no"

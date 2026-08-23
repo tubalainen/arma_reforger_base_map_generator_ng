@@ -338,6 +338,7 @@ repository's version after upgrading. Changes that need merging:
 | Version | Change to `docker-compose.yml` |
 |---|---|
 | v1.10.0 | Adds `overpass-local` and `overpass-local-init` services (profile `local-osm`), the `overpass_db` and `overpass_meta` volumes, and an `overpass_meta:/overpass_meta:ro` mount on the existing `arma-map-generator` service. All are inert unless you enable the profile — but without the mount on `arma-map-generator`, the UI cannot detect a country change. |
+| v1.10.1 | `restart: on-failure:3` on `overpass-local` (was `unless-stopped`). Recommended, not required: a failed import leaves no database and the sidecar re-downloads the whole extract on each restart, so the old policy could loop. The PBF→bzip2 conversion this release adds needs **no** compose change — it ships in the app image. |
 
 Also re-check `.env.example` after upgrading; new optional settings are added
 there with comments explaining them.

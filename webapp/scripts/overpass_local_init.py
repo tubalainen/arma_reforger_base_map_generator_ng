@@ -29,6 +29,7 @@ from pathlib import Path
 sys.path.insert(0, "/app")
 
 from config.overpass_local import (  # noqa: E402
+    DEFAULT_PLANET_PREPROCESS,
     LocalOverpassConfigError,
     local_countries,
     local_extract_size_gb,
@@ -116,6 +117,10 @@ def main() -> int:
         "set -e",
         f"export OVERPASS_PLANET_URL='{planet_url}'",
         f"export OVERPASS_DIFF_URL='{diff_url}'",
+        # ":=" assigns only when unset or empty, so an OVERPASS_PLANET_PREPROCESS
+        # passed in through docker-compose still wins over this default.
+        f': "${{OVERPASS_PLANET_PREPROCESS:={DEFAULT_PLANET_PREPROCESS}}}"',
+        "export OVERPASS_PLANET_PREPROCESS",
         "exec /app/docker-entrypoint.sh",
         "",
     ]
