@@ -8,6 +8,7 @@ closed `SplineShapeEntity` per forest / lake polygon.
 
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 
@@ -490,3 +491,168 @@ class TestLakeBathymetryConfig:
         assert carved > 8.0, (
             f"60 m pond only carved {carved:.1f} m below the surface"
         )
+
+
+# ---------------------------------------------------------------------------
+# Issue #170 — clipping before the union must not change what gets emitted
+# ---------------------------------------------------------------------------
+
+class TestClipBeforeUnionEquivalence:
+    """
+    The #170 fix discards out-of-map geometry before unioning instead of after
+    projecting. That is only a legitimate optimisation if the emitted `.layer`
+    text is identical, so pin exactly that: run each layer with clipping on and
+    with it disabled, and diff the output.
+    """
+
+    @staticmethod
+    def _without_clipping(gen):
+        """Restore the pre-#170 behaviour: hand the cleanup no bounds."""
+        gen._wgs84_bounds = lambda: None
+        return gen
+
+    def test_water_layer_is_byte_identical_with_and_without_the_pre_clip(
+        self, generator_factory
+    ):
+        # A lake wholly inside, one straddling the terrain edge, and a river.
+        water = {
+            "type": "FeatureCollection",
+            "features": [
+                _polygon_feature(
+                    [[[1.0, 1.0], [1.5, 1.0], [1.5, 1.5], [1.0, 1.5], [1.0, 1.0]]],
+                    water_type="lake",
+                    name="Inner",
+                ),
+                _polygon_feature(
+                    [[[3.5, 3.5], [4.5, 3.5], [4.5, 4.5], [3.5, 4.5], [3.5, 3.5]]],
+                    water_type="lake",
+                    name="EdgeStraddler",
+                ),
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[0.5, 0.5], [1.0, 1.2], [2.0, 2.0]],
+                    },
+                    "properties": {"water_type": "river"},
+                },
+            ],
+        }
+
+        clipped = generator_factory(water_features=copy.deepcopy(water))
+        unclipped = self._without_clipping(
+            generator_factory(water_features=copy.deepcopy(water))
+        )
+
+        assert clipped._generate_water_layer() == unclipped._generate_water_layer()
+
+    def test_vegetation_layer_is_byte_identical_with_and_without_the_pre_clip(
+        self, generator_factory
+    ):
+        forests = {
+            "type": "FeatureCollection",
+            "features": [
+                _polygon_feature(
+                    [[[0.5, 0.5], [1.2, 0.5], [1.2, 1.2], [0.5, 1.2], [0.5, 0.5]]],
+                    landuse="forest",
+                ),
+                # Two overlapping woods that must still merge into one.
+                _polygon_feature(
+                    [[[2.0, 2.0], [2.6, 2.0], [2.6, 2.6], [2.0, 2.6], [2.0, 2.0]]],
+                    natural="wood",
+                ),
+                _polygon_feature(
+                    [[[2.3, 2.3], [2.9, 2.3], [2.9, 2.9], [2.3, 2.9], [2.3, 2.3]]],
+                    natural="wood",
+                ),
+            ],
+        }
+
+        clipped = generator_factory(forest_features=copy.deepcopy(forests))
+        unclipped = self._without_clipping(
+            generator_factory(forest_features=copy.deepcopy(forests))
+        )
+
+        body = clipped._generate_vegetation_layer()
+        assert body == unclipped._generate_vegetation_layer()
+        assert "SplineShapeEntity" in body  # the comparison isn't vacuous
+
+    def test_a_lake_far_larger_than_the_map_still_emits_its_in_map_spline(
+        self, generator_factory
+    ):
+        """
+        The reported case: OSM hands back an entire lake thousands of times the
+        map area. The spline must still be emitted and must still cover the
+        terrain — the fix removes work, not water.
+        """
+        giant = {
+            "type": "FeatureCollection",
+            "features": [
+                _polygon_feature(
+                    [[[-50.0, -50.0], [50.0, -50.0], [50.0, 50.0],
+                      [-50.0, 50.0], [-50.0, -50.0]]],
+                    water_type="lake",
+                    name="Vänern",
+                )
+            ],
+        }
+        body = generator_factory(
+            water_features=copy.deepcopy(giant)
+        )._generate_water_layer()
+        assert "SplineShapeEntity" in body
+
+    def test_wgs84_bounds_prefers_the_transformer_over_the_metadata(
+        self, generator_factory
+    ):
+        gen = generator_factory()
+        # The identity transformer exposes no bounds, so the metadata bbox
+        # (0..4°) is the base — then padded outward, never inward.
+        from_metadata = gen._wgs84_bounds()
+        assert from_metadata[0] < 0.0 and from_metadata[2] > 4.0
+
+        class _BoundedTransformer(_IdentityTransformer):
+            west, south, east, north = 14.0, 59.0, 14.05, 59.025
+
+        gen.transformer = _BoundedTransformer()
+        from_transformer = gen._wgs84_bounds()
+        assert from_transformer[0] < 14.0 and from_transformer[2] > 14.05
+
+    def test_bounds_always_cover_the_full_terrain_rectangle(
+        self, generator_factory
+    ):
+        """
+        The terrain grid is snapped to the nearest 128-face tile, so it can
+        overhang the drawn bbox — here 4096 m of terrain over a 4000 m bbox.
+        Clipping flush to the bbox would cut geometry the terrain still covers,
+        so the returned rectangle must reach past the terrain's far corner.
+        """
+        gen = generator_factory()
+        west, south, east, north = gen._wgs84_bounds()
+
+        # Project the clip rectangle's NE corner into local metres and check it
+        # clears the terrain, which spans 0..4096 m from the bbox SW corner.
+        ne = gen.transformer.transform_points([{"x": east, "y": north}])[0]
+        assert ne["x"] > gen.terrain_width
+        assert ne["z"] > gen.terrain_depth
+
+        sw = gen.transformer.transform_points([{"x": west, "y": south}])[0]
+        assert sw["x"] < 0.0 and sw["z"] < 0.0
+
+    def test_missing_bounds_everywhere_is_not_fatal(self, generator_factory):
+        gen = generator_factory()
+        gen.transformer = _IdentityTransformer()
+        gen.metadata = dict(gen.metadata, input={})
+        assert gen._wgs84_bounds() is None
+
+    def test_a_transformer_that_blows_up_leaves_the_bounds_alone(
+        self, generator_factory
+    ):
+        """A margin calculation must never be the reason a lake disappears."""
+        gen = generator_factory()
+
+        class _BrokenTransformer:
+            def transform_points(self, points, elevation_array=None):
+                raise RuntimeError("projection unavailable")
+
+        gen.transformer = _BrokenTransformer()
+        assert gen._wgs84_bounds() == (0.0, 0.0, 4.0, 4.0)

@@ -300,3 +300,183 @@ class TestSimplifyIntegration:
         # No self-intersection
         line = LineString([(p["x"], p["z"]) for p in simplified])
         assert line.is_simple
+
+
+# --------------------------------------------------------------------------- #
+# Issue #170 — clip to the map before unioning
+# --------------------------------------------------------------------------- #
+
+
+# A small map somewhere in central Sweden, matching the issue report.
+_BOUNDS = (14.0, 59.0, 14.05, 59.025)
+
+
+class TestClipBeforeUnion:
+    """
+    Overpass returns whole ways/relations that merely touch the bbox, so a
+    2.8 km map can arrive carrying thousands of km² of lake. Unioning that
+    first is what made spline cleanup take tens of minutes (#170).
+
+    The contract these tests pin down: clipping is a **speed-up, not a
+    behaviour change** — geometry inside the map is untouched, and geometry
+    that never reaches the map was going to be discarded downstream anyway.
+    """
+
+    def test_polygon_fully_inside_the_map_is_untouched(self):
+        inside = _poly(_square(14.02, 59.01, 0.002), water_type="lake")
+
+        without = normalize_polygons([dict(inside)], "lake")
+        with_clip = normalize_polygons([dict(inside)], "lake", clip_bounds=_BOUNDS)
+
+        assert len(with_clip) == len(without) == 1
+        assert (
+            with_clip[0]["geometry"]["coordinates"]
+            == without[0]["geometry"]["coordinates"]
+        )
+
+    def test_polygon_fully_outside_the_map_is_dropped(self):
+        far_away = _poly(_square(20.0, 63.0, 0.5), water_type="lake")
+        out = normalize_polygons([far_away], "lake", clip_bounds=_BOUNDS)
+        assert out == []
+
+    def test_giant_lake_is_cut_down_but_keeps_its_in_map_shape(self):
+        """
+        The reported case: one lake far larger than the map. After clipping it
+        must still cover the whole map rectangle, and it must have shed the
+        out-of-map bulk (that is the entire point).
+        """
+        from shapely.geometry import box, shape
+
+        giant = _poly(_square(14.025, 59.0125, 1.0), water_type="lake", name="Vänern")
+        out = normalize_polygons([giant], "lake", clip_bounds=_BOUNDS)
+
+        assert len(out) == 1
+        clipped = shape(out[0]["geometry"])
+        # Still covers the drawn map...
+        assert clipped.contains(box(*_BOUNDS))
+        # ...but is now a tiny fraction of the 2°-wide input.
+        assert clipped.area < shape(giant["geometry"]).area / 100
+        # Properties survive the clip.
+        assert out[0]["properties"]["name"] == "Vänern"
+
+    def test_clip_keeps_a_margin_beyond_the_map_edge(self):
+        """
+        Lake rings are dilated outward by LAKE_RING_BUFFER_M *after* this stage
+        and only then clipped to the terrain rectangle, so the WGS84 pre-clip
+        must not cut flush with the bbox or it would eat that margin.
+        """
+        from shapely.geometry import shape
+
+        from services.spline_cleanup import CLIP_PAD_M
+
+        giant = _poly(_square(14.025, 59.0125, 1.0), water_type="lake")
+        clipped = shape(
+            normalize_polygons([giant], "lake", clip_bounds=_BOUNDS)[0]["geometry"]
+        )
+        west, south, east, north = clipped.bounds
+
+        # At least half the nominal pad on every side, in degrees of latitude.
+        min_pad_deg = (CLIP_PAD_M / 111_320.0) * 0.5
+        assert _BOUNDS[1] - south >= min_pad_deg
+        assert north - _BOUNDS[3] >= min_pad_deg
+        assert _BOUNDS[0] - west >= min_pad_deg
+        assert east - _BOUNDS[2] >= min_pad_deg
+
+    def test_overlapping_polygons_still_merge_after_clipping(self):
+        """Clipping must not defeat the dedup this module exists for."""
+        a = _poly(_square(14.02, 59.01, 0.003), water_type="lake")
+        b = _poly(_square(14.021, 59.011, 0.003), water_type="lake")
+        out = normalize_polygons([a, b], "lake", clip_bounds=_BOUNDS)
+        assert len(out) == 1
+
+    def test_non_polygon_features_pass_through_exactly_once(self):
+        """
+        Regression: with no polygonal input the old code returned
+        ``passthrough + features``, emitting every river twice.
+        """
+        river = _line([[14.01, 59.005], [14.03, 59.015]], water_type="river")
+        out = normalize_polygons([river], "lake", clip_bounds=_BOUNDS)
+        assert out == [river]
+
+    def test_missing_clip_bounds_keeps_the_old_behaviour(self):
+        far_away = _poly(_square(20.0, 63.0, 0.5), water_type="lake")
+        assert len(normalize_polygons([far_away], "lake")) == 1
+        assert len(normalize_polygons([far_away], "lake", clip_bounds=None)) == 1
+
+    @pytest.mark.parametrize(
+        "bad", [(), (1.0, 2.0), (14.05, 59.0, 14.0, 59.025), "nonsense"]
+    )
+    def test_unusable_clip_bounds_are_ignored_not_fatal(self, bad):
+        """A degenerate bbox must never silently delete every feature."""
+        inside = _poly(_square(14.02, 59.01, 0.002), water_type="lake")
+        assert len(normalize_polygons([inside], "lake", clip_bounds=bad)) == 1
+
+
+class TestPolylineClipRejection:
+    def test_river_outside_the_map_is_dropped(self):
+        near = _line([[14.01, 59.005], [14.03, 59.015]], water_type="river")
+        far = _line([[20.0, 63.0], [20.1, 63.1]], water_type="river")
+        out = normalize_polylines([near, far], "river", clip_bounds=_BOUNDS)
+        assert len(out) == 1
+        assert out[0]["geometry"]["coordinates"][0] == [14.01, 59.005]
+
+    def test_river_crossing_the_map_keeps_all_its_vertices(self):
+        """Rejection is per-feature; geometry that reaches the map is intact."""
+        coords = [[13.0, 58.5], [14.02, 59.01], [15.0, 59.5]]
+        out = normalize_polylines(
+            [_line(coords, water_type="river")], "river", clip_bounds=_BOUNDS
+        )
+        assert out[0]["geometry"]["coordinates"] == coords
+
+    def test_without_bounds_nothing_is_rejected(self):
+        far = _line([[20.0, 63.0], [20.1, 63.1]], water_type="river")
+        assert len(normalize_polylines([far], "river")) == 1
+
+
+# --------------------------------------------------------------------------- #
+# ElevationIndex — the indexed replacement for the per-point nearest scan
+# --------------------------------------------------------------------------- #
+
+
+class TestElevationIndex:
+    def test_exact_hits_match_the_source_points(self):
+        from services.spline_cleanup import ElevationIndex
+
+        pts = [
+            {"x": 0.0, "y": 10.0, "z": 0.0},
+            {"x": 100.0, "y": 20.0, "z": 0.0},
+            {"x": 100.0, "y": 30.0, "z": 100.0},
+        ]
+        index = ElevationIndex(pts)
+        for p in pts:
+            assert index.y(p["x"], p["z"]) == p["y"]
+
+    def test_agrees_with_the_linear_scan_on_invented_coordinates(self):
+        """
+        Clipping and buffering invent vertices that are not in the source ring.
+        Those fall through to the KD-tree, which must agree with the exhaustive
+        scan it replaced.
+        """
+        import random
+
+        from services.enfusion_project_generator import EnfusionProjectGenerator
+        from services.spline_cleanup import ElevationIndex
+
+        rng = random.Random(1170)
+        pts = [
+            {
+                "x": rng.uniform(0, 1000),
+                "y": rng.uniform(0, 300),
+                "z": rng.uniform(0, 1000),
+            }
+            for _ in range(400)
+        ]
+        index = ElevationIndex(pts)
+        for _ in range(200):
+            qx, qz = rng.uniform(-50, 1050), rng.uniform(-50, 1050)
+            assert index.y(qx, qz) == EnfusionProjectGenerator._nearest_y(pts, qx, qz)
+
+    def test_empty_point_list_is_not_fatal(self):
+        from services.spline_cleanup import ElevationIndex
+
+        assert ElevationIndex([]).y(5.0, 5.0) == 0.0
