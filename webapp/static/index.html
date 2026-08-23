@@ -177,15 +177,27 @@
                         <p class="small mb-1" id="progress-step">Initializing...</p>
                         <div id="progress-steps" class="small"></div>
 
-                        <!-- Console log section -->
-                        <div class="console-section mt-3">
+                        <!-- The Activity Log is parked here during a run and
+                             moved to #results-log-slot when the job ends. -->
+                        <div id="progress-log-anchor">
+                        <!-- Console log section.
+                             Moved into the results panel on completion so the
+                             log survives the overlay being hidden (#175). -->
+                        <div class="console-section mt-3" id="console-section">
                             <div class="d-flex align-items-center justify-content-between mb-2">
                                 <h6 class="mb-0"><i class="bi bi-terminal"></i> Activity Log</h6>
-                                <button class="btn btn-sm btn-outline-secondary console-toggle" id="btn-toggle-console">
-                                    <i class="bi bi-chevron-down"></i>
-                                </button>
+                                <div class="d-flex align-items-center gap-2">
+                                    <button class="btn btn-sm btn-outline-secondary" id="btn-copy-console"
+                                            title="Copy the whole log to the clipboard">
+                                        <i class="bi bi-clipboard"></i>
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary console-toggle" id="btn-toggle-console">
+                                        <i class="bi bi-chevron-down"></i>
+                                    </button>
+                                </div>
                             </div>
                             <div id="console-log" class="console-log"></div>
+                        </div>
                         </div>
                     </div>
                 </div>
@@ -227,6 +239,11 @@
                         <button class="btn btn-primary w-100" id="btn-download">
                             <i class="bi bi-download"></i> Download Map Package (.zip)
                         </button>
+
+                        <!-- The Activity Log is moved in here when the job
+                             finishes, so it stays readable after the progress
+                             overlay closes (#175). -->
+                        <div id="results-log-slot"></div>
                     </div>
                 </div>
             </div>
