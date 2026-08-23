@@ -46,6 +46,7 @@ Instead of manually sourcing elevation data, painting surface masks by hand, pla
 - **Enfusion prefab mapping** (RG_Road_* generators)
 - **Spline control point generation** for World Editor import
 - **Multi-mirror Overpass API pool** for reliable OSM data fetching (overpass-api.de, Private.coffee, VK Maps, plus country-gated regional mirrors) with live health probing, per-mirror concurrency limits, response caching and automatic failover
+- **Optional self-hosted Overpass sidecar** (`docker compose --profile local-osm up -d`) holding a single country extract, self-updating from Geofabrik's daily diffs — used automatically inside its coverage, with the public pool as fallback
 
 ### Water Features
 - **Lakes, rivers, streams, coastline, wetlands** from OSM

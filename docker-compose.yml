@@ -12,6 +12,10 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - map_output:/app/output
+      # Read-only view of the Overpass sidecar's region marker, so the UI can
+      # tell when .env asks for a different country than the one loaded.
+      # Empty (and harmless) when the local-osm profile is not in use.
+      - overpass_meta:/overpass_meta:ro
     env_file:
       - .env
     environment:
@@ -50,5 +54,75 @@ services:
       retries: 3
       start_period: 10s
 
+  # ---------------------------------------------------------------------
+  # Optional self-hosted Overpass sidecar (profile: local-osm)
+  # ---------------------------------------------------------------------
+  # Start with:  docker compose --profile local-osm up -d
+  # Without the profile these services do not exist and the app behaves
+  # exactly as before, querying the public mirror pool.
+  #
+  # Set OVERPASS_LOCAL_COUNTRIES in .env (e.g. SE) to choose the extract.
+  # Changing it and restarting triggers an automatic re-import.
+
+  # One-shot: resolves the country code to a Geofabrik extract and clears the
+  # database volume if the region changed. Uses the app image so the
+  # country -> extract mapping lives in exactly one place.
+  overpass-local-init:
+    profiles: ["local-osm"]
+    image: ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest
+    entrypoint: ["python", "/app/scripts/overpass_local_init.py"]
+    # Needs to remove files written by the Overpass container, which runs as root.
+    user: "0:0"
+    env_file:
+      - .env
+    volumes:
+      - overpass_db:/db
+      - overpass_meta:/overpass_meta
+    restart: "no"
+
+  overpass-local:
+    profiles: ["local-osm"]
+    image: wiktorn/overpass-api:latest
+    depends_on:
+      overpass-local-init:
+        condition: service_completed_successfully
+    # The image has no ENTRYPOINT, only CMD ["/app/docker-entrypoint.sh"].
+    # The init step writes this launcher with the resolved URLs already baked
+    # in, so there is no shell interpolation to escape in this file.
+    command: ["sh", "/overpass_meta/start.sh"]
+    environment:
+      OVERPASS_MODE: init
+      # The public <region>-latest.osm.pbf carries no user metadata, and we
+      # only read geometry and tags, so "no" is correct and much smaller.
+      OVERPASS_META: "no"
+      # Every query we issue is way/relation under a global [bbox:...]; we
+      # never use area[] or is_in, and area generation is a large slice of
+      # both import time and ongoing CPU.
+      OVERPASS_USE_AREAS: "false"
+      # Defaults to true, which stops the container after the import instead
+      # of serving. We want it to go straight to serving and applying diffs.
+      OVERPASS_STOP_AFTER_INIT: "false"
+      # Geofabrik publishes country diffs once a day; polling faster is waste.
+      OVERPASS_UPDATE_SLEEP: "86400"
+      OVERPASS_MAX_TIMEOUT: "300"
+      OVERPASS_RATE_LIMIT: "0"
+      TZ: ${TZ:-UTC}
+    volumes:
+      - overpass_db:/db
+      - overpass_meta:/overpass_meta:ro
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   map_output:
+  # Overpass database. Sized from the extract: roughly 8-12x the compressed
+  # PBF, so Sweden's 0.76 GB extract lands around 8 GB.
+  overpass_db:
+  # Tiny volume carrying the resolved region + URLs between the init step,
+  # the sidecar and the web app.
+  overpass_meta:

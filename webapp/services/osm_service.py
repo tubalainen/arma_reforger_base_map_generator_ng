@@ -35,7 +35,12 @@ from config import (
     OVERPASS_REGIONAL_ENDPOINTS,
     overpass_planet_endpoints, overpass_status_url,
 )
+from config.overpass_local import (
+    LocalOverpassConfigError, local_countries, local_enabled, local_only,
+    local_region,
+)
 from services import overpass_cache
+from services.overpass_local import local_endpoint_if_ready
 from services.utils.geo import bbox_to_overpass_str
 from services.utils.geojson import (
     extract_coords_from_geometry,
@@ -426,6 +431,55 @@ def _pool_for_country(country: Optional[str]) -> list[dict]:
     return pool
 
 
+async def _pool_with_local(country: Optional[str]) -> list[dict]:
+    """The pool for `country`, with the local sidecar in front when usable.
+
+    The sidecar is just another regional mirror: it holds a country extract,
+    so it is only offered for the countries it covers. No ranking special-case
+    is needed — it answers in single-digit milliseconds against hundreds for a
+    public mirror, so the latency probe puts it first on its own.
+
+    `OVERPASS_LOCAL_ONLY` drops the public mirrors entirely, for deployments
+    that must not talk to third-party services.
+    """
+    pool = _pool_for_country(country)
+
+    if not local_enabled():
+        return pool
+
+    try:
+        # Resolving the region is what validates the configuration;
+        # local_countries() alone just parses the variable and never fails.
+        local_region()
+        covers = (country or "").upper() in local_countries()
+    except LocalOverpassConfigError as e:
+        logger.warning(f"Local Overpass config is unusable ({e}) — using public mirrors")
+        return pool
+
+    if not covers:
+        logger.info(
+            f"Local Overpass covers {local_countries()}, not {country!r} — "
+            f"using public mirrors for this area"
+        )
+        return pool
+
+    endpoint = await local_endpoint_if_ready()
+    if endpoint is None:
+        if local_only():
+            logger.error(
+                "OVERPASS_LOCAL_ONLY is set but the local sidecar is not ready — "
+                "no mirrors available"
+            )
+            return []
+        return pool
+
+    if local_only():
+        logger.info("OVERPASS_LOCAL_ONLY set — querying only the local sidecar")
+        return [endpoint]
+
+    return [endpoint] + pool
+
+
 async def probe_overpass_mirrors(job=None, country: Optional[str] = None) -> list[dict]:
     """Probe every candidate mirror in parallel; return the healthy ones, fastest first.
 
@@ -440,7 +494,12 @@ async def probe_overpass_mirrors(job=None, country: Optional[str] = None) -> lis
     mirror fails does the full pool come back, on the theory that a probe-wide
     failure says more about our network than about the mirrors.
     """
-    pool = _pool_for_country(country)
+    pool = await _pool_with_local(country)
+    if not pool:
+        logger.error("Overpass: no mirrors available for this area")
+        if job:
+            job.add_log("No Overpass mirrors available for this area", "error")
+        return []
     async with httpx.AsyncClient(timeout=OVERPASS_PROBE_TIMEOUT) as client:
         results = await asyncio.gather(
             *(_probe_one_mirror(client, ep) for ep in pool)
@@ -559,6 +618,8 @@ async def _try_endpoint(
             f"Successfully fetched {query_type} from Overpass [{label}]: "
             f"{len(result.get('elements', []))} elements, {len(resp.content) / 1024:.1f} KB"
         )
+        if job is not None:
+            job.overpass_source = label
         return result, False
 
     if resp.status_code == 429:

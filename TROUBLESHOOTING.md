@@ -283,6 +283,38 @@ Getting 403 means your credentials are recognized, but your account hasn't been 
 
 To exclude the VK Maps mirror (Russian-operated), set `OVERPASS_DISABLE_VK=1`. To disable response caching, set `OVERPASS_CACHE_ENABLED=0`.
 
+### Removing the dependency entirely: the local Overpass sidecar
+
+If public mirrors keep letting you down, run your own. Set `OVERPASS_LOCAL_COUNTRIES` to one ISO country code in `.env`, then:
+
+```bash
+docker compose --profile local-osm up -d
+```
+
+The sidecar downloads that country's Geofabrik extract, builds an Overpass database, and then keeps itself current from Geofabrik's daily diff stream. No cron job is involved.
+
+**What to expect on first boot.** The import takes hours for a large country and needs roughly 10x the compressed extract on disk — Sweden's 0.76 GB extract lands near 8 GB. Nothing breaks meanwhile: the app keeps using public mirrors, and the web UI shows a progress banner until the sidecar answers.
+
+**Changing country.** Edit `OVERPASS_LOCAL_COUNTRIES` and restart the sidecar:
+
+```bash
+docker compose --profile local-osm up -d --force-recreate overpass-local
+```
+
+The init step notices the change, clears the old database and re-imports. Until you restart, the web UI flags that the running container no longer matches `.env`.
+
+**Coverage.** The sidecar holds one country, not the planet. The app only queries it for areas inside that country and uses the public pool everywhere else — you don't choose per generation, and there is no way to accidentally ask a Sweden extract about France. Which source served a generation is recorded in the Activity Log and in the SETUP_GUIDE's Data Sources appendix.
+
+**Useful checks:**
+
+```bash
+docker compose logs -f overpass-local
+```
+
+```bash
+curl -s localhost:8080/api/osm/local-status
+```
+
 ### Issue: Jobs take very long time
 
 **Symptoms**: Generation taking 5+ minutes for small areas.
