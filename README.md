@@ -221,6 +221,121 @@ The ZIP contains a ready-to-use Enfusion project structure with pre-configured `
 
 See the [Output Files](#output-files) section below for the full file listing.
 
+## Optional: Self-Hosted OSM Data (Local Overpass)
+
+By default the app fetches OpenStreetMap features from a pool of public Overpass
+mirrors. Those are volunteer-run, rate-limited, and occasionally down. If that
+becomes a problem you can run your own Overpass instance alongside the app,
+holding a single country's data.
+
+This is **entirely optional**. Leave `OVERPASS_LOCAL_COUNTRIES` unset and nothing
+changes.
+
+### Enable it
+
+Pick one country by ISO code in `.env`:
+
+```bash
+OVERPASS_LOCAL_COUNTRIES=SE
+```
+
+Then start the extra services with the `local-osm` profile:
+
+```bash
+docker compose --profile local-osm up -d
+```
+
+Supported codes: `SE NO DK FI EE LV LT DE PL RU GB FR ES IT AT CH CZ NL BE UA RO
+HU SK HR RS BG GR PT IE IS`
+
+> **Upgrading from v1.9.0 or earlier?** The sidecar adds two services and two
+> volumes to `docker-compose.yml`, and adds one volume mount to the existing
+> `arma-map-generator` service. Pull the latest `docker-compose.yml` from this
+> repository, or see [Upgrading](#upgrading-an-existing-deployment) below.
+
+### What happens on first boot
+
+The sidecar downloads that country's [Geofabrik](https://download.geofabrik.de/)
+extract and builds an Overpass database. This takes **hours** for a large country
+and needs roughly **10x the compressed extract on disk** — Sweden's 0.76 GB
+extract lands near 8 GB.
+
+Nothing breaks meanwhile. The app keeps using public mirrors, and a banner in the
+sidebar shows the sidecar's progress. Watch it with:
+
+```bash
+docker compose logs -f overpass-local
+```
+
+### Staying up to date
+
+Geofabrik publishes a diff for each extract once a day. The sidecar applies them
+itself — there is no cron job to set up and nothing to run manually.
+
+### Changing country
+
+Edit `OVERPASS_LOCAL_COUNTRIES` in `.env`, then recreate the sidecar:
+
+```bash
+docker compose --profile local-osm up -d --force-recreate overpass-local
+```
+
+It notices the change, clears the old database and re-imports. Until you do this,
+the web UI flags that the running container no longer matches your `.env`.
+
+### How it gets used
+
+You do not choose per generation. The sidecar holds one country, so the app uses
+it automatically for areas inside that country and the public mirror pool
+everywhere else — there is no way to accidentally ask a Sweden database about
+France. Which source served a generation is recorded in the Activity Log and in
+the SETUP_GUIDE's Data Sources appendix.
+
+### Settings
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OVERPASS_LOCAL_COUNTRIES` | *(unset)* | One ISO country code. Unset disables the sidecar entirely. |
+| `OVERPASS_LOCAL_REGION` | *(derived)* | Override with a raw Geofabrik path, e.g. `europe`, for more than one country. Much larger. |
+| `OVERPASS_LOCAL_ONLY` | `0` | `1` refuses public mirrors entirely. Generations fail rather than fall back — for private or air-gapped deployments. |
+| `OVERPASS_LOCAL_STALE_AFTER_HOURS` | `48` | Flag the sidecar as stale after this long without a diff. |
+
+### Checking status
+
+```bash
+curl -s localhost:8080/api/osm/local-status
+```
+
+| State | Meaning |
+|---|---|
+| `disabled` | No sidecar configured — the normal setup |
+| `importing` | Configured, not answering yet; public mirrors in use |
+| `ready` | Serving, data fresh |
+| `stale` | Serving, but no diff applied recently — check the logs |
+| `restart_required` | `.env` asks for a different country than the running container built |
+| `misconfigured` | Configuration cannot resolve to a single extract |
+
+## Upgrading an existing deployment
+
+Pulling a new image is not always enough: `docker-compose.yml` and `.env` live in
+your working copy, so changes to them have to be picked up by hand.
+
+```bash
+git pull
+docker compose pull
+docker compose up -d
+```
+
+If you keep a customised `docker-compose.yml`, compare it against this
+repository's version after upgrading. Changes that need merging:
+
+| Version | Change to `docker-compose.yml` |
+|---|---|
+| v1.10.0 | Adds `overpass-local` and `overpass-local-init` services (profile `local-osm`), the `overpass_db` and `overpass_meta` volumes, and an `overpass_meta:/overpass_meta:ro` mount on the existing `arma-map-generator` service. All are inert unless you enable the profile — but without the mount on `arma-map-generator`, the UI cannot detect a country change. |
+
+Also re-check `.env.example` after upgrading; new optional settings are added
+there with comments explaining them.
+
 ## API Keys
 
 ### Worldwide elevation needs no API key
