@@ -1317,7 +1317,15 @@ async def run_generation(job: MapGenerationJob):
             building_data=features.get("buildings"),
             country_codes=country_info.get("countries", []),
         )
-        enfusion_files = enfusion_gen.generate_all(output_dir, job=job)
+        # generate_all is pure CPU + file IO (shapely unions, RDP, layer
+        # writing) and used to run inline on the event loop. On a large map
+        # that froze the whole app for the duration — /status stopped
+        # answering, the browser Activity Log stalled, and the job looked hung
+        # (#170). asyncio.to_thread copies the contextvars, so the job log tee
+        # in job_log_handler still routes records to the right job.
+        enfusion_files = await asyncio.to_thread(
+            enfusion_gen.generate_all, output_dir, job=job
+        )
 
         # Emit surface_assignments.json sidecar (Atlas 2 / v1.4.0).
         # Maps every emitted spline name to the surface mask it is expected

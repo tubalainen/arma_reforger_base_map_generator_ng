@@ -56,6 +56,8 @@ from config.forests import validate_forest_prefab, forest_type_from_osm
 from config.lakes import LAKE_RING_BUFFER_M, validate_lake_prefab
 from services.entity_naming import EntityNamer, expected_surface
 from services.spline_cleanup import (
+    CLIP_PAD_M,
+    ElevationIndex,
     normalize_polygons,
     normalize_polylines,
     adaptive_tolerance,
@@ -986,7 +988,9 @@ class EnfusionProjectGenerator:
         # v1.4.4 — drop hairpin (>150° near-reversal in <20 m) vertices on
         # rivers BEFORE projection. This kills the spiral / loop artefact
         # reported in #93 (e.g. the "crazy looped spline" screenshot).
-        river_features = normalize_polylines(river_features, "river")
+        river_features = normalize_polylines(
+            river_features, "river", clip_bounds=self._wgs84_bounds()
+        )
         if not river_features:
             return ""
 
@@ -1304,8 +1308,8 @@ class EnfusionProjectGenerator:
         except Exception:  # pragma: no cover - defensive
             return False
 
-    @staticmethod
     def _normalized_polygon_collection(
+        self,
         features: Optional[dict],
         kind: str,
     ) -> Optional[dict]:
@@ -1316,11 +1320,91 @@ class EnfusionProjectGenerator:
         Non-polygon members (e.g. river LineStrings inside the water feature
         set) pass through unchanged. ``None`` / empty input is returned as-is
         so callers can keep their existing empty-message handling.
+
+        The map's WGS84 bbox is handed down so the cleanup can discard the
+        out-of-map bulk of each OSM way/relation before unioning (#170).
         """
         if not features or not features.get("features"):
             return features
-        cleaned = normalize_polygons(features["features"], kind)
+        cleaned = normalize_polygons(
+            features["features"], kind, clip_bounds=self._wgs84_bounds()
+        )
         return {"type": "FeatureCollection", "features": cleaned}
+
+    def _wgs84_bounds(self) -> Optional[tuple[float, float, float, float]]:
+        """
+        A WGS84 ``(west, south, east, north)`` rectangle that provably contains
+        the whole terrain, for the spline-cleanup pre-clip (#170). ``None`` when
+        neither the transformer nor the metadata can supply a bbox.
+
+        This is deliberately *not* just the drawn bbox. The terrain grid is
+        snapped to the nearest 128-face tile, so ``terrain_width`` can overhang
+        the drawn square; clipping flush to the bbox would then cut geometry the
+        terrain still covers, turning an optimisation into a visible change.
+        :meth:`_expand_to_terrain` measures the overhang through the actual
+        transformer rather than assuming a metres-per-degree constant.
+        """
+        t = self.transformer
+        base: Optional[tuple[float, float, float, float]] = None
+        if t is not None and all(
+            isinstance(getattr(t, a, None), (int, float))
+            for a in ("west", "south", "east", "north")
+        ):
+            base = (float(t.west), float(t.south), float(t.east), float(t.north))
+        else:
+            bbox = (self.metadata.get("input", {}) or {}).get("bbox") or {}
+            try:
+                base = (
+                    float(bbox["west"]),
+                    float(bbox["south"]),
+                    float(bbox["east"]),
+                    float(bbox["north"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                return None
+
+        return self._expand_to_terrain(base)
+
+    def _expand_to_terrain(
+        self, base: tuple[float, float, float, float]
+    ) -> tuple[float, float, float, float]:
+        """
+        Grow *base* until it covers the terrain rectangle with room to spare.
+
+        The scale is measured by projecting the bbox corners through the live
+        transformer, so this stays correct whatever projection is in play — the
+        thing that must never happen is a clip rectangle narrower than the
+        terrain the splines are eventually cut to.
+
+        A transformer that cannot answer leaves the bounds untouched; the
+        module-level ``CLIP_PAD_M`` collar in :mod:`services.spline_cleanup`
+        still applies on top.
+        """
+        west, south, east, north = base
+        span_lon = east - west
+        span_lat = north - south
+        if self.transformer is None or span_lon <= 0 or span_lat <= 0:
+            return base
+
+        try:
+            corners = self.transformer.transform_points(
+                [{"x": west, "y": south}, {"x": east, "y": north}]
+            )
+            width_m = abs(corners[1]["x"] - corners[0]["x"])
+            depth_m = abs(corners[1]["z"] - corners[0]["z"])
+        except Exception:  # noqa: BLE001 - never let a margin calc lose a lake
+            return base
+        if width_m <= 0 or depth_m <= 0:
+            return base
+
+        m_per_deg_lon = width_m / span_lon
+        m_per_deg_lat = depth_m / span_lat
+        # The terrain is anchored at the bbox SW corner, so any overhang is on
+        # the N/E sides — but pad every side, the cost is nil and it keeps this
+        # robust if the anchoring ever changes.
+        pad_lon = (max(0.0, self.terrain_width - width_m) + CLIP_PAD_M) / m_per_deg_lon
+        pad_lat = (max(0.0, self.terrain_depth - depth_m) + CLIP_PAD_M) / m_per_deg_lat
+        return (west - pad_lon, south - pad_lat, east + pad_lon, north + pad_lat)
 
     def _polygon_features_to_splines(
         self,
@@ -1489,11 +1573,13 @@ class EnfusionProjectGenerator:
                     continue
                 s_coords = list(s.exterior.coords)[:-1]  # drop closing dup
                 if 3 <= len(s_coords) <= max_pts:
-                    result = []
-                    for cx, cz in s_coords:
-                        nearest = min(pts, key=lambda p, cx=cx, cz=cz: (p["x"] - cx) ** 2 + (p["z"] - cz) ** 2)
-                        result.append({"x": cx, "y": nearest["y"], "z": cz})
-                    return result
+                    # RDP keeps original vertices, so this is an O(1) dict hit
+                    # per point rather than the old full scan of `pts` (#170).
+                    index = ElevationIndex(pts)
+                    return [
+                        {"x": cx, "y": index.y(cx, cz), "z": cz}
+                        for cx, cz in s_coords
+                    ]
         except Exception:
             pass
 
@@ -1660,10 +1746,11 @@ class EnfusionProjectGenerator:
                     continue
                 s_coords = list(s.coords)
                 if 2 <= len(s_coords) <= max_pts:
-                    result = []
-                    for cx, cz in s_coords:
-                        nearest = min(pts, key=lambda p, cx=cx, cz=cz: (p["x"] - cx) ** 2 + (p["z"] - cz) ** 2)
-                        result.append({"x": cx, "y": nearest["y"], "z": cz})
+                    index = ElevationIndex(pts)  # #170 — was a scan per point
+                    result = [
+                        {"x": cx, "y": index.y(cx, cz), "z": cz}
+                        for cx, cz in s_coords
+                    ]
                     # Always preserve true endpoints (snap-to-nearest could
                     # have drifted the first/last vertex slightly).
                     if result:
@@ -1815,14 +1902,13 @@ class EnfusionProjectGenerator:
             coords = list(grown.exterior.coords)[:-1]  # drop closing duplicate
             if len(coords) < 3:
                 return local_points
-            out: list[dict] = []
-            for cx, cz in coords:
-                nearest = min(
-                    local_points,
-                    key=lambda p, cx=cx, cz=cz: (p["x"] - cx) ** 2 + (p["z"] - cz) ** 2,
-                )
-                out.append({"x": cx, "y": nearest["y"], "z": cz})
-            return out
+            # A buffer invents coordinates, so most of these miss the exact-hit
+            # dict and land on the KD-tree — still vastly cheaper than the
+            # per-point linear scan this replaced (#170).
+            index = ElevationIndex(local_points)
+            return [
+                {"x": cx, "y": index.y(cx, cz), "z": cz} for cx, cz in coords
+            ]
         except Exception:  # pragma: no cover - defensive
             logger.warning("Lake ring buffer failed; emitting unbuffered ring")
             return local_points
@@ -1875,6 +1961,11 @@ class EnfusionProjectGenerator:
         else:
             return []
 
+        # Build the elevation index once for the whole ring rather than
+        # rescanning `local_points` for every clipped coordinate (#170): a
+        # clip reuses source vertices except where the ring crosses the
+        # terrain edge, so almost every lookup is an exact dict hit.
+        index = ElevationIndex(local_points)
         rings: list[list[dict]] = []
         for part in polys:
             if part.is_empty or part.exterior is None:
@@ -1883,14 +1974,20 @@ class EnfusionProjectGenerator:
             if len(coords) < 3:
                 continue
             rings.append([
-                {"x": cx, "y": self._nearest_y(local_points, cx, cz), "z": cz}
+                {"x": cx, "y": index.y(cx, cz), "z": cz}
                 for cx, cz in coords
             ])
         return rings
 
     @staticmethod
     def _nearest_y(points: list[dict], x: float, z: float) -> float:
-        """Elevation of the original projected point nearest ``(x, z)``."""
+        """
+        Elevation of the original projected point nearest ``(x, z)``.
+
+        Kept for single-shot callers; anything answering more than a couple of
+        queries against the same point list should build an
+        :class:`~services.spline_cleanup.ElevationIndex` instead.
+        """
         if not points:
             return 0.0
         nearest = min(
@@ -1921,8 +2018,9 @@ class EnfusionProjectGenerator:
         coords = list(repaired.exterior.coords)[:-1]
         if len(coords) < 3:
             return None
+        index = ElevationIndex(pts)  # #170 — was a scan of `pts` per coordinate
         return [
-            {"x": cx, "y": EnfusionProjectGenerator._nearest_y(pts, cx, cz), "z": cz}
+            {"x": cx, "y": index.y(cx, cz), "z": cz}
             for cx, cz in coords
         ]
 
