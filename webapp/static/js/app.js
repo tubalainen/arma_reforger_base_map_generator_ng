@@ -353,6 +353,29 @@ document.getElementById('btn-clear').addEventListener('click', clearSelection);
 document.getElementById('btn-close-results').addEventListener('click', closeResults);
 
 // Console toggle handler
+// Copy the whole Activity Log. The reason this exists: the log is the thing
+// users paste into bug reports, and until #175 the only way to get it was
+// `docker compose logs` on the host.
+document.getElementById('btn-copy-console').addEventListener('click', async function() {
+    const icon = this.querySelector('i');
+    const text = consoleLogText();
+    if (!text) return;
+    try {
+        await navigator.clipboard.writeText(text);
+    } catch (err) {
+        // Clipboard API needs a secure context; fall back to a selection so
+        // the user can still copy by hand over plain HTTP.
+        const range = document.createRange();
+        range.selectNodeContents(document.getElementById('console-log'));
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        return;
+    }
+    icon.className = 'bi bi-clipboard-check';
+    setTimeout(() => { icon.className = 'bi bi-clipboard'; }, 1500);
+});
+
 document.getElementById('btn-toggle-console').addEventListener('click', function() {
     const consoleLog = document.getElementById('console-log');
     const toggleBtn = this;
@@ -594,6 +617,9 @@ function startPolling(jobId) {
                 addConsoleLog('✓ Map generation completed successfully!', 'success');
                 clearInterval(pollInterval);
                 pollInterval = null;
+                // Carry the log across to the results panel BEFORE hiding the
+                // overlay, so it stays readable (#175).
+                moveConsoleTo('results-log-slot');
                 hideProgress();
                 showResults(job);
             } else if (job.status === 'failed') {
@@ -601,8 +627,12 @@ function startPolling(jobId) {
                 addConsoleLog(`✗ Generation failed: ${errorMsg}`, 'error');
                 clearInterval(pollInterval);
                 pollInterval = null;
-                hideProgress();
-                alert('Generation failed: ' + errorMsg);
+                // A failed run is exactly when the log matters most, so leave
+                // the overlay open instead of hiding it. The Generate button
+                // is re-enabled so the user is not stuck.
+                document.getElementById('btn-generate').disabled = false;
+                document.getElementById('progress-step').textContent =
+                    'Generation failed — see the Activity Log below.';
             }
         } catch (err) {
             console.error('Polling error:', err);
@@ -655,6 +685,29 @@ function clearConsoleLog() {
     document.getElementById('console-log').innerHTML = '';
 }
 
+// The Activity Log lives inside #progress-overlay, which is hidden the moment
+// a job finishes. While spline cleanup took 10-30 minutes that was invisible —
+// you had ages to read the log as it scrolled. Now that generation is fast the
+// overlay closes within seconds of the last line arriving, so the log has to
+// outlive it (#175). Moving the DOM node keeps every entry: no copying, no
+// duplicate rendering, and the toggle/copy buttons keep working because they
+// move with it.
+function moveConsoleTo(containerId) {
+    const section = document.getElementById('console-section');
+    const target = document.getElementById(containerId);
+    if (section && target && section.parentElement !== target) {
+        target.appendChild(section);
+    }
+}
+
+function consoleLogText() {
+    const consoleLog = document.getElementById('console-log');
+    if (!consoleLog) return '';
+    return Array.from(consoleLog.children)
+        .map((entry) => entry.textContent.replace(/\s+/g, ' ').trim())
+        .join('\n');
+}
+
 // ===========================================================================
 // Progress display
 // ===========================================================================
@@ -662,6 +715,8 @@ function clearConsoleLog() {
 function showProgress() {
     document.getElementById('progress-overlay').classList.remove('d-none');
     document.getElementById('results-panel').classList.add('d-none');
+    // Bring the log back from the results panel before starting a new run.
+    moveConsoleTo('progress-log-anchor');
     document.getElementById('btn-generate').disabled = true;
     document.getElementById('progress-bar').style.width = '0%';
     document.getElementById('progress-bar').textContent = '0%';
