@@ -260,6 +260,12 @@ extract and builds an Overpass database. This takes **hours** for a large countr
 and needs roughly **10x the compressed extract on disk** — Sweden's 0.76 GB
 extract lands near 8 GB.
 
+There is an extra step you will see in the logs before the import starts:
+Geofabrik publishes `.osm.pbf`, but the Overpass importer requires bzip2-compressed
+OSM XML, so the file is converted after download. On a country-sized extract that
+conversion alone can take an hour or more. It is a one-time cost — the daily diffs
+afterwards are small and need no conversion.
+
 Nothing breaks meanwhile. The app keeps using public mirrors, and a banner in the
 sidebar shows the sidecar's progress. Watch it with:
 
@@ -332,6 +338,7 @@ repository's version after upgrading. Changes that need merging:
 | Version | Change to `docker-compose.yml` |
 |---|---|
 | v1.10.0 | Adds `overpass-local` and `overpass-local-init` services (profile `local-osm`), the `overpass_db` and `overpass_meta` volumes, and an `overpass_meta:/overpass_meta:ro` mount on the existing `arma-map-generator` service. All are inert unless you enable the profile — but without the mount on `arma-map-generator`, the UI cannot detect a country change. |
+| v1.10.1 | `restart: on-failure:3` on `overpass-local` (was `unless-stopped`). Recommended, not required: a failed import leaves no database and the sidecar re-downloads the whole extract on each restart, so the old policy could loop. The PBF→bzip2 conversion this release adds needs **no** compose change — it ships in the app image. |
 
 Also re-check `.env.example` after upgrading; new optional settings are added
 there with comments explaining them.

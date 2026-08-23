@@ -66,6 +66,22 @@ PARENT_EXTRACTS: dict[str, float] = {
     "europe": 32.45,
 }
 
+# Geofabrik publishes .osm.pbf, but the Overpass importer runs
+# `bunzip2 < planet.osm.bz2 | update_database` and requires bzip2-compressed
+# OSM XML — no .osm.bz2 exists for any country extract. The sidecar's
+# entrypoint eval's OVERPASS_PLANET_PREPROCESS between downloading the file and
+# importing it, so the conversion happens there.
+#
+# This default is baked into the launcher the init step writes, which means it
+# ships in *this image* rather than in docker-compose.yml — operators who only
+# run `docker compose pull` get the fix without hand-editing their compose file.
+# A value supplied through the environment still wins; see write_launcher().
+DEFAULT_PLANET_PREPROCESS = (
+    "mv -f /db/planet.osm.bz2 /db/planet.osm.pbf && "
+    "osmium cat --overwrite -o /db/planet.osm.bz2 /db/planet.osm.pbf && "
+    "rm -f /db/planet.osm.pbf"
+)
+
 DEFAULT_LOCAL_URL = "http://overpass-local/api/interpreter"
 
 # Where the sidecar's init step records which extract it built. Shared with

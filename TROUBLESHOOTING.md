@@ -305,6 +305,33 @@ The init step notices the change, clears the old database and re-imports. Until 
 
 **Coverage.** The sidecar holds one country, not the planet. The app only queries it for areas inside that country and uses the public pool everywhere else — you don't choose per generation, and there is no way to accidentally ask a Sweden extract about France. Which source served a generation is recorded in the Activity Log and in the SETUP_GUIDE's Data Sources appendix.
 
+### Sidecar fails with "bunzip2: (stdin) is not a bzip2 file"
+
+```
+bzip2 error: read failed: -5
+bunzip2: (stdin) is not a bzip2 file.
+Reading XML file ...Parse error at line 1: no element found
+Failed to process planet file
+```
+
+**Cause**: the Overpass importer runs `bunzip2 < planet.osm.bz2 | update_database` and requires genuine bzip2-compressed OSM XML. Geofabrik publishes only `.osm.pbf`, so the file must be converted after download. This affected v1.10.0, which passed the PBF through unconverted.
+
+**Fix**: upgrade to v1.10.1 or later. The conversion ships **inside the app image**, so `docker compose pull` is enough — there is nothing to add to `docker-compose.yml`. Clear the half-built volume and start again:
+
+```bash
+docker compose --profile local-osm down
+```
+
+```bash
+docker volume rm arma-map-generator_overpass_db
+```
+
+```bash
+docker compose --profile local-osm up -d
+```
+
+**If you hit this on v1.10.0**, also note the service used `restart: unless-stopped`, so the failing container re-downloaded the whole extract on every retry. v1.10.1 changes it to `restart: on-failure:3`. Stop the stack before doing anything else if you see that loop.
+
 **Useful checks:**
 
 ```bash

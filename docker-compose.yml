@@ -92,7 +92,13 @@ services:
     command: ["sh", "/overpass_meta/start.sh"]
     environment:
       OVERPASS_MODE: init
-      # The public <region>-latest.osm.pbf carries no user metadata, and we
+      # Geofabrik ships .osm.pbf but the importer needs bzip2 XML, so the file
+      # is converted after download. The default conversion lives in the app
+      # image (config/overpass_local.py) and is written into the launcher by
+      # the init step — so `docker compose pull` delivers it and there is
+      # nothing to hand-merge here. This line only passes an override through.
+      OVERPASS_PLANET_PREPROCESS: ${OVERPASS_PLANET_PREPROCESS:-}
+      # The public <region>-latest.osm.pbf carries no user names or IDs, and we
       # only read geometry and tags, so "no" is correct and much smaller.
       OVERPASS_META: "no"
       # Every query we issue is way/relation under a global [bbox:...]; we
@@ -110,7 +116,10 @@ services:
     volumes:
       - overpass_db:/db
       - overpass_meta:/overpass_meta:ro
-    restart: unless-stopped
+    # NOT unless-stopped: a failing import leaves no database, so the entrypoint
+    # re-downloads the whole extract on every restart. With `unless-stopped` a
+    # broken import becomes an endless re-download loop against Geofabrik.
+    restart: on-failure:3
     deploy:
       resources:
         limits:

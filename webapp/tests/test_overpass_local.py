@@ -219,3 +219,58 @@ class TestPoolIntegration:
         labels = [ep["label"] for ep in self._pool(monkeypatch, "SE")]
         assert "Local Overpass" not in labels
         assert "overpass-api.de" in labels
+
+
+class TestLauncherGeneration:
+    """The sidecar's launcher is written by the init step, not docker-compose.
+
+    That placement is deliberate: operators who deploy from GHCR with
+    `docker compose pull` and hand-maintain their compose file get the PBF
+    conversion from the image, with nothing to merge by hand.
+    """
+
+    def _launcher(self, tmp_path, monkeypatch, country="SE"):
+        import scripts.overpass_local_init as init
+        monkeypatch.setenv("OVERPASS_LOCAL_COUNTRIES", country)
+        monkeypatch.setattr(init, "DB_DIR", tmp_path / "db")
+        monkeypatch.setattr(init, "META_DIR", tmp_path / "meta")
+        (tmp_path / "db").mkdir()
+        assert init.main() == 0
+        return (tmp_path / "meta" / "start.sh").read_text(encoding="utf-8")
+
+    def test_launcher_sets_the_resolved_urls(self, tmp_path, monkeypatch):
+        script = self._launcher(tmp_path, monkeypatch)
+        assert "europe/sweden-latest.osm.pbf" in script
+        assert "europe/sweden-updates/" in script
+
+    def test_launcher_carries_the_pbf_conversion(self, tmp_path, monkeypatch):
+        # Without this the importer's `bunzip2 < planet.osm.bz2` is handed a
+        # PBF and the whole import dies — the v1.10.0 failure.
+        script = self._launcher(tmp_path, monkeypatch)
+        assert "osmium cat" in script
+        assert "/db/planet.osm.bz2" in script
+
+    def test_conversion_default_does_not_clobber_an_override(self, tmp_path, monkeypatch):
+        # ":=" assigns only when unset or empty, so a value from docker-compose
+        # still wins.
+        script = self._launcher(tmp_path, monkeypatch)
+        assert ': "${OVERPASS_PLANET_PREPROCESS:=' in script
+        assert "export OVERPASS_PLANET_PREPROCESS" in script
+
+    def test_launcher_execs_the_images_own_entrypoint(self, tmp_path, monkeypatch):
+        script = self._launcher(tmp_path, monkeypatch)
+        assert script.rstrip().endswith("exec /app/docker-entrypoint.sh")
+
+    def test_launcher_is_valid_posix_shell(self, tmp_path, monkeypatch):
+        import shutil
+        import subprocess
+        sh = shutil.which("sh")
+        if not sh:
+            import pytest as _pytest
+            _pytest.skip("no POSIX shell available")
+        self._launcher(tmp_path, monkeypatch)
+        result = subprocess.run(
+            [sh, "-n", str(tmp_path / "meta" / "start.sh")],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stderr
