@@ -197,11 +197,12 @@ async def step_fetch_osm(
     bbox: dict,
     output_dir: Path,
     job: Optional[MapGenerationJob] = None,
+    country: Optional[str] = None,
 ) -> dict:
     """Step 3 (fallback): Fetch all features from OSM and save raw GeoJSON."""
     from services.osm_service import fetch_all_features
 
-    osm_data = await fetch_all_features(bbox, job)
+    osm_data = await fetch_all_features(bbox, job, country)
 
     for name, data in osm_data.items():
         with open(output_dir / f"osm_{name}.geojson", "w") as f:
@@ -261,7 +262,7 @@ async def step_fetch_features(
     if use_lantmateriet:
         return await _fetch_features_sweden(bbox, output_dir, job)
     else:
-        return await step_fetch_osm(bbox, output_dir, job)
+        return await step_fetch_osm(bbox, output_dir, job, primary_country)
 
 
 async def _fetch_features_sweden(
@@ -282,14 +283,7 @@ async def _fetch_features_sweden(
     """
     from services.lantmateriet.hydrografi_service import fetch_lantmateriet_water
     from services.lantmateriet.marktacke_service import fetch_lantmateriet_land_cover
-    from services.osm_service import (
-        fetch_roads,
-        fetch_water,
-        fetch_forests,
-        fetch_buildings,
-        fetch_land_use,
-        probe_overpass_mirrors,
-    )
+    from services.osm_service import fetch_categories, probe_overpass_mirrors
 
     bbox_tuple = (bbox["west"], bbox["south"], bbox["east"], bbox["north"])
 
@@ -302,23 +296,29 @@ async def _fetch_features_sweden(
 
     # Probe the Overpass mirror pool once; the ranked order is reused for the
     # OSM roads/buildings fetches and any land-cover fallbacks further down.
-    overpass_endpoints = await probe_overpass_mirrors(job)
+    overpass_endpoints = await probe_overpass_mirrors(job, "SE")
 
     # Launch all fetches concurrently:
     # Lantmäteriet: water (Hydrografi) + land cover (Marktäcke)
     # OSM: roads + buildings (always needed)
     lm_water_task = fetch_lantmateriet_water(bbox_tuple, job)
     lm_land_cover_task = fetch_lantmateriet_land_cover(bbox_tuple, job)
-    osm_roads_task = fetch_roads(bbox, job, overpass_endpoints)
-    osm_buildings_task = fetch_buildings(bbox, job, overpass_endpoints)
+    # Roads and buildings come back from a single merged Overpass query, so
+    # this costs one query slot rather than two competing ones (issue #168).
+    osm_task = fetch_categories(bbox, ["roads", "buildings"], job, overpass_endpoints)
 
-    lm_water, lm_land_cover, osm_roads, osm_buildings = await asyncio.gather(
+    lm_water, lm_land_cover, osm_features = await asyncio.gather(
         lm_water_task,
         lm_land_cover_task,
-        osm_roads_task,
-        osm_buildings_task,
+        osm_task,
         return_exceptions=True,
     )
+
+    if isinstance(osm_features, Exception):
+        logger.error(f"OSM roads/buildings fetch failed: {osm_features}")
+        osm_features = {}
+    osm_roads = osm_features.get("roads")
+    osm_buildings = osm_features.get("buildings")
 
     result = {}
     sources: dict[str, str] = {}
@@ -341,7 +341,9 @@ async def _fetch_features_sweden(
                 f"falling back to OpenStreetMap...",
                 "warning",
             )
-        osm_water = await fetch_water(bbox, job, overpass_endpoints)
+        osm_water = (
+            await fetch_categories(bbox, ["water"], job, overpass_endpoints)
+        ).get("water")
         result["water"] = _safe_result(osm_water, "water", job)
         sources["water"] = f"{osm_label} (Lantmäteriet Hydrografi unavailable)"
     else:
@@ -357,10 +359,11 @@ async def _fetch_features_sweden(
                 f"falling back to OpenStreetMap...",
                 "warning",
             )
-        osm_forests = await fetch_forests(bbox, job, overpass_endpoints)
-        osm_land_use = await fetch_land_use(bbox, job, overpass_endpoints)
-        result["forests"] = _safe_result(osm_forests, "forests", job)
-        result["land_use"] = _safe_result(osm_land_use, "land_use", job)
+        osm_land = await fetch_categories(
+            bbox, ["forests", "land_use"], job, overpass_endpoints
+        )
+        result["forests"] = _safe_result(osm_land.get("forests"), "forests", job)
+        result["land_use"] = _safe_result(osm_land.get("land_use"), "land_use", job)
         sources["forests"] = f"{osm_label} (Lantmäteriet Marktäcke unavailable)"
         sources["land_use"] = sources["forests"]
     else:
