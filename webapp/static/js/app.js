@@ -963,5 +963,67 @@ async function fetchVersion() {
     }
 }
 
+// Local Overpass sidecar indicator.
+//
+// The sidecar is optional and its import runs for a long time on first boot,
+// so the UI has to distinguish "still building" from "broken" — and flag the
+// one case that needs the operator to act: a config change that has not been
+// applied to the running container yet.
+const LOCAL_OSM_STATES = {
+    ready:            { cls: 'alert-success', icon: 'bi-hdd-network',      label: 'Local OSM' },
+    importing:        { cls: 'alert-info',    icon: 'bi-arrow-repeat',     label: 'Local OSM importing' },
+    stale:            { cls: 'alert-warning', icon: 'bi-clock-history',    label: 'Local OSM stale' },
+    restart_required: { cls: 'alert-warning', icon: 'bi-exclamation-triangle', label: 'Restart required' },
+    misconfigured:    { cls: 'alert-danger',  icon: 'bi-x-octagon',        label: 'Local OSM misconfigured' },
+    unknown:          { cls: 'alert-secondary', icon: 'bi-question-circle', label: 'Local OSM' },
+};
+
+function renderLocalOsmStatus(data) {
+    const el = document.getElementById('local-osm-status');
+    if (!el) return;
+
+    // No sidecar configured is the normal setup — show nothing at all.
+    if (!data || !data.enabled || data.state === 'disabled') {
+        el.classList.add('d-none');
+        return;
+    }
+
+    const style = LOCAL_OSM_STATES[data.state] || LOCAL_OSM_STATES.unknown;
+    el.className = `alert small py-2 px-3 mb-3 ${style.cls}`;
+
+    const bits = [];
+    if (data.region) bits.push(data.region);
+    if (typeof data.data_age_hours === 'number') {
+        bits.push(data.data_age_hours < 24
+            ? `${Math.round(data.data_age_hours)}h old`
+            : `${(data.data_age_hours / 24).toFixed(1)}d old`);
+    }
+    const detail = bits.length ? ` <span class="opacity-75">(${bits.join(', ')})</span>` : '';
+
+    el.innerHTML =
+        `<i class="bi ${style.icon}"></i> <strong>${style.label}</strong>${detail}` +
+        (data.message ? `<div class="mt-1 opacity-75">${escapeHtml(data.message)}</div>` : '');
+    el.classList.remove('d-none');
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+async function fetchLocalOsmStatus() {
+    try {
+        const resp = await fetch('/api/osm/local-status');
+        renderLocalOsmStatus(await resp.json());
+    } catch (err) {
+        console.log('Could not fetch local Overpass status');
+    }
+}
+
 fetchDataSources();
 fetchVersion();
+fetchLocalOsmStatus();
+// Re-check periodically: an initial import finishes on its own, and a config
+// change made in .env should surface without the user reloading the page.
+setInterval(fetchLocalOsmStatus, 60000);

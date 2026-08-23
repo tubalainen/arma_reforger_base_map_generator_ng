@@ -62,6 +62,10 @@ class MapGenerationJob:
         # (e.g. "OpenStreetMap (Overpass)", "Lantmäteriet Hydrografi"). Surfaced
         # in metadata.json + the Data Sources appendix of SETUP_GUIDE.md.
         self.feature_sources: dict[str, str] = {}
+        # Label of the Overpass mirror that actually served this job's data,
+        # set by osm_service on the first successful query. Distinguishes the
+        # local sidecar from a public mirror in the Activity Log and metadata.
+        self.overpass_source: Optional[str] = None
 
     def add_log(self, message: str, level: str = "info"):
         """
@@ -209,7 +213,7 @@ async def step_fetch_osm(
             json.dump(data, f)
 
     if job is not None:
-        osm_label = "OpenStreetMap (Overpass)"
+        osm_label = _osm_source_label(job)
         for category in ("roads", "buildings", "water", "forests", "land_use"):
             job.feature_sources[category] = osm_label
 
@@ -225,6 +229,21 @@ def _merge_feature_collections(fc1: dict, fc2: dict) -> dict:
     """Merge two GeoJSON FeatureCollections by concatenating features."""
     features = fc1.get("features", []) + fc2.get("features", [])
     return {"type": "FeatureCollection", "features": features}
+
+
+def _osm_source_label(job: Optional[MapGenerationJob]) -> str:
+    """Display name for the OSM source, naming the mirror that served it.
+
+    The local sidecar and the public pool are both "OpenStreetMap", but which
+    one answered is worth recording in metadata.json and the SETUP_GUIDE — it
+    is the difference between reproducible local data and a volunteer mirror.
+    """
+    mirror = getattr(job, "overpass_source", None) if job else None
+    if mirror == "Local Overpass":
+        return "OpenStreetMap (local Overpass)"
+    if mirror:
+        return f"OpenStreetMap (Overpass, {mirror})"
+    return "OpenStreetMap (Overpass)"
 
 
 def _safe_result(result, name: str, job=None) -> dict:
@@ -322,7 +341,7 @@ async def _fetch_features_sweden(
 
     result = {}
     sources: dict[str, str] = {}
-    osm_label = "OpenStreetMap (Overpass)"
+    osm_label = _osm_source_label(job)
 
     # --- Roads: always OSM ---
     result["roads"] = _safe_result(osm_roads, "roads", job)

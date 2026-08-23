@@ -358,6 +358,23 @@ async def analyze_area(request_body: DetectCountriesRequest):
         )
 
 
+@app.get("/api/osm/local-status")
+async def get_local_overpass_status():
+    """Report the optional local Overpass sidecar's state for the UI.
+
+    Always 200 — "no sidecar configured" is the normal answer, not an error.
+    """
+    from services.overpass_local import get_local_status
+
+    try:
+        return JSONResponse(content=await get_local_status())
+    except Exception as e:
+        logger.warning(f"Local Overpass status check failed: {type(e).__name__}: {e}")
+        return JSONResponse(
+            content={"state": "unknown", "enabled": True, "message": str(e)}
+        )
+
+
 @app.get("/api/data-sources")
 async def get_data_sources():
     """Return status of all available data sources."""
