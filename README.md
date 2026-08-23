@@ -45,7 +45,7 @@ Instead of manually sourcing elevation data, painting surface masks by hand, pla
 - **Country-specific surface inference** when OSM data is missing
 - **Enfusion prefab mapping** (RG_Road_* generators)
 - **Spline control point generation** for World Editor import
-- **Multi-mirror Overpass API pool** for reliable OSM data fetching (Private.coffee, osm.ch, Kumi, overpass-api.de) with exponential backoff and automatic failover
+- **Multi-mirror Overpass API pool** for reliable OSM data fetching (overpass-api.de, Private.coffee, VK Maps, plus country-gated regional mirrors) with live health probing, per-mirror concurrency limits, response caching and automatic failover
 
 ### Water Features
 - **Lakes, rivers, streams, coastline, wetlands** from OSM
@@ -459,7 +459,7 @@ The `docker-compose.yml` is pre-configured to use the GHCR.io image. See the [Qu
 - **Container**: Docker (multi-stage build, non-root user)
 - **Data Sources**:
   - Elevation: National WCS/STAC (SE/NO/EE/FI/DK/PL) → AWS COP30 Open Data → OpenTopography → SRTM → ALOS
-  - Features: OSM Overpass API (4-mirror pool: Private.coffee, osm.ch, Kumi, overpass-api.de)
+  - Features: OSM Overpass API (3 planet mirrors: overpass-api.de, Private.coffee, VK Maps; regional mirrors gated on country) — one merged query per generation, cached on disk
   - SE vector data: Lantmäteriet OGC API Features (Hydrografi, Marktäcke)
   - Satellite: Sentinel-2 Cloudless (global) + Lantmäteriet STAC Bild (Sweden, 2007–2025, 0.16 m/px) + Lantmäteriet WMS (Sweden, 2005 fallback)
   - Geocoding: Nominatim

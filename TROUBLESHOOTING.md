@@ -272,14 +272,16 @@ Getting 403 means your credentials are recognized, but your account hasn't been 
 
 **Symptoms**: Logs show timeouts or errors cycling through multiple endpoints, or map features (roads, water, forests, buildings) are missing from the output.
 
-**Cause**: The Overpass API (used for OpenStreetMap data) is a public service that can be overloaded. The main `overpass-api.de` instance is particularly prone to 504 timeouts during peak hours.
+**Cause**: The Overpass API (used for OpenStreetMap data) is a public service that can be overloaded. Public instances also publish a per-IP concurrency budget — `overpass-api.de` advertises 2 slots — and answer anything over it with a 504.
 
-**Solution**: The application automatically cycles through 4 public Overpass mirrors (Private.coffee → osm.ch → Kumi → overpass-api.de) with 2 full retry passes and exponential backoff. If all fail:
+**Solution**: Before each generation the app probes every mirror in parallel, drops the ones that fail, and queries the fastest survivor first. All feature categories travel in a single merged query, so a generation needs one query slot rather than five, and successful responses are cached on disk for `OVERPASS_CACHE_TTL_HOURS` (default 24) so a repeat of the same area never hits the network. If all mirrors fail:
 1. Try again later — the public instances may be temporarily overloaded
 2. Try a smaller polygon area — large areas generate heavier Overpass queries
 3. Check Overpass status: [overpass-api.de/api/status](https://overpass-api.de/api/status)
 
-**Note**: All Overpass mirrors serve identical OpenStreetMap data — the differences are only in server capacity and uptime.
+**Note**: The planet mirrors all serve identical OpenStreetMap data — the differences are only in server capacity and uptime. Regional mirrors (e.g. `overpass.osm.ch`, which holds Switzerland only) are the exception: they are offered solely for the country they cover, because outside it they answer every query with zero elements rather than an error.
+
+To exclude the VK Maps mirror (Russian-operated), set `OVERPASS_DISABLE_VK=1`. To disable response caching, set `OVERPASS_CACHE_ENABLED=0`.
 
 ### Issue: Jobs take very long time
 
