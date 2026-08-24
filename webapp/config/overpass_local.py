@@ -175,51 +175,40 @@ def cache_filename(region: str) -> str:
     return "planet-" + region.replace("/", "_") + ".osm.pbf"
 
 
-# The preprocessing script itself. Three jobs, in order:
+# The preprocessing script itself. Two jobs:
 #
-# 1. Guard. The upstream entrypoint treats curl exit code 000 as success
-#    because that is what the `file://` scheme returns — which means a DNS
-#    failure, a refused connection or a firewalled mirror also reads as
-#    success, and the import proceeds to choke on a zero-byte file with a
-#    message about the *file* rather than the *network*. Checking for the PBF
-#    magic turns that back into a legible error.
-# 2. Cache. A failed import leaves no /db/init_done, so the entrypoint
-#    re-downloads the whole extract on the next start. Repeating that is what
-#    gets an IP firewalled by Geofabrik in the first place, so keep a pristine
-#    copy and let the launcher serve the retry from disk.
-# 3. Convert. PBF -> bzip2 XML, the original job.
+# 1. Guard. The upstream entrypoint copies the extract into place with curl and
+#    treats exit code 000 as success, because that is what the `file://` scheme
+#    returns. A missing or truncated file therefore reads as success, and the
+#    import chokes with a message about the file rather than about what really
+#    went wrong. Checking for the PBF magic turns that back into a legible
+#    error. The fetch itself now happens in our init step, so by the time this
+#    runs a failure here means local corruption, not a bad mirror.
+# 2. Convert. PBF -> bzip2 XML, which is what `bunzip2 | update_database`
+#    needs and which no mirror publishes for country extracts.
 PREPROCESS_SCRIPT = """#!/bin/sh
 # Written by overpass_local_init.py. Do not edit in the container: the file
 # lives on a read-only mount and is regenerated on every `docker compose up`.
 set -e
 
 SRC=/db/planet.osm.bz2
-CACHE="$OVERPASS_EXTRACT_CACHE"
 
 if [ ! -s "$SRC" ]; then
-    echo "FATAL: the downloaded extract is empty." >&2
-    echo "  The download did not fail loudly -- curl reports 000 for both a" >&2
-    echo "  file:// read and a connection that never opened, and the entrypoint" >&2
-    echo "  cannot tell them apart. Check that the container can reach" >&2
-    echo "  $OVERPASS_PLANET_URL (DNS, egress firewall, proxy), and note that" >&2
-    echo "  Geofabrik firewalls IPs that re-download extracts repeatedly." >&2
-    echo "  Set OVERPASS_LOCAL_MIRROR=osmfr to use a different mirror." >&2
+    echo "FATAL: the extract handed to the importer is empty." >&2
+    echo "  Source was $OVERPASS_PLANET_URL. curl reports 000 for both a" >&2
+    echo "  file:// read and a connection that never opened, so the" >&2
+    echo "  entrypoint cannot tell an empty copy from a successful one." >&2
+    echo "  Check the overpass-local-init logs: it fetches the extract and" >&2
+    echo "  refuses to start this container without one." >&2
     exit 1
 fi
 
 if ! head -c 64 "$SRC" | grep -qa OSMHeader; then
-    echo "FATAL: the downloaded extract is not an OSM PBF file." >&2
+    echo "FATAL: the extract handed to the importer is not an OSM PBF file." >&2
     echo "  Got $(wc -c < "$SRC") bytes from $OVERPASS_PLANET_URL starting with:" >&2
     head -c 300 "$SRC" >&2
     echo >&2
-    echo "  That is usually an error page or a redirect landing page." >&2
     exit 1
-fi
-
-if [ -n "$CACHE" ] && [ ! -f "$CACHE" ]; then
-    mkdir -p "$(dirname "$CACHE")"
-    cp "$SRC" "$CACHE.part" && mv -f "$CACHE.part" "$CACHE"
-    echo "Cached the extract at $CACHE; a retry will not re-download it."
 fi
 
 echo "Converting the PBF to bzip2 XML for the importer..."
@@ -227,6 +216,61 @@ mv -f "$SRC" /db/planet.osm.pbf
 osmium cat --overwrite -o "$SRC" /db/planet.osm.pbf
 rm -f /db/planet.osm.pbf
 """
+
+# ---------------------------------------------------------------------------
+# Download budget
+# ---------------------------------------------------------------------------
+# A user was firewalled by Geofabrik after their sidecar pulled 300+ GB: the
+# v1.10.0 container had `restart: unless-stopped`, a failing import left no
+# database, and every restart re-downloaded the whole extract. Roughly 400
+# iterations of a 0.76 GB file.
+#
+# The structural fix is that the Overpass container no longer downloads
+# anything — our init step fetches the extract once, to a volume of its own,
+# and hands the sidecar a `file://` URL. These limits are the backstop for when
+# that fetch itself keeps failing. They live on the extract volume, so they
+# survive container recreation, `docker compose up` in a loop, and a
+# `docker volume rm ..._overpass_db` — the three things that defeat any counter
+# held in a container.
+EXTRACT_MOUNT = "/extract"
+LEDGER_NAME = "download_ledger.json"
+
+# Attempts allowed inside one cooldown window. Three is enough to ride out a
+# flaky connection and few enough that a genuinely broken config stops early.
+MAX_DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_COOLDOWN_HOURS = 6
+
+# Bytes allowed from a mirror per window, as a multiple of the extract size.
+# Downloads resume from where they stopped, so needing more than three times
+# the file means something is pathologically wrong — a server ignoring Range,
+# a proxy truncating — and that is exactly the case worth stopping.
+DOWNLOAD_BUDGET_MULTIPLIER = 3.0
+DOWNLOAD_BUDGET_WINDOW_HOURS = 24
+
+DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024
+# Generous: a 32 GB continent extract on a slow line. Resume covers the rest.
+DOWNLOAD_READ_TIMEOUT_S = 120.0
+DOWNLOAD_CONNECT_TIMEOUT_S = 30.0
+
+# A lock so two init containers cannot fetch the same extract at once.
+# Abandoned locks (a killed container) expire rather than wedging the stack.
+DOWNLOAD_LOCK_STALE_HOURS = 12
+
+
+def download_user_agent() -> str:
+    """Identify the app to the mirror.
+
+    An operator whose deployment misbehaves is much better off being emailed
+    than silently firewalled, and that only happens if the requests say who
+    they are.
+    """
+    from config.enfusion import APP_VERSION
+
+    return (
+        f"ArmaReforgerBaseMapGenerator/{APP_VERSION} "
+        f"(+https://github.com/tubalainen/arma_reforger_base_map_generator_ng)"
+    )
+
 
 DEFAULT_LOCAL_URL = "http://overpass-local/api/interpreter"
 

@@ -67,8 +67,22 @@ services:
   # to change in this file if Geofabrik blocks you.
 
   # One-shot: resolves the country code to an extract on the configured
-  # mirror and clears the database volume if the region changed. Uses the app
-  # image so the country -> extract mapping lives in exactly one place.
+  # mirror, downloads it, and clears the database volume if the region changed.
+  # Uses the app image so the country -> extract mapping lives in exactly one
+  # place.
+  #
+  # The download lives HERE rather than in the Overpass container on purpose.
+  # That container's entrypoint re-downloads whenever there is no database, so
+  # a failing import used to pull the whole extract again on every restart —
+  # one deployment sent 300+ GB to Geofabrik that way and was firewalled. This
+  # step fetches once, under a budget recorded on the extract volume, and hands
+  # the sidecar a local file. If it cannot get an extract it exits non-zero and
+  # `service_completed_successfully` below means the sidecar never starts: one
+  # clear error instead of a loop.
+  #
+  # Consequence worth knowing: the first `up` blocks while the extract
+  # downloads. Progress is in this container's logs, and it resumes rather than
+  # restarting if you interrupt it.
   overpass-local-init:
     profiles: ["local-osm"]
     image: ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest
@@ -80,6 +94,10 @@ services:
     volumes:
       - overpass_db:/db
       - overpass_meta:/overpass_meta
+      # Separate from overpass_db so that wiping the database — the documented
+      # way to retry a failed import — does not also discard a download that
+      # already succeeded.
+      - overpass_extract:/extract
     restart: "no"
 
   overpass-local:
@@ -120,11 +138,12 @@ services:
     volumes:
       - overpass_db:/db
       - overpass_meta:/overpass_meta:ro
+      # Read-only: this container imports the extract, it never fetches one.
+      - overpass_extract:/extract:ro
     # NOT unless-stopped: a failing import leaves no /db/init_done, so the
-    # entrypoint re-runs its download-and-import branch on every restart. The
-    # extract is cached after the first successful download so a retry reads it
-    # from disk, but the cap stays — an endless restart loop is still an
-    # endless loop, and repeated downloads are what gets an IP firewalled.
+    # entrypoint re-runs its import branch on every restart. It reads the
+    # extract from /extract now, so a restart costs no network traffic at all —
+    # but an endless restart loop is still an endless loop.
     restart: on-failure:3
     deploy:
       resources:
@@ -143,3 +162,8 @@ volumes:
   # Tiny volume carrying the resolved region + URLs between the init step,
   # the sidecar and the web app.
   overpass_meta:
+  # The downloaded extract, plus the ledger recording download attempts. Kept
+  # apart from overpass_db so a database wipe costs no bandwidth, and so the
+  # attempt count survives `docker compose up --force-recreate` — a counter
+  # inside a container would not. Sized at one compressed extract.
+  overpass_extract:

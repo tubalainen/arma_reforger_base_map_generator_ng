@@ -266,10 +266,23 @@ OSM XML, so the file is converted after download. On a country-sized extract tha
 conversion alone can take an hour or more. It is a one-time cost — the diffs
 afterwards are small and need no conversion.
 
-The downloaded extract is kept under `/db/extract_cache` until the import
-succeeds, so a failed import retries the conversion instead of pulling the whole
-file again. Budget the compressed size once more on top of the figure above; it
-is deleted automatically once the database is built.
+The extract is downloaded once, by the init step, onto a volume of its own.
+The Overpass container is handed a local file and is never given a mirror URL,
+so no restart of it can cost bandwidth. Budget the compressed size once more on
+top of the figure above; it is deleted automatically once the database is built.
+
+Because the download happens in the init step, the first
+`docker compose --profile local-osm up -d` **blocks while the extract
+downloads** — progress is in `docker compose logs overpass-local-init`, and an
+interrupted transfer resumes rather than starting over.
+
+If the download keeps failing, it stops rather than retrying forever: three
+failed attempts in six hours, or three times the extract size pulled in
+twenty-four, and the init step refuses and exits non-zero, so the sidecar never
+starts. That is deliberate — repeatedly re-downloading an extract is what gets
+an IP firewalled. The ledger lives on the extract volume, so it survives
+`--force-recreate`; clear it with `docker volume rm arma-map-generator_overpass_extract`
+once the underlying problem is fixed.
 
 Nothing breaks meanwhile. The app keeps using public mirrors, and a banner in the
 sidebar shows the sidecar's progress. Watch it with:

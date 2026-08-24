@@ -353,20 +353,18 @@ The launcher prefers that file over any download, with no configuration needed �
 
 **Getting unblocked.** Geofabrik's contact address is on their [legal notice](https://www.geofabrik.de/geofabrik/imprint.html). They are reasonable about it — explain what caused the repeated downloads and that it is fixed.
 
-**Not repeating it.** From v1.11.0 the extract is cached under `/db/extract_cache` until the import succeeds, so a restart reads it from disk instead of the network, and the download is verified to be an actual PBF before the import touches it. `restart: on-failure:3` still caps the restarts. Together those remove the loop that earns the block.
+**Not repeating it.** From v1.12.0 the Overpass container is never given a download URL at all. The init step fetches the extract once, onto its own volume, and hands the sidecar a local file — so no restart of the sidecar, and no `docker compose up`, can cost bandwidth. If the fetch itself fails it is capped: three failed attempts in six hours, or three times the extract size in twenty-four, and it refuses and exits non-zero, which via `depends_on: service_completed_successfully` means the sidecar never starts.
 
-### Sidecar fails with "bunzip2: (stdin) is not a bzip2 file"
+**This needs a `docker-compose.yml` change.** Add the `overpass_extract` volume:
 
-```
-bzip2 error: read failed: -5
-bunzip2: (stdin) is not a bzip2 file.
-Reading XML file ...Parse error at line 1: no element found
-Failed to process planet file
+```yaml
+volumes:
+  overpass_extract:
 ```
 
-**Cause**: the Overpass importer runs `bunzip2 < planet.osm.bz2 | update_database` and requires genuine bzip2-compressed OSM XML. Geofabrik publishes only `.osm.pbf`, so the file must be converted after download. This affected v1.10.0, which passed the PBF through unconverted.
+and mount it — `overpass_extract:/extract` on `overpass-local-init`, `overpass_extract:/extract:ro` on `overpass-local`. Without it the app falls back to keeping the extract inside the database volume and logs a warning; that still works, but wiping the database then costs another full download.
 
-**Fix**: upgrade to v1.10.1 or later. The conversion ships **inside the app image**, so `docker compose pull` is enough — there is nothing to add to `docker-compose.yml`. Clear the half-built volume and start again:
+**Retrying an import without re-downloading.** This is now the correct recovery — it keeps the extract:
 
 ```bash
 docker compose --profile local-osm down
@@ -380,7 +378,34 @@ docker volume rm arma-map-generator_overpass_db
 docker compose --profile local-osm up -d
 ```
 
-**If you hit this on v1.10.0**, also note the service used `restart: unless-stopped`, so the failing container re-downloaded the whole extract on every retry. v1.10.1 changes it to `restart: on-failure:3`. Stop the stack before doing anything else if you see that loop.
+Only remove `arma-map-generator_overpass_extract` if you actually want to re-download, or to clear the attempt ledger after fixing whatever was failing.
+
+### Sidecar fails with "bunzip2: (stdin) is not a bzip2 file"
+
+```
+bzip2 error: read failed: -5
+bunzip2: (stdin) is not a bzip2 file.
+Reading XML file ...Parse error at line 1: no element found
+Failed to process planet file
+```
+
+**Cause**: the Overpass importer runs `bunzip2 < planet.osm.bz2 | update_database` and requires genuine bzip2-compressed OSM XML. Geofabrik publishes only `.osm.pbf`, so the file must be converted after download. This affected v1.10.0, which passed the PBF through unconverted.
+
+**Fix**: upgrade to v1.10.1 or later. The conversion ships **inside the app image**, so `docker compose pull` is enough — there is nothing to add to `docker-compose.yml` for this particular fix. Clear the half-built database volume and start again (on v1.12.0+ this keeps the downloaded extract, so it costs no bandwidth):
+
+```bash
+docker compose --profile local-osm down
+```
+
+```bash
+docker volume rm arma-map-generator_overpass_db
+```
+
+```bash
+docker compose --profile local-osm up -d
+```
+
+**If you hit this on v1.10.0**, also note the service used `restart: unless-stopped`, so the failing container re-downloaded the whole extract on every retry — one deployment sent 300+ GB to Geofabrik this way and was firewalled. v1.10.1 caps it at `restart: on-failure:3`; v1.12.0 removes the download from that container entirely. Stop the stack before doing anything else if you see that loop on an older version.
 
 **Useful checks:**
 
