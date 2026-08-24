@@ -25,7 +25,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ============================================
 FROM python:3.11-slim-bookworm
 
-# Install runtime dependencies only
+# Install runtime dependencies only.
+#
+# osmium-tool and pbzip2 are for the Overpass sidecar's init step, not the web
+# app. The importer needs bzip2 XML and the mirrors publish PBF, so something
+# has to convert; doing it in this image rather than in the Overpass one is
+# what lets it use every core. The Overpass image has bzip2 but no parallel
+# implementation, so converting there burns an hour on a single thread while
+# the rest of the machine idles.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gdal-bin \
     libgdal32 \
@@ -33,6 +40,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libproj25 \
     libspatialindex6 \
     curl \
+    osmium-tool \
+    pbzip2 \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 

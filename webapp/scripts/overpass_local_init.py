@@ -31,12 +31,14 @@ sys.path.insert(0, "/app")
 
 from config.overpass_local import (  # noqa: E402
     CACHE_DIR_NAME,
+    CONVERT_AND_GUARD_SCRIPT,
     DEFAULT_PLANET_PREPROCESS,
     EXTRACT_MOUNT,
+    GUARD_ONLY_SCRIPT,
     LEDGER_NAME,
-    PREPROCESS_SCRIPT,
     LocalOverpassConfigError,
     cache_filename,
+    converted_filename,
     diff_url,
     local_countries,
     local_extract_size_gb,
@@ -45,6 +47,7 @@ from config.overpass_local import (  # noqa: E402
     planet_url,
     update_sleep_seconds,
 )
+from services import overpass_extract_converter as converter  # noqa: E402
 from services.overpass_extract_fetcher import fetch_extract  # noqa: E402
 
 DB_DIR = Path("/db")
@@ -117,11 +120,14 @@ def _prune_stale_extracts(region: str, keep_dir: Path) -> None:
     if not keep_dir.is_dir():
         return
 
-    keep = "" if _import_succeeded() else cache_filename(region)
+    keep = set()
+    if not _import_succeeded():
+        keep = {cache_filename(region), converted_filename(region)}
+        keep |= {name + ".part" for name in keep}
+    protected = keep | {LEDGER_NAME, ".download.lock"}
+
     for child in keep_dir.iterdir():
-        if child.name in (keep, LEDGER_NAME, ".download.lock"):
-            continue
-        if child.name == keep + ".part":
+        if child.name in protected:
             continue
         try:
             child.unlink()
@@ -209,10 +215,8 @@ def main() -> int:
     (META_DIR / "diff_url.txt").write_text(diffs, encoding="utf-8")
     marker.write_text(region, encoding="utf-8")
 
-    # The guard-and-convert step the entrypoint eval's before importing.
-    (META_DIR / "preprocess.sh").write_text(PREPROCESS_SCRIPT, encoding="utf-8")
-
     extract_file = extracts / cache_filename(region)
+    converted_file = extracts / converted_filename(region)
 
     # Fetch the extract here rather than letting the Overpass container do it.
     # Its entrypoint re-downloads whenever there is no database, which turned a
@@ -221,6 +225,12 @@ def main() -> int:
     # whole point of this step.
     if _import_succeeded():
         log("The database is already built — no extract needed.")
+    elif converter.looks_like_bzip2(converted_file):
+        # A previous run already converted this extract, and the PBF was
+        # dropped once it had. Re-fetching it would be a pure waste of the
+        # mirror's bandwidth — the archive is what the import consumes.
+        log("The converted extract is already on the volume; nothing to do.")
+        extract_file = None
     elif planet.startswith("file://"):
         # An operator pointed OVERPASS_PLANET_URL at their own file. Nothing to
         # fetch, and nothing of ours should copy bytes it did not download.
@@ -242,8 +252,49 @@ def main() -> int:
         if outcome.already_present:
             log("  (no bytes pulled from the mirror)")
 
-    planet_for_sidecar = (
-        f"file://{extract_file.as_posix()}" if extract_file else planet
+    # Convert here rather than in the sidecar when this image can: the Overpass
+    # image ships bzip2 but no parallel implementation, so `osmium cat -o
+    # x.osm.bz2` there pins one core for an hour on a country-sized extract
+    # while the rest of the machine idles. Converting once, here, also means a
+    # failed import no longer pays for the conversion again.
+    convert_in_sidecar = True
+    if converter.looks_like_bzip2(converted_file):
+        convert_in_sidecar = False
+    elif extract_file is None or _import_succeeded():
+        pass
+    elif not converter.available():
+        log(
+            "NOTE: no parallel bzip2 in this image, so the sidecar will convert "
+            "the extract itself, single-threaded. Expect an hour or more."
+        )
+    else:
+        log(
+            f"Converting the extract to bzip2 XML with "
+            f"{converter.default_threads()} threads "
+            f"(set OVERPASS_CONVERT_THREADS to change)."
+        )
+        result = converter.convert(extract_file, converted_file)
+        log(f"  {result.reason}")
+        if result.ok:
+            convert_in_sidecar = False
+            # The PBF has served its purpose. The archive is what a retry would
+            # reuse now, so it is the one worth the disk.
+            if extract_file.is_file():
+                extract_file.unlink(missing_ok=True)
+                log("  Dropped the PBF; the converted archive supersedes it.")
+        else:
+            log("  Falling back to converting inside the sidecar.")
+
+    if not convert_in_sidecar:
+        planet_for_sidecar = f"file://{converted_file.as_posix()}"
+    elif extract_file is None:
+        planet_for_sidecar = planet
+    else:
+        planet_for_sidecar = f"file://{extract_file.as_posix()}"
+
+    (META_DIR / "preprocess.sh").write_text(
+        CONVERT_AND_GUARD_SCRIPT if convert_in_sidecar else GUARD_ONLY_SCRIPT,
+        encoding="utf-8",
     )
 
     # Launcher for the sidecar. Writing the resolved URL into a script keeps

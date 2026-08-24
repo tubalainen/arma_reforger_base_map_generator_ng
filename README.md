@@ -260,11 +260,15 @@ extract (or another mirror's — see below) and builds an Overpass database. Thi
 and needs roughly **10x the compressed extract on disk** — Sweden's 0.76 GB
 extract lands near 8 GB.
 
-There is an extra step you will see in the logs before the import starts:
-the mirrors publish `.osm.pbf`, but the Overpass importer requires bzip2-compressed
-OSM XML, so the file is converted after download. On a country-sized extract that
-conversion alone can take an hour or more. It is a one-time cost — the diffs
-afterwards are small and need no conversion.
+There is an extra step you will see in the logs before the import starts: the
+mirrors publish `.osm.pbf`, but the Overpass importer requires bzip2-compressed
+OSM XML, so the file is converted first. The init container does this with a
+parallel compressor across half your cores — a few minutes on a multi-core box,
+where doing it inside the Overpass container took an hour or more on a single
+thread. Set `OVERPASS_CONVERT_THREADS` to change how many it uses.
+
+The converted archive is kept alongside the extract, so retrying a failed import
+costs neither a download nor a reconversion.
 
 The extract is downloaded once, by the init step, onto a volume of its own.
 The Overpass container is handed a local file and is never given a mirror URL,

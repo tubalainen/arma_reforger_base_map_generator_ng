@@ -156,13 +156,13 @@ STALE_GRACE_HOURS = 48
 # entrypoint eval's OVERPASS_PLANET_PREPROCESS between downloading the file and
 # importing it, so the conversion happens there.
 #
-# The step is a script rather than a one-liner because it also has to guard the
-# download and cache it, and neither is expressible in a single `&&` chain that
-# anyone can read. The init step writes the script; the launcher points at it.
-# Both ship in *this image* rather than in docker-compose.yml, so operators who
-# only run `docker compose pull` get fixes without hand-editing their compose
-# file. A value supplied through the environment still wins; see write_launcher().
-DEFAULT_PLANET_PREPROCESS = "sh /overpass_meta/preprocess.sh"
+# From v1.13.0 the conversion normally happens in the init container instead,
+# where a parallel bzip2 is installed — see services/overpass_extract_converter.
+# What runs here is then only a guard. Which of the two scripts gets written is
+# decided at init time; both ship in *this image* rather than in
+# docker-compose.yml, so operators who only run `docker compose pull` get fixes
+# without hand-editing their compose file. A value supplied through the
+# environment still wins over either.
 
 # Where the pristine downloaded PBF is kept between import attempts, inside the
 # database volume so it dies with the database on a region change. Skipped by
@@ -171,38 +171,79 @@ CACHE_DIR_NAME = "extract_cache"
 
 
 def cache_filename(region: str) -> str:
-    """Cache file name for a canonical (Geofabrik) region path."""
+    """Downloaded-extract file name for a canonical (Geofabrik) region path."""
     return "planet-" + region.replace("/", "_") + ".osm.pbf"
 
 
-# The preprocessing script itself. Two jobs:
+def converted_filename(region: str) -> str:
+    """Name of the bzip2-XML conversion of that extract.
+
+    Kept beside the PBF so a failed import reuses it. Converting is the single
+    most expensive step in bringing a sidecar up, and before v1.13.0 every
+    retry paid for it again.
+    """
+    return "planet-" + region.replace("/", "_") + ".osm.bz2"
+
+
+DEFAULT_PLANET_PREPROCESS = "sh /overpass_meta/preprocess.sh"
+
+# Two preprocessing scripts, both eval'd by the sidecar's entrypoint between
+# staging the planet file and importing it.
 #
-# 1. Guard. The upstream entrypoint copies the extract into place with curl and
-#    treats exit code 000 as success, because that is what the `file://` scheme
-#    returns. A missing or truncated file therefore reads as success, and the
-#    import chokes with a message about the file rather than about what really
-#    went wrong. Checking for the PBF magic turns that back into a legible
-#    error. The fetch itself now happens in our init step, so by the time this
-#    runs a failure here means local corruption, not a bad mirror.
-# 2. Convert. PBF -> bzip2 XML, which is what `bunzip2 | update_database`
-#    needs and which no mirror publishes for country extracts.
-PREPROCESS_SCRIPT = """#!/bin/sh
+# GUARD_ONLY is the normal path from v1.13.0: the init step already converted
+# the extract, so all that is left is to confirm the file survived the copy.
+# The upstream entrypoint stages it with curl and treats exit code 000 as
+# success (that is the `file://` code), so a truncated or missing file reads as
+# success and the import fails an hour later complaining about the wrong thing.
+#
+# CONVERT_AND_GUARD is the fallback for an image without osmium-tool and a
+# parallel bzip2 — it does the conversion in the sidecar, single-threaded, the
+# way every version before v1.13.0 did.
+_GUARD = """if [ ! -s "$SRC" ]; then
+    echo "FATAL: the extract handed to the importer is empty." >&2
+    echo "  Source was $OVERPASS_PLANET_URL. curl reports 000 for both a" >&2
+    echo "  file:// read and a connection that never opened, so the" >&2
+    echo "  entrypoint cannot tell an empty copy from a successful one." >&2
+    echo "  Check the overpass-local-init logs: it prepares the extract and" >&2
+    echo "  refuses to start this container without one." >&2
+    exit 1
+fi
+"""
+
+GUARD_ONLY_SCRIPT = (
+    """#!/bin/sh
 # Written by overpass_local_init.py. Do not edit in the container: the file
 # lives on a read-only mount and is regenerated on every `docker compose up`.
 set -e
 
 SRC=/db/planet.osm.bz2
 
-if [ ! -s "$SRC" ]; then
-    echo "FATAL: the extract handed to the importer is empty." >&2
-    echo "  Source was $OVERPASS_PLANET_URL. curl reports 000 for both a" >&2
-    echo "  file:// read and a connection that never opened, so the" >&2
-    echo "  entrypoint cannot tell an empty copy from a successful one." >&2
-    echo "  Check the overpass-local-init logs: it fetches the extract and" >&2
-    echo "  refuses to start this container without one." >&2
+"""
+    + _GUARD
+    + """
+if ! head -c 3 "$SRC" | grep -qa BZh; then
+    echo "FATAL: the file handed to the importer is not a bzip2 archive." >&2
+    echo "  Got $(wc -c < "$SRC") bytes from $OVERPASS_PLANET_URL starting with:" >&2
+    head -c 300 "$SRC" >&2
+    echo >&2
     exit 1
 fi
 
+echo "Extract already converted by the init step; importing directly."
+"""
+)
+
+CONVERT_AND_GUARD_SCRIPT = (
+    """#!/bin/sh
+# Written by overpass_local_init.py. Do not edit in the container: the file
+# lives on a read-only mount and is regenerated on every `docker compose up`.
+set -e
+
+SRC=/db/planet.osm.bz2
+
+"""
+    + _GUARD
+    + """
 if ! head -c 64 "$SRC" | grep -qa OSMHeader; then
     echo "FATAL: the extract handed to the importer is not an OSM PBF file." >&2
     echo "  Got $(wc -c < "$SRC") bytes from $OVERPASS_PLANET_URL starting with:" >&2
@@ -211,11 +252,16 @@ if ! head -c 64 "$SRC" | grep -qa OSMHeader; then
     exit 1
 fi
 
-echo "Converting the PBF to bzip2 XML for the importer..."
+echo "Converting the PBF to bzip2 XML for the importer (single-threaded --" >&2
+echo "this image has no parallel bzip2; expect an hour or more)..." >&2
 mv -f "$SRC" /db/planet.osm.pbf
 osmium cat --overwrite -o "$SRC" /db/planet.osm.pbf
 rm -f /db/planet.osm.pbf
 """
+)
+
+# Kept for compatibility with anything referring to the old single name.
+PREPROCESS_SCRIPT = CONVERT_AND_GUARD_SCRIPT
 
 # ---------------------------------------------------------------------------
 # Download budget

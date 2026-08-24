@@ -17,6 +17,7 @@ from config import overpass_local as cfg
 import httpx
 
 from services import overpass_local as svc
+from services import overpass_extract_converter as conv
 from services import overpass_extract_fetcher as fetcher
 from services.osm_service import _pool_with_local
 
@@ -791,3 +792,206 @@ class TestDownloadBudget:
         )
         assert not out.ok
         assert "Wait rather than" in out.reason
+
+
+class TestConversionPlacement:
+    """Where the PBF -> bzip2-XML conversion runs.
+
+    In the sidecar it is single-threaded, because the Overpass image ships
+    bzip2 but no parallel implementation — an hour on one core for Sweden while
+    the other nineteen idle. Our own image has pbzip2, so it converts there
+    when it can, and keeps the result so a failed import never pays twice.
+    """
+
+    def _init(self, tmp_path, monkeypatch, converts=True, fails=False):
+        import scripts.overpass_local_init as init
+
+        monkeypatch.setenv("OVERPASS_LOCAL_COUNTRIES", "SE")
+        monkeypatch.setattr(init, "DB_DIR", tmp_path / "db")
+        monkeypatch.setattr(init, "META_DIR", tmp_path / "meta")
+        monkeypatch.setattr(init, "EXTRACT_DIR", tmp_path / "extract")
+        monkeypatch.setattr(init.Path, "is_mount", lambda self: True, raising=False)
+        (tmp_path / "db").mkdir(exist_ok=True)
+
+        monkeypatch.setattr(conv, "available", lambda: converts)
+
+        def _fake_convert(pbf, destination, threads=None):
+            if fails:
+                return conv.ConversionOutcome(ok=False, reason="boom")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"BZh9" + b"z" * 4096)
+            return conv.ConversionOutcome(
+                ok=True, reason="converted", path=destination, threads=10
+            )
+
+        monkeypatch.setattr(conv, "convert", _fake_convert)
+        rc = init.main()
+        launcher = tmp_path / "meta" / "start.sh"
+        pre = tmp_path / "meta" / "preprocess.sh"
+        return (
+            rc,
+            launcher.read_text(encoding="utf-8") if launcher.is_file() else "",
+            pre.read_text(encoding="utf-8") if pre.is_file() else "",
+        )
+
+    def test_converted_here_the_sidecar_only_guards(self, tmp_path, monkeypatch):
+        rc, script, pre = self._init(tmp_path, monkeypatch)
+        assert rc == 0
+        assert "planet-europe_sweden.osm.bz2" in script
+        assert "osmium cat" not in pre
+        assert "importing directly" in pre
+
+    def test_the_pbf_is_dropped_once_converted(self, tmp_path, monkeypatch):
+        # It has done its job; the archive is what a retry would reuse.
+        self._init(tmp_path, monkeypatch)
+        d = tmp_path / "extract"
+        assert not (d / "planet-europe_sweden.osm.pbf").exists()
+        assert (d / "planet-europe_sweden.osm.bz2").is_file()
+
+    def test_an_existing_archive_skips_the_download_entirely(
+        self, tmp_path, monkeypatch
+    ):
+        # The regression this guards: dropping the PBF after converting means
+        # the next run finds no PBF, and would re-fetch it from the mirror if
+        # it only ever looked for one.
+        import scripts.overpass_local_init as init
+
+        d = tmp_path / "extract"
+        d.mkdir(parents=True)
+        (d / "planet-europe_sweden.osm.bz2").write_bytes(b"BZh9" + b"z" * 4096)
+
+        def _must_not_fetch(*args, **kwargs):
+            raise AssertionError("re-downloaded an extract that was already converted")
+
+        monkeypatch.setattr(init, "fetch_extract", _must_not_fetch)
+        rc, script, pre = self._init(tmp_path, monkeypatch)
+        assert rc == 0
+        assert "planet-europe_sweden.osm.bz2" in script
+        assert "importing directly" in pre
+
+    def test_without_the_tools_the_sidecar_converts_as_before(
+        self, tmp_path, monkeypatch
+    ):
+        rc, script, pre = self._init(tmp_path, monkeypatch, converts=False)
+        assert rc == 0
+        assert "planet-europe_sweden.osm.pbf" in script
+        assert "osmium cat" in pre
+
+    def test_a_failed_conversion_falls_back_rather_than_failing(
+        self, tmp_path, monkeypatch
+    ):
+        # Slower, but a sidecar that comes up late beats one that never does.
+        rc, script, pre = self._init(tmp_path, monkeypatch, fails=True)
+        assert rc == 0
+        assert "planet-europe_sweden.osm.pbf" in script
+        assert "osmium cat" in pre
+
+
+class TestConverter:
+    def test_threads_default_to_half_the_machine(self, monkeypatch):
+        # The init container usually shares a box with whatever else the
+        # operator runs; pinning every core for ten minutes is its own rudeness.
+        monkeypatch.delenv("OVERPASS_CONVERT_THREADS", raising=False)
+        monkeypatch.setattr(conv.os, "cpu_count", lambda: 20)
+        assert conv.default_threads() == 10
+
+    def test_threads_never_drop_below_one(self, monkeypatch):
+        monkeypatch.delenv("OVERPASS_CONVERT_THREADS", raising=False)
+        monkeypatch.setattr(conv.os, "cpu_count", lambda: 1)
+        assert conv.default_threads() == 1
+
+    def test_operator_thread_count_wins(self, monkeypatch):
+        monkeypatch.setenv("OVERPASS_CONVERT_THREADS", "18")
+        assert conv.default_threads() == 18
+
+    def test_garbage_thread_count_falls_back(self, monkeypatch):
+        monkeypatch.setenv("OVERPASS_CONVERT_THREADS", "lots")
+        monkeypatch.setattr(conv.os, "cpu_count", lambda: 8)
+        assert conv.default_threads() == 4
+
+    def test_unavailable_without_both_tools(self, monkeypatch):
+        monkeypatch.setattr(conv.shutil, "which", lambda n: None)
+        assert not conv.available()
+        monkeypatch.setattr(conv.shutil, "which", lambda n: "/usr/bin/" + n)
+        assert conv.available()
+
+    def test_the_pipeline_gives_the_threads_to_the_compressor(
+        self, tmp_path, monkeypatch
+    ):
+        # osmium's XML generation is serial but cheap; bzip2 is the expensive
+        # half, so it is the half that must be parallel.
+        monkeypatch.setattr(conv.shutil, "which", lambda n: "/usr/bin/" + n)
+        monkeypatch.setenv("OVERPASS_CONVERT_THREADS", "12")
+        seen = []
+
+        class FakeProc:
+            returncode = 0
+
+            def __init__(self, argv, **kwargs):
+                seen.append(argv)
+                self.stdout = kwargs.get("stdout")
+                if hasattr(self.stdout, "write"):
+                    self.stdout.write(b"BZh9" + b"z" * 4096)
+                    self.stdout = None
+                else:
+                    self.stdout = _ClosablePipe()
+
+            def communicate(self):
+                return b"", b""
+
+        class _ClosablePipe:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(conv.subprocess, "Popen", FakeProc)
+        pbf = tmp_path / "in.osm.pbf"
+        pbf.write_bytes(b"\x00\x00\x00\x0d\n\tOSMHeader")
+        out = conv.convert(pbf, tmp_path / "out.osm.bz2")
+
+        assert out.ok, out.reason
+        reader, writer = seen
+        assert reader[:2] == ["osmium", "cat"]
+        assert "-o" in reader and "-" in reader
+        assert writer[0] == "pbzip2"
+        assert "-p12" in writer
+
+    def test_a_truncated_conversion_is_not_left_looking_finished(
+        self, tmp_path, monkeypatch
+    ):
+        # An import handed a truncated archive fails an hour later for the
+        # wrong reason, so a bad conversion must leave nothing behind.
+        monkeypatch.setattr(conv.shutil, "which", lambda n: "/usr/bin/" + n)
+
+        class FakeProc:
+            returncode = 0
+
+            def __init__(self, argv, **kwargs):
+                self.stdout = kwargs.get("stdout")
+                if hasattr(self.stdout, "write"):
+                    self.stdout.write(b"not bzip2 at all")
+                    self.stdout = None
+                else:
+                    self.stdout = type("P", (), {"close": lambda s: None})()
+
+            def communicate(self):
+                return b"", b""
+
+        monkeypatch.setattr(conv.subprocess, "Popen", FakeProc)
+        pbf = tmp_path / "in.osm.pbf"
+        pbf.write_bytes(b"\x00\x00\x00\x0d\n\tOSMHeader")
+        dest = tmp_path / "out.osm.bz2"
+        out = conv.convert(pbf, dest)
+
+        assert not out.ok
+        assert not dest.exists()
+        assert not dest.with_suffix(dest.suffix + ".part").exists()
+
+    def test_an_existing_archive_is_reused(self, tmp_path, monkeypatch):
+        def _must_not_run(*a, **k):
+            raise AssertionError("reconverted an extract that was already converted")
+
+        monkeypatch.setattr(conv.subprocess, "Popen", _must_not_run)
+        dest = tmp_path / "out.osm.bz2"
+        dest.write_bytes(b"BZh9" + b"z" * 4096)
+        out = conv.convert(tmp_path / "in.osm.pbf", dest)
+        assert out.ok and out.already_present
