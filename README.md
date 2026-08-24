@@ -46,7 +46,7 @@ Instead of manually sourcing elevation data, painting surface masks by hand, pla
 - **Enfusion prefab mapping** (RG_Road_* generators)
 - **Spline control point generation** for World Editor import
 - **Multi-mirror Overpass API pool** for reliable OSM data fetching (overpass-api.de, Private.coffee, VK Maps, plus country-gated regional mirrors) with live health probing, per-mirror concurrency limits, response caching and automatic failover
-- **Optional self-hosted Overpass sidecar** (`docker compose --profile local-osm up -d`) holding a single country extract, self-updating from Geofabrik's daily diffs — used automatically inside its coverage, with the public pool as fallback
+- **Optional self-hosted Overpass sidecar** (`docker compose --profile local-osm up -d`) holding a single country extract, self-updating from the mirror's diff stream — used automatically inside its coverage, with the public pool as fallback
 
 ### Water Features
 - **Lakes, rivers, streams, coastline, wetlands** from OSM
@@ -256,15 +256,33 @@ HU SK HR RS BG GR PT IE IS`
 ### What happens on first boot
 
 The sidecar downloads that country's [Geofabrik](https://download.geofabrik.de/)
-extract and builds an Overpass database. This takes **hours** for a large country
+extract (or another mirror's — see below) and builds an Overpass database. This takes **hours** for a large country
 and needs roughly **10x the compressed extract on disk** — Sweden's 0.76 GB
 extract lands near 8 GB.
 
 There is an extra step you will see in the logs before the import starts:
-Geofabrik publishes `.osm.pbf`, but the Overpass importer requires bzip2-compressed
+the mirrors publish `.osm.pbf`, but the Overpass importer requires bzip2-compressed
 OSM XML, so the file is converted after download. On a country-sized extract that
-conversion alone can take an hour or more. It is a one-time cost — the daily diffs
+conversion alone can take an hour or more. It is a one-time cost — the diffs
 afterwards are small and need no conversion.
+
+The extract is downloaded once, by the init step, onto a volume of its own.
+The Overpass container is handed a local file and is never given a mirror URL,
+so no restart of it can cost bandwidth. Budget the compressed size once more on
+top of the figure above; it is deleted automatically once the database is built.
+
+Because the download happens in the init step, the first
+`docker compose --profile local-osm up -d` **blocks while the extract
+downloads** — progress is in `docker compose logs overpass-local-init`, and an
+interrupted transfer resumes rather than starting over.
+
+If the download keeps failing, it stops rather than retrying forever: three
+failed attempts in six hours, or three times the extract size pulled in
+twenty-four, and the init step refuses and exits non-zero, so the sidecar never
+starts. That is deliberate — repeatedly re-downloading an extract is what gets
+an IP firewalled. The ledger lives on the extract volume, so it survives
+`--force-recreate`; clear it with `docker volume rm arma-map-generator_overpass_extract`
+once the underlying problem is fixed.
 
 Nothing breaks meanwhile. The app keeps using public mirrors, and a banner in the
 sidebar shows the sidecar's progress. Watch it with:
@@ -275,8 +293,45 @@ docker compose logs -f overpass-local
 
 ### Staying up to date
 
-Geofabrik publishes a diff for each extract once a day. The sidecar applies them
-itself — there is no cron job to set up and nothing to run manually.
+The sidecar applies the mirror's diffs itself — there is no cron job to set up
+and nothing to run manually. It sweeps **once a week** by default: OSM road and
+coastline geometry does not move fast enough for a terrain generator to care,
+and both mirrors are volunteer-run. Set `OVERPASS_UPDATE_SLEEP` lower if you
+want fresher data; values under an hour are clamped.
+
+### If the mirror stops answering
+
+Geofabrik firewalls IP addresses that re-download large extracts repeatedly, and
+the block is a silent packet drop — connections time out rather than returning
+an HTTP error, from a browser as well as from Docker. If that happens, switch
+mirrors without changing anything else:
+
+```bash
+OVERPASS_LOCAL_MIRROR=osmfr
+```
+
+[download.openstreetmap.fr](https://download.openstreetmap.fr/) serves the same
+data with minutely diffs. Treat it as the fallback, not the destination:
+Geofabrik covers every country here and publishes one diff a day, where OSM
+France cuts fewer countries, runs slightly larger extracts (Sweden 0.90 GB
+against 0.76), and publishes only minutely replication — about 1,400 small
+diff fetches a day whatever `OVERPASS_UPDATE_SLEEP` is set to, since every
+sequence gets fetched eventually. Move back to Geofabrik once you can. It covers SE NO DK FI DE PL RU GB FR ES IT AT CH CZ NL
+BE UA SK PT IE — but **not** EE, LV, LT, RO, HU, HR, RS, BG, GR or IS; choosing
+it for one of those is reported as a configuration error rather than failing
+mid-import. The region marker is mirror-independent, so switching does **not**
+trigger a re-import.
+
+For anything else — a private mirror, or an extract you downloaded by hand and
+dropped on the volume — set the URLs directly:
+
+```bash
+OVERPASS_PLANET_URL=file:///db/extract_cache/planet-europe_sweden.osm.pbf
+OVERPASS_DIFF_URL=https://download.openstreetmap.fr/replication/europe/sweden/minute/
+```
+
+Both override `OVERPASS_LOCAL_MIRROR` entirely. The diff directory must use the
+standard osmosis layout (`state.txt` plus `NNN/NNN/NNN.osc.gz`).
 
 ### Changing country
 
@@ -302,9 +357,13 @@ the SETUP_GUIDE's Data Sources appendix.
 | Variable | Default | Purpose |
 |---|---|---|
 | `OVERPASS_LOCAL_COUNTRIES` | *(unset)* | One ISO country code. Unset disables the sidecar entirely. |
-| `OVERPASS_LOCAL_REGION` | *(derived)* | Override with a raw Geofabrik path, e.g. `europe`, for more than one country. Much larger. |
+| `OVERPASS_LOCAL_REGION` | *(derived)* | Override with a raw extract path, e.g. `europe`, for more than one country. Much larger. |
+| `OVERPASS_LOCAL_MIRROR` | `geofabrik` | Where the extract comes from: `geofabrik` (all countries, daily diffs) or `osmfr` (fewer countries, minutely diffs). |
+| `OVERPASS_PLANET_URL` | *(derived)* | Full escape hatch — a private mirror, or `file:///…` for a hand-downloaded extract. Overrides the mirror. |
+| `OVERPASS_DIFF_URL` | *(derived)* | Replication directory, osmosis layout. Empty imports once and never updates. |
+| `OVERPASS_UPDATE_SLEEP` | `604800` | Seconds between diff sweeps. Clamped to a minimum of 3600 — the mirrors are volunteer-run. |
 | `OVERPASS_LOCAL_ONLY` | `0` | `1` refuses public mirrors entirely. Generations fail rather than fall back — for private or air-gapped deployments. |
-| `OVERPASS_LOCAL_STALE_AFTER_HOURS` | `48` | Flag the sidecar as stale after this long without a diff. |
+| `OVERPASS_LOCAL_STALE_AFTER_HOURS` | *(derived)* | Flag the sidecar as stale after this long without a diff. Defaults to one sweep plus 48 h. |
 
 ### Checking status
 

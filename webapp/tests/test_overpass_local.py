@@ -14,8 +14,70 @@ import asyncio
 import pytest
 
 from config import overpass_local as cfg
+import httpx
+
 from services import overpass_local as svc
+from services import overpass_extract_fetcher as fetcher
 from services.osm_service import _pool_with_local
+
+# Smallest thing that passes both of the fetcher's checks: the PBF magic in the
+# first 64 bytes, and over MIN_PLAUSIBLE_BYTES in total.
+FAKE_PBF = b"\x00\x00\x00\x0d\n\tOSMHeader\x18" + b"x" * (200 * 1024)
+
+# Kept before the no-network guard swaps the class out, so the fetcher's own
+# tests can still build a client over a mock transport.
+_REAL_HTTPX_CLIENT = httpx.Client
+
+# Just the header, for the shell-level guard which only inspects the first
+# 64 bytes and does not care about size.
+VALID_PBF_HEAD = FAKE_PBF[:32]
+
+
+@pytest.fixture(autouse=True)
+def no_real_downloads(monkeypatch):
+    """No test may pull an extract from a real mirror.
+
+    This is not hygiene, it is the same failure this module exists to prevent:
+    a suite that downloads gigabytes on every CI run hammers the mirrors just
+    as effectively as a restart loop does. Both the init step's fetch and the
+    HTTP client underneath it are replaced, so a future test that forgets to
+    stub gets an immediate assertion rather than a real transfer.
+    """
+    import scripts.overpass_local_init as init
+
+    def _stub_fetch(url, destination, expected_gb=0.0, on_progress=None):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(FAKE_PBF)
+        return fetcher.FetchOutcome(
+            ok=True, reason="stubbed fetch", path=destination, downloaded_bytes=0
+        )
+
+    monkeypatch.setattr(init, "fetch_extract", _stub_fetch)
+
+    def _refuse(*args, **kwargs):
+        raise AssertionError(
+            "A test tried to open a real HTTP connection. Use the "
+            "`mock_mirror` fixture instead."
+        )
+
+    monkeypatch.setattr(fetcher.httpx, "Client", _refuse)
+
+
+@pytest.fixture
+def mock_mirror(monkeypatch):
+    """Serve the fetcher a scripted mirror instead of the network.
+
+    Returns a setter taking an httpx.MockTransport handler.
+    """
+
+    def install(handler):
+        def _client(**kwargs):
+            kwargs.pop("transport", None)
+            return _REAL_HTTPX_CLIENT(transport=httpx.MockTransport(handler), **kwargs)
+
+        monkeypatch.setattr(fetcher.httpx, "Client", _client)
+
+    return install
 
 
 @pytest.fixture(autouse=True)
@@ -27,6 +89,11 @@ def clean_env(monkeypatch):
         "OVERPASS_LOCAL_URL",
         "OVERPASS_LOCAL_ONLY",
         "OVERPASS_LOCAL_MARKER_PATH",
+        "OVERPASS_LOCAL_MIRROR",
+        "OVERPASS_PLANET_URL",
+        "OVERPASS_DIFF_URL",
+        "OVERPASS_UPDATE_SLEEP",
+        "OVERPASS_LOCAL_STALE_AFTER_HOURS",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -134,7 +201,7 @@ class TestStatus:
             marker="europe/sweden", tmp_path=tmp_path,
         )
         assert status["state"] == "stale"
-        assert "daily diffs" in status["message"]
+        assert "update loop may be stuck" in status["message"]
 
     def test_restart_required_when_config_changed(self, monkeypatch, tmp_path):
         # .env now says SE, but the running container built Norway.
@@ -234,21 +301,27 @@ class TestLauncherGeneration:
         monkeypatch.setenv("OVERPASS_LOCAL_COUNTRIES", country)
         monkeypatch.setattr(init, "DB_DIR", tmp_path / "db")
         monkeypatch.setattr(init, "META_DIR", tmp_path / "meta")
-        (tmp_path / "db").mkdir()
+        (tmp_path / "db").mkdir(exist_ok=True)
         assert init.main() == 0
         return (tmp_path / "meta" / "start.sh").read_text(encoding="utf-8")
 
     def test_launcher_sets_the_resolved_urls(self, tmp_path, monkeypatch):
+        # The planet file is fetched by the init step and handed over as a
+        # local path; only the diff stream stays remote.
         script = self._launcher(tmp_path, monkeypatch)
-        assert "europe/sweden-latest.osm.pbf" in script
+        assert "planet-europe_sweden.osm.pbf" in script
         assert "europe/sweden-updates/" in script
 
     def test_launcher_carries_the_pbf_conversion(self, tmp_path, monkeypatch):
         # Without this the importer's `bunzip2 < planet.osm.bz2` is handed a
-        # PBF and the whole import dies — the v1.10.0 failure.
+        # PBF and the whole import dies — the v1.10.0 failure. The conversion
+        # moved into a script when it grew a guard and a cache, so the launcher
+        # only has to point at it.
         script = self._launcher(tmp_path, monkeypatch)
-        assert "osmium cat" in script
-        assert "/db/planet.osm.bz2" in script
+        assert "/overpass_meta/preprocess.sh" in script
+        preprocess = (tmp_path / "meta" / "preprocess.sh").read_text(encoding="utf-8")
+        assert "osmium cat" in preprocess
+        assert "/db/planet.osm.bz2" in preprocess
 
     def test_conversion_default_does_not_clobber_an_override(self, tmp_path, monkeypatch):
         # ":=" assigns only when unset or empty, so a value from docker-compose
@@ -274,3 +347,447 @@ class TestLauncherGeneration:
             capture_output=True, text=True,
         )
         assert result.returncode == 0, result.stderr
+
+
+class TestMirrorSelection:
+    """Geofabrik firewalls IPs that re-download extracts, so there has to be a
+    way off it that does not involve hand-editing docker-compose.yml."""
+
+    def test_geofabrik_is_the_default(self):
+        assert cfg.mirror() == "geofabrik"
+
+    def test_unknown_mirror_is_an_error(self, monkeypatch):
+        # Silently falling back would send a blocked operator straight back to
+        # the mirror that blocked them.
+        monkeypatch.setenv("OVERPASS_LOCAL_MIRROR", "geofabrick")
+        with pytest.raises(cfg.LocalOverpassConfigError):
+            cfg.mirror()
+
+    def test_urls_follow_the_selected_mirror(self, monkeypatch):
+        monkeypatch.setenv("OVERPASS_LOCAL_COUNTRIES", "SE")
+        assert cfg.planet_url().startswith(cfg.GEOFABRIK_BASE)
+        monkeypatch.setenv("OVERPASS_LOCAL_MIRROR", "osmfr")
+        assert cfg.planet_url() == (
+            "https://download.openstreetmap.fr/extracts/europe/sweden-latest.osm.pbf"
+        )
+        assert cfg.diff_url() == (
+            "https://download.openstreetmap.fr/replication/europe/sweden/minute/"
+        )
+
+    def test_region_identity_is_mirror_independent(self, monkeypatch):
+        # The marker records the canonical region, so switching mirrors must
+        # not read as a region change and trigger a multi-hour re-import.
+        monkeypatch.setenv("OVERPASS_LOCAL_COUNTRIES", "SE")
+        monkeypatch.setenv("OVERPASS_LOCAL_MIRROR", "osmfr")
+        assert cfg.local_region() == "europe/sweden"
+        assert cfg.mirror_region() == "europe/sweden"
+
+    def test_osmfr_translates_slugs_that_differ(self, monkeypatch):
+        monkeypatch.setenv("OVERPASS_LOCAL_MIRROR", "osmfr")
+        for country, expected in (
+            ("GB", "europe/united_kingdom"),
+            ("CZ", "europe/czech_republic"),
+            ("IE", "europe/ireland"),
+            ("RU", "russia"),
+        ):
+            monkeypatch.setenv("OVERPASS_LOCAL_COUNTRIES", country)
+            assert cfg.mirror_region() == expected
+
+    def test_osmfr_gap_is_an_error_not_a_404_later(self, monkeypatch):
+        # OSM France publishes no Baltic or Balkan country extracts. Better a
+        # config error now than a 404 six hours into a container restart loop.
+        monkeypatch.setenv("OVERPASS_LOCAL_MIRROR", "osmfr")
+        monkeypatch.setenv("OVERPASS_LOCAL_COUNTRIES", "EE")
+        with pytest.raises(cfg.LocalOverpassConfigError):
+            cfg.mirror_region()
+
+    def test_every_osmfr_entry_maps_a_real_geofabrik_region(self):
+        known = {path for path, _ in cfg.GEOFABRIK_EXTRACTS.values()}
+        known |= set(cfg.PARENT_EXTRACTS)
+        assert set(cfg.OSMFR_REGIONS) <= known
+
+    def test_explicit_urls_override_the_mirror(self, monkeypatch):
+        # The full escape hatch: a private mirror, or a hand-downloaded extract
+        # dropped on the volume by an operator Geofabrik has blocked.
+        monkeypatch.setenv("OVERPASS_LOCAL_COUNTRIES", "SE")
+        monkeypatch.setenv("OVERPASS_PLANET_URL", "file:///db/mine.osm.pbf")
+        monkeypatch.setenv("OVERPASS_DIFF_URL", "https://example.org/replication/")
+        assert cfg.planet_url() == "file:///db/mine.osm.pbf"
+        assert cfg.diff_url() == "https://example.org/replication/"
+
+    def test_explicit_region_is_passed_through_untranslated(self, monkeypatch):
+        monkeypatch.setenv("OVERPASS_LOCAL_MIRROR", "osmfr")
+        monkeypatch.setenv("OVERPASS_LOCAL_REGION", "asia/japan")
+        assert cfg.mirror_region() == "asia/japan"
+
+
+class TestUpdateCadence:
+    """The mirrors are volunteer-run; one deployment must not become a stream
+    of requests against them."""
+
+    def test_defaults_to_weekly(self):
+        assert cfg.update_sleep_seconds() == 7 * 24 * 3600
+
+    def test_operator_value_is_honoured(self, monkeypatch):
+        monkeypatch.setenv("OVERPASS_UPDATE_SLEEP", "86400")
+        assert cfg.update_sleep_seconds() == 86400
+
+    def test_too_eager_a_value_is_clamped(self, monkeypatch):
+        monkeypatch.setenv("OVERPASS_UPDATE_SLEEP", "60")
+        assert cfg.update_sleep_seconds() == cfg.MIN_UPDATE_SLEEP_SECONDS
+
+    def test_garbage_falls_back_to_the_default(self, monkeypatch):
+        monkeypatch.setenv("OVERPASS_UPDATE_SLEEP", "soon")
+        assert cfg.update_sleep_seconds() == cfg.DEFAULT_UPDATE_SLEEP_SECONDS
+
+    def test_stale_threshold_outlives_one_sweep(self, monkeypatch):
+        # Otherwise a healthy weekly sidecar reports "stale" most of the week.
+        assert cfg.local_stale_after_hours() > cfg.update_sleep_seconds() / 3600
+        monkeypatch.setenv("OVERPASS_UPDATE_SLEEP", "86400")
+        assert cfg.local_stale_after_hours() == 24 + cfg.STALE_GRACE_HOURS
+
+    def test_explicit_stale_threshold_still_wins(self, monkeypatch):
+        monkeypatch.setenv("OVERPASS_LOCAL_STALE_AFTER_HOURS", "12")
+        assert cfg.local_stale_after_hours() == 12
+
+
+class TestDownloadGuardAndCache:
+    """The upstream entrypoint reports curl exit 000 as success — that is the
+    `file://` scheme's code, and also what a firewalled mirror produces. Every
+    failed import then re-downloads the whole extract on the next start, which
+    is how an IP gets blocked in the first place."""
+
+    def _run(self, tmp_path, contents, cache=True):
+        """Run preprocess.sh against a fake download, return (rc, output)."""
+        import shutil
+        import subprocess
+        sh = shutil.which("sh")
+        if not sh:
+            pytest.skip("no POSIX shell available")
+
+        db = tmp_path / "db"
+        db.mkdir(exist_ok=True)
+        (db / "planet.osm.bz2").write_bytes(contents)
+
+        script = tmp_path / "preprocess.sh"
+        script.write_text(
+            cfg.PREPROCESS_SCRIPT.replace("/db/", f"{db.as_posix()}/"),
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        # osmium is not on the host. Stub it rather than editing the script, so
+        # what runs here is the script as shipped.
+        stub_dir = tmp_path / "bin"
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "osmium"
+        stub.write_text(
+            "#!/bin/sh\n"
+            "# real call: osmium cat --overwrite -o DST SRC\n"
+            "shift 3\n"
+            'cp "$2" "$1"\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        stub.chmod(0o755)
+
+        env = {
+            "PATH": f"{stub_dir.as_posix()}:/usr/bin:/bin",
+            "OVERPASS_PLANET_URL": "https://example.org/sweden-latest.osm.pbf",
+        }
+        if cache:
+            env["OVERPASS_EXTRACT_CACHE"] = (
+                tmp_path / "db" / "extract_cache" / "planet-europe_sweden.osm.pbf"
+            ).as_posix()
+        result = subprocess.run(
+            [sh, str(script)], capture_output=True, text=True, env=env, errors="replace"
+        )
+        return result.returncode, result.stdout + result.stderr
+
+    def test_is_valid_posix_shell(self, tmp_path):
+        import shutil
+        import subprocess
+        sh = shutil.which("sh")
+        if not sh:
+            pytest.skip("no POSIX shell available")
+        script = tmp_path / "preprocess.sh"
+        script.write_text(cfg.PREPROCESS_SCRIPT, encoding="utf-8", newline="\n")
+        result = subprocess.run([sh, "-n", str(script)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+
+    def test_empty_download_fails_loudly(self, tmp_path):
+        rc, out = self._run(tmp_path, b"")
+        assert rc != 0
+        assert "empty" in out
+        # The message has to point at the network, not at the file — that is
+        # the whole reason the guard exists.
+        assert "example.org" in out
+
+    def test_error_page_is_not_mistaken_for_an_extract(self, tmp_path):
+        rc, out = self._run(tmp_path, b"<html><title>403 Forbidden</title></html>")
+        assert rc != 0
+        assert "not an OSM PBF" in out
+
+    def test_a_valid_pbf_is_converted(self, tmp_path):
+        # Caching moved into the fetcher, where the budget lives; this
+        # script only guards and converts now.
+        rc, out = self._run(tmp_path, VALID_PBF_HEAD)
+        assert rc == 0, out
+
+
+class TestExtractPlacement:
+    """Where the extract lives, and who is allowed to fetch it."""
+
+    def _init(self, tmp_path, monkeypatch, country="SE", mount=True, **env):
+        import scripts.overpass_local_init as init
+        monkeypatch.setenv("OVERPASS_LOCAL_COUNTRIES", country)
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        monkeypatch.setattr(init, "DB_DIR", tmp_path / "db")
+        monkeypatch.setattr(init, "META_DIR", tmp_path / "meta")
+        monkeypatch.setattr(init, "EXTRACT_DIR", tmp_path / "extract")
+        # is_mount() is meaningless on a tmp dir, so state the answer directly.
+        monkeypatch.setattr(init.Path, "is_mount", lambda self: mount, raising=False)
+        (tmp_path / "db").mkdir(exist_ok=True)
+        rc = init.main()
+        launcher = tmp_path / "meta" / "start.sh"
+        return rc, launcher.read_text(encoding="utf-8") if launcher.is_file() else ""
+
+    def test_sidecar_is_never_given_a_mirror_url(self, tmp_path, monkeypatch):
+        # The whole point. The Overpass container's entrypoint re-downloads
+        # whenever there is no database, so it must not hold a URL it could
+        # download from — then no restart of it can cost a byte.
+        rc, script = self._init(tmp_path, monkeypatch)
+        assert rc == 0
+        planet_line = next(
+            line for line in script.splitlines()
+            if line.startswith("export OVERPASS_PLANET_URL=")
+        )
+        assert planet_line.startswith("export OVERPASS_PLANET_URL='file://")
+        assert "geofabrik" not in planet_line
+        assert "openstreetmap.fr" not in planet_line
+        # The diff URL stays remote by necessity — that is a weekly sweep of
+        # small files, not a gigabyte re-download.
+        assert "OVERPASS_DIFF_URL='https://" in script
+
+    def test_extract_lands_on_its_own_volume(self, tmp_path, monkeypatch):
+        # Separate from the database volume on purpose: wiping the database is
+        # the documented recovery step and must not cost another download.
+        rc, script = self._init(tmp_path, monkeypatch)
+        assert rc == 0
+        assert (tmp_path / "extract" / "planet-europe_sweden.osm.pbf").is_file()
+        assert not (tmp_path / "db" / "extract_cache").exists()
+
+    def test_missing_mount_falls_back_and_warns(self, tmp_path, monkeypatch, capsys):
+        # Compose files predating the volume must keep working.
+        rc, _ = self._init(tmp_path, monkeypatch, mount=False)
+        assert rc == 0
+        cached = tmp_path / "db" / "extract_cache" / "planet-europe_sweden.osm.pbf"
+        assert cached.is_file()
+        assert "no volume mounted" in capsys.readouterr().out
+
+    def test_a_built_database_needs_no_extract(self, tmp_path, monkeypatch):
+        (tmp_path / "db").mkdir(exist_ok=True)
+        (tmp_path / "db" / "init_done").write_text("")
+        rc, _ = self._init(tmp_path, monkeypatch)
+        assert rc == 0
+        assert not (tmp_path / "extract" / "planet-europe_sweden.osm.pbf").exists()
+
+    def test_operator_file_url_is_passed_through_not_copied(self, tmp_path, monkeypatch):
+        rc, script = self._init(
+            tmp_path, monkeypatch, OVERPASS_PLANET_URL="file:///db/mine.osm.pbf"
+        )
+        assert rc == 0
+        assert "export OVERPASS_PLANET_URL='file:///db/mine.osm.pbf'" in script
+        assert not (tmp_path / "extract" / "planet-europe_sweden.osm.pbf").exists()
+
+    def test_a_failed_fetch_stops_the_sidecar_starting(self, tmp_path, monkeypatch):
+        # Exit non-zero -> `depends_on: service_completed_successfully` means
+        # overpass-local never runs. One clear error instead of a restart loop.
+        import scripts.overpass_local_init as init
+        monkeypatch.setattr(
+            init,
+            "fetch_extract",
+            lambda *a, **k: fetcher.FetchOutcome(ok=False, reason="mirror blocked"),
+        )
+        rc, _ = self._init(tmp_path, monkeypatch)
+        assert rc == 1
+
+    def test_the_partial_download_is_not_pruned(self, tmp_path, monkeypatch):
+        # Pruning it would throw away everything already transferred and make
+        # the next attempt start from zero.
+        d = tmp_path / "extract"
+        d.mkdir(parents=True)
+        part = d / "planet-europe_sweden.osm.pbf.part"
+        part.write_bytes(b"half a file")
+        (d / cfg.LEDGER_NAME).write_text("{}", encoding="utf-8")
+        (d / "planet-europe_norway.osm.pbf").write_bytes(b"wrong region")
+        self._init(tmp_path, monkeypatch)
+        assert part.is_file()
+        assert (d / cfg.LEDGER_NAME).is_file()
+        assert not (d / "planet-europe_norway.osm.pbf").exists()
+
+
+class TestDownloadBudget:
+    """The backstop for when the fetch itself keeps failing.
+
+    A deployment of this app pulled 300+ GB from Geofabrik and was firewalled.
+    Every limit here exists to make a repeat arithmetically impossible.
+    """
+
+    def _dest(self, tmp_path):
+        return tmp_path / "extract" / "planet-europe_sweden.osm.pbf"
+
+    def _serve(self, mock_mirror, body, status=200, headers=None):
+        def handler(request):
+            return httpx.Response(status, content=body, headers=headers or {})
+        mock_mirror(handler)
+
+    def test_a_present_extract_is_never_refetched(self, tmp_path, mock_mirror):
+        dest = self._dest(tmp_path)
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(FAKE_PBF)
+
+        def handler(request):
+            raise AssertionError("should not have contacted the mirror")
+        mock_mirror(handler)
+
+        out = fetcher.fetch_extract("https://mirror.test/x.osm.pbf", dest)
+        assert out.ok and out.already_present
+        assert out.downloaded_bytes == 0
+
+    def test_a_good_download_is_stored(self, tmp_path, mock_mirror):
+        self._serve(mock_mirror, FAKE_PBF)
+        dest = self._dest(tmp_path)
+        out = fetcher.fetch_extract("https://mirror.test/x.osm.pbf", dest, 0.001)
+        assert out.ok, out.reason
+        assert dest.read_bytes() == FAKE_PBF
+
+    def test_an_error_page_is_rejected_and_discarded(self, tmp_path, mock_mirror):
+        self._serve(mock_mirror, b"<html>403 Forbidden</html>")
+        dest = self._dest(tmp_path)
+        out = fetcher.fetch_extract("https://mirror.test/x.osm.pbf", dest, 0.001)
+        assert not out.ok
+        assert not dest.exists()
+        # Keeping it would mean a later resume appends real PBF data to HTML.
+        assert not dest.with_suffix(dest.suffix + ".part").exists()
+
+    def test_attempts_stop_after_the_cap(self, tmp_path, mock_mirror):
+        self._serve(mock_mirror, b"nope", status=500)
+        dest = self._dest(tmp_path)
+        for _ in range(cfg.MAX_DOWNLOAD_ATTEMPTS):
+            out = fetcher.fetch_extract("https://mirror.test/x.osm.pbf", dest, 0.001)
+            assert not out.ok
+            assert not out.budget_exhausted
+
+        def handler(request):
+            raise AssertionError("must not contact the mirror past the cap")
+        mock_mirror(handler)
+
+        out = fetcher.fetch_extract("https://mirror.test/x.osm.pbf", dest, 0.001)
+        assert not out.ok and out.budget_exhausted
+        assert out.retry_after is not None
+
+    def test_the_cap_survives_container_recreation(self, tmp_path, mock_mirror):
+        # The ledger is on the volume, not in the container. This is the case
+        # that actually caused the 300 GB: re-running `docker compose up`
+        # resets anything a container was counting.
+        self._serve(mock_mirror, b"nope", status=500)
+        dest = self._dest(tmp_path)
+        for _ in range(cfg.MAX_DOWNLOAD_ATTEMPTS):
+            fetcher.fetch_extract("https://mirror.test/x.osm.pbf", dest, 0.001)
+
+        ledger = dest.parent / cfg.LEDGER_NAME
+        assert ledger.is_file()
+        reloaded = fetcher._Ledger.load(ledger)
+        assert len(reloaded.recent_failures()) >= cfg.MAX_DOWNLOAD_ATTEMPTS
+
+    def test_byte_budget_stops_a_server_that_ignores_resume(self, tmp_path, mock_mirror):
+        # Transfers resume, so blowing through several times the file size means
+        # the whole thing is being re-sent. Stop rather than keep paying for it.
+        self._serve(mock_mirror, b"x" * (2 * 1024 * 1024))
+        dest = self._dest(tmp_path)
+        tiny_gb = 0.000001  # a budget of roughly 3 KB
+        out = fetcher.fetch_extract("https://mirror.test/x.osm.pbf", dest, tiny_gb)
+        assert not out.ok and out.budget_exhausted
+
+    def test_a_partial_transfer_resumes(self, tmp_path, mock_mirror):
+        dest = self._dest(tmp_path)
+        dest.parent.mkdir(parents=True)
+        part = dest.with_suffix(dest.suffix + ".part")
+        part.write_bytes(FAKE_PBF[:1000])
+
+        seen = {}
+        total = len(FAKE_PBF)
+
+        def handler(request):
+            seen["range"] = request.headers.get("range")
+            return httpx.Response(
+                206,
+                content=FAKE_PBF[1000:],
+                headers={"content-range": f"bytes 1000-{total - 1}/{total}"},
+            )
+
+        mock_mirror(handler)
+        out = fetcher.fetch_extract("https://mirror.test/x.osm.pbf", dest, 0.001)
+        assert out.ok, out.reason
+        assert seen["range"] == "bytes=1000-"
+        assert dest.read_bytes() == FAKE_PBF
+        # Only the missing part crossed the wire.
+        assert out.downloaded_bytes == total - 1000
+
+    def test_a_mirror_ignoring_range_starts_over_cleanly(self, tmp_path, mock_mirror):
+        dest = self._dest(tmp_path)
+        dest.parent.mkdir(parents=True)
+        dest.with_suffix(dest.suffix + ".part").write_bytes(b"stale bytes")
+        self._serve(mock_mirror, FAKE_PBF, status=200)
+        out = fetcher.fetch_extract("https://mirror.test/x.osm.pbf", dest, 0.001)
+        assert out.ok, out.reason
+        # Appending to the stale partial would have corrupted the result.
+        assert dest.read_bytes() == FAKE_PBF
+
+    def test_requests_identify_the_app(self, tmp_path, mock_mirror):
+        # A mirror that can see who we are can email us instead of firewalling.
+        seen = {}
+
+        def handler(request):
+            seen["ua"] = request.headers.get("user-agent", "")
+            return httpx.Response(200, content=FAKE_PBF)
+
+        mock_mirror(handler)
+        fetcher.fetch_extract(
+            "https://mirror.test/x.osm.pbf", self._dest(tmp_path), 0.001
+        )
+        assert "ArmaReforgerBaseMapGenerator" in seen["ua"]
+        assert "github.com" in seen["ua"]
+
+    def test_a_second_fetcher_does_not_start_a_parallel_transfer(
+        self, tmp_path, mock_mirror
+    ):
+        dest = self._dest(tmp_path)
+        dest.parent.mkdir(parents=True)
+        (dest.parent / ".download.lock").write_text("999")
+
+        def handler(request):
+            raise AssertionError("must not transfer while another holds the lock")
+
+        mock_mirror(handler)
+        out = fetcher.fetch_extract("https://mirror.test/x.osm.pbf", dest, 0.001)
+        assert not out.ok
+        assert "Another container" in out.reason
+
+    def test_a_404_names_the_likely_config_mistake(self, tmp_path, mock_mirror):
+        self._serve(mock_mirror, b"missing", status=404)
+        out = fetcher.fetch_extract(
+            "https://mirror.test/x.osm.pbf", self._dest(tmp_path), 0.001
+        )
+        assert not out.ok
+        assert "OVERPASS_LOCAL_MIRROR" in out.reason
+
+    def test_a_429_says_do_not_retry(self, tmp_path, mock_mirror):
+        self._serve(mock_mirror, b"slow down", status=429)
+        out = fetcher.fetch_extract(
+            "https://mirror.test/x.osm.pbf", self._dest(tmp_path), 0.001
+        )
+        assert not out.ok
+        assert "Wait rather than" in out.reason

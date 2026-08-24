@@ -291,7 +291,7 @@ If public mirrors keep letting you down, run your own. Set `OVERPASS_LOCAL_COUNT
 docker compose --profile local-osm up -d
 ```
 
-The sidecar downloads that country's Geofabrik extract, builds an Overpass database, and then keeps itself current from Geofabrik's daily diff stream. No cron job is involved.
+The sidecar downloads that country's Geofabrik extract, builds an Overpass database, and then keeps itself current from the mirror's diff stream. No cron job is involved. It sweeps for diffs once a week by default — OSM geometry does not move fast enough for a terrain generator to notice, and the mirrors are volunteer-run. Lower `OVERPASS_UPDATE_SLEEP` if you want fresher data; anything under an hour is clamped.
 
 **What to expect on first boot.** The import takes hours for a large country and needs roughly 10x the compressed extract on disk — Sweden's 0.76 GB extract lands near 8 GB. Nothing breaks meanwhile: the app keeps using public mirrors, and the web UI shows a progress banner until the sidecar answers.
 
@@ -305,18 +305,66 @@ The init step notices the change, clears the old database and re-imports. Until 
 
 **Coverage.** The sidecar holds one country, not the planet. The app only queries it for areas inside that country and uses the public pool everywhere else — you don't choose per generation, and there is no way to accidentally ask a Sweden extract about France. Which source served a generation is recorded in the Activity Log and in the SETUP_GUIDE's Data Sources appendix.
 
-### Sidecar fails with "bunzip2: (stdin) is not a bzip2 file"
+### Sidecar cannot download the extract — connections to download.geofabrik.de time out
 
 ```
-bzip2 error: read failed: -5
-bunzip2: (stdin) is not a bzip2 file.
-Reading XML file ...Parse error at line 1: no element found
-Failed to process planet file
+Failed to download planet file. HTTP status code: 000
 ```
 
-**Cause**: the Overpass importer runs `bunzip2 < planet.osm.bz2 | update_database` and requires genuine bzip2-compressed OSM XML. Geofabrik publishes only `.osm.pbf`, so the file must be converted after download. This affected v1.10.0, which passed the PBF through unconverted.
+or, from v1.11.0 on, the clearer form:
 
-**Fix**: upgrade to v1.10.1 or later. The conversion ships **inside the app image**, so `docker compose pull` is enough — there is nothing to add to `docker-compose.yml`. Clear the half-built volume and start again:
+```
+FATAL: the downloaded extract is empty.
+  The download did not fail loudly -- curl reports 000 for both a
+  file:// read and a connection that never opened...
+```
+
+**Cause**: almost never a changed URL. `https://download.geofabrik.de/<region>-latest.osm.pbf` and `<region>-updates/` are still correct. Geofabrik **firewalls IP addresses that re-download large extracts repeatedly**, and the block is a silent packet drop, so connections hang and time out instead of returning 403 or 404. Confirm it from the host — a block hits your browser too, not just Docker:
+
+```bash
+curl -sSI --max-time 15 https://download.geofabrik.de/europe/sweden-latest.osm.pbf
+```
+
+A `Failed to connect ... Could not connect to server` after the full timeout, while other sites load normally, is a firewall block. A `404` would mean a genuinely wrong path.
+
+Repeated failed imports are the usual cause: before v1.11.0 a failed import left no database, so every container restart pulled the whole extract again.
+
+**Fix — switch mirrors.** In `.env`:
+
+```bash
+OVERPASS_LOCAL_MIRROR=osmfr
+```
+
+Then recreate the sidecar:
+
+```bash
+docker compose --profile local-osm up -d --force-recreate overpass-local
+```
+
+[download.openstreetmap.fr](https://download.openstreetmap.fr/) serves the same data with minutely diffs. It covers SE NO DK FI DE PL RU GB FR ES IT AT CH CZ NL BE UA SK PT IE, but **not** EE, LV, LT, RO, HU, HR, RS, BG, GR or IS — asking for one of those is reported as a config error at startup rather than failing mid-import. Switching mirrors does not re-import: the region marker is mirror-independent.
+
+**Fix — use an extract you already have.** If you downloaded the PBF before the block (or from another machine), drop it on the volume and point the sidecar at it:
+
+```bash
+docker run --rm -v arma-map-generator_overpass_db:/db -v "$PWD:/src" alpine sh -c "mkdir -p /db/extract_cache && cp /src/sweden-latest.osm.pbf /db/extract_cache/planet-europe_sweden.osm.pbf"
+```
+
+The launcher prefers that file over any download, with no configuration needed — the name must match `planet-<region with / replaced by _>.osm.pbf`. For a path of your own, set `OVERPASS_PLANET_URL=file:///db/whatever.osm.pbf` instead; it overrides the mirror entirely. Pair it with `OVERPASS_DIFF_URL` if you want updates.
+
+**Getting unblocked.** Geofabrik's contact address is on their [legal notice](https://www.geofabrik.de/geofabrik/imprint.html). They are reasonable about it — explain what caused the repeated downloads and that it is fixed.
+
+**Not repeating it.** From v1.12.0 the Overpass container is never given a download URL at all. The init step fetches the extract once, onto its own volume, and hands the sidecar a local file — so no restart of the sidecar, and no `docker compose up`, can cost bandwidth. If the fetch itself fails it is capped: three failed attempts in six hours, or three times the extract size in twenty-four, and it refuses and exits non-zero, which via `depends_on: service_completed_successfully` means the sidecar never starts.
+
+**This needs a `docker-compose.yml` change.** Add the `overpass_extract` volume:
+
+```yaml
+volumes:
+  overpass_extract:
+```
+
+and mount it — `overpass_extract:/extract` on `overpass-local-init`, `overpass_extract:/extract:ro` on `overpass-local`. Without it the app falls back to keeping the extract inside the database volume and logs a warning; that still works, but wiping the database then costs another full download.
+
+**Retrying an import without re-downloading.** This is now the correct recovery — it keeps the extract:
 
 ```bash
 docker compose --profile local-osm down
@@ -330,7 +378,34 @@ docker volume rm arma-map-generator_overpass_db
 docker compose --profile local-osm up -d
 ```
 
-**If you hit this on v1.10.0**, also note the service used `restart: unless-stopped`, so the failing container re-downloaded the whole extract on every retry. v1.10.1 changes it to `restart: on-failure:3`. Stop the stack before doing anything else if you see that loop.
+Only remove `arma-map-generator_overpass_extract` if you actually want to re-download, or to clear the attempt ledger after fixing whatever was failing.
+
+### Sidecar fails with "bunzip2: (stdin) is not a bzip2 file"
+
+```
+bzip2 error: read failed: -5
+bunzip2: (stdin) is not a bzip2 file.
+Reading XML file ...Parse error at line 1: no element found
+Failed to process planet file
+```
+
+**Cause**: the Overpass importer runs `bunzip2 < planet.osm.bz2 | update_database` and requires genuine bzip2-compressed OSM XML. Geofabrik publishes only `.osm.pbf`, so the file must be converted after download. This affected v1.10.0, which passed the PBF through unconverted.
+
+**Fix**: upgrade to v1.10.1 or later. The conversion ships **inside the app image**, so `docker compose pull` is enough — there is nothing to add to `docker-compose.yml` for this particular fix. Clear the half-built database volume and start again (on v1.12.0+ this keeps the downloaded extract, so it costs no bandwidth):
+
+```bash
+docker compose --profile local-osm down
+```
+
+```bash
+docker volume rm arma-map-generator_overpass_db
+```
+
+```bash
+docker compose --profile local-osm up -d
+```
+
+**If you hit this on v1.10.0**, also note the service used `restart: unless-stopped`, so the failing container re-downloaded the whole extract on every retry — one deployment sent 300+ GB to Geofabrik this way and was firewalled. v1.10.1 caps it at `restart: on-failure:3`; v1.12.0 removes the download from that container entirely. Stop the stack before doing anything else if you see that loop on an older version.
 
 **Useful checks:**
 

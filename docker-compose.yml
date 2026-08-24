@@ -1,8 +1,18 @@
 services:
   arma-map-generator:
-    image: ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest
-    # To build locally instead of pulling from GHCR, comment out 'image' above
-    # and uncomment the 'build' section below:
+    # APP_IMAGE switches the whole stack at once. It has to, because
+    # overpass-local-init runs this same image and carries most of the sidecar
+    # logic — rebuilding only this service would test new app code against the
+    # old init script.
+    #
+    # To test a branch:
+    #   docker build -t arma-map-generator:test .
+    #   APP_IMAGE=arma-map-generator:test docker compose --profile local-osm up -d
+    #
+    # `build:` stays commented out on purpose — with it present, a fresh
+    # `docker compose up` builds from a source tree instead of pulling the
+    # published image, which is not what a GHCR deployment wants.
+    image: ${APP_IMAGE:-ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest}
     # build:
     #   context: .
     #   dockerfile: Dockerfile
@@ -63,13 +73,31 @@ services:
   #
   # Set OVERPASS_LOCAL_COUNTRIES in .env (e.g. SE) to choose the extract.
   # Changing it and restarting triggers an automatic re-import.
+  # OVERPASS_LOCAL_MIRROR picks where the extract comes from; there is nothing
+  # to change in this file if Geofabrik blocks you.
 
-  # One-shot: resolves the country code to a Geofabrik extract and clears the
-  # database volume if the region changed. Uses the app image so the
-  # country -> extract mapping lives in exactly one place.
+  # One-shot: resolves the country code to an extract on the configured
+  # mirror, downloads it, and clears the database volume if the region changed.
+  # Uses the app image so the country -> extract mapping lives in exactly one
+  # place.
+  #
+  # The download lives HERE rather than in the Overpass container on purpose.
+  # That container's entrypoint re-downloads whenever there is no database, so
+  # a failing import used to pull the whole extract again on every restart —
+  # one deployment sent 300+ GB to Geofabrik that way and was firewalled. This
+  # step fetches once, under a budget recorded on the extract volume, and hands
+  # the sidecar a local file. If it cannot get an extract it exits non-zero and
+  # `service_completed_successfully` below means the sidecar never starts: one
+  # clear error instead of a loop.
+  #
+  # Consequence worth knowing: the first `up` blocks while the extract
+  # downloads. Progress is in this container's logs, and it resumes rather than
+  # restarting if you interrupt it.
   overpass-local-init:
     profiles: ["local-osm"]
-    image: ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest
+    # Same image as the web app, deliberately: the country -> extract mapping
+    # and the download budget then exist in exactly one place.
+    image: ${APP_IMAGE:-ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest}
     entrypoint: ["python", "/app/scripts/overpass_local_init.py"]
     # Needs to remove files written by the Overpass container, which runs as root.
     user: "0:0"
@@ -78,6 +106,10 @@ services:
     volumes:
       - overpass_db:/db
       - overpass_meta:/overpass_meta
+      # Separate from overpass_db so that wiping the database — the documented
+      # way to retry a failed import — does not also discard a download that
+      # already succeeded.
+      - overpass_extract:/extract
     restart: "no"
 
   overpass-local:
@@ -108,17 +140,22 @@ services:
       # Defaults to true, which stops the container after the import instead
       # of serving. We want it to go straight to serving and applying diffs.
       OVERPASS_STOP_AFTER_INIT: "false"
-      # Geofabrik publishes country diffs once a day; polling faster is waste.
-      OVERPASS_UPDATE_SLEEP: "86400"
+      # The init step writes a weekly default into the launcher: OSM geometry
+      # does not move fast enough for a terrain generator to care, and the
+      # mirrors are volunteer-run. Set this in .env only to override that.
+      OVERPASS_UPDATE_SLEEP: ${OVERPASS_UPDATE_SLEEP:-}
       OVERPASS_MAX_TIMEOUT: "300"
       OVERPASS_RATE_LIMIT: "0"
       TZ: ${TZ:-UTC}
     volumes:
       - overpass_db:/db
       - overpass_meta:/overpass_meta:ro
-    # NOT unless-stopped: a failing import leaves no database, so the entrypoint
-    # re-downloads the whole extract on every restart. With `unless-stopped` a
-    # broken import becomes an endless re-download loop against Geofabrik.
+      # Read-only: this container imports the extract, it never fetches one.
+      - overpass_extract:/extract:ro
+    # NOT unless-stopped: a failing import leaves no /db/init_done, so the
+    # entrypoint re-runs its import branch on every restart. It reads the
+    # extract from /extract now, so a restart costs no network traffic at all —
+    # but an endless restart loop is still an endless loop.
     restart: on-failure:3
     deploy:
       resources:
@@ -130,8 +167,15 @@ services:
 volumes:
   map_output:
   # Overpass database. Sized from the extract: roughly 8-12x the compressed
-  # PBF, so Sweden's 0.76 GB extract lands around 8 GB.
+  # PBF, so Sweden's 0.76 GB extract lands around 8 GB. Add the extract itself
+  # once more: it is cached under /db/extract_cache until the import succeeds,
+  # so a retry does not re-download it.
   overpass_db:
   # Tiny volume carrying the resolved region + URLs between the init step,
   # the sidecar and the web app.
   overpass_meta:
+  # The downloaded extract, plus the ledger recording download attempts. Kept
+  # apart from overpass_db so a database wipe costs no bandwidth, and so the
+  # attempt count survives `docker compose up --force-recreate` — a counter
+  # inside a container would not. Sized at one compressed extract.
+  overpass_extract:

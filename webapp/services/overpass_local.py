@@ -7,7 +7,7 @@ in silence. This module answers three questions:
 
 * Is the sidecar reachable and serving queries yet?
 * Does the extract it holds match what the configuration now asks for?
-* Has its daily diff loop stalled?
+* Has its diff loop stalled?
 
 Nothing here is on the generation hot path — a broken or absent sidecar
 degrades to the public mirror pool, which is the normal configuration.
@@ -25,7 +25,7 @@ import httpx
 from config.overpass_local import (
     LOCAL_SLOTS,
     _env_marker_path,
-    LOCAL_STALE_AFTER_HOURS,
+    local_stale_after_hours,
     LocalOverpassConfigError,
     local_countries,
     local_enabled,
@@ -132,12 +132,13 @@ async def get_local_status() -> dict:
     if data_time is not None:
         age_hours = (datetime.now(timezone.utc) - data_time).total_seconds() / 3600
         status["data_age_hours"] = round(age_hours, 1)
-        if age_hours > LOCAL_STALE_AFTER_HOURS:
+        if age_hours > local_stale_after_hours():
             status["state"] = "stale"
             status["message"] = (
-                f"Sidecar data is {age_hours / 24:.1f} days old. Geofabrik "
-                f"publishes daily diffs, so the update loop may be stuck — "
-                f"check `docker compose logs overpass-local`."
+                f"Sidecar data is {age_hours / 24:.1f} days old, past the "
+                f"{local_stale_after_hours() / 24:.1f}-day threshold — the "
+                f"update loop may be stuck. Check "
+                f"`docker compose logs overpass-local`."
             )
             return status
 
