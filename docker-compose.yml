@@ -63,10 +63,12 @@ services:
   #
   # Set OVERPASS_LOCAL_COUNTRIES in .env (e.g. SE) to choose the extract.
   # Changing it and restarting triggers an automatic re-import.
+  # OVERPASS_LOCAL_MIRROR picks where the extract comes from; there is nothing
+  # to change in this file if Geofabrik blocks you.
 
-  # One-shot: resolves the country code to a Geofabrik extract and clears the
-  # database volume if the region changed. Uses the app image so the
-  # country -> extract mapping lives in exactly one place.
+  # One-shot: resolves the country code to an extract on the configured
+  # mirror and clears the database volume if the region changed. Uses the app
+  # image so the country -> extract mapping lives in exactly one place.
   overpass-local-init:
     profiles: ["local-osm"]
     image: ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest
@@ -108,17 +110,21 @@ services:
       # Defaults to true, which stops the container after the import instead
       # of serving. We want it to go straight to serving and applying diffs.
       OVERPASS_STOP_AFTER_INIT: "false"
-      # Geofabrik publishes country diffs once a day; polling faster is waste.
-      OVERPASS_UPDATE_SLEEP: "86400"
+      # The init step writes a weekly default into the launcher: OSM geometry
+      # does not move fast enough for a terrain generator to care, and the
+      # mirrors are volunteer-run. Set this in .env only to override that.
+      OVERPASS_UPDATE_SLEEP: ${OVERPASS_UPDATE_SLEEP:-}
       OVERPASS_MAX_TIMEOUT: "300"
       OVERPASS_RATE_LIMIT: "0"
       TZ: ${TZ:-UTC}
     volumes:
       - overpass_db:/db
       - overpass_meta:/overpass_meta:ro
-    # NOT unless-stopped: a failing import leaves no database, so the entrypoint
-    # re-downloads the whole extract on every restart. With `unless-stopped` a
-    # broken import becomes an endless re-download loop against Geofabrik.
+    # NOT unless-stopped: a failing import leaves no /db/init_done, so the
+    # entrypoint re-runs its download-and-import branch on every restart. The
+    # extract is cached after the first successful download so a retry reads it
+    # from disk, but the cap stays — an endless restart loop is still an
+    # endless loop, and repeated downloads are what gets an IP firewalled.
     restart: on-failure:3
     deploy:
       resources:
@@ -130,7 +136,9 @@ services:
 volumes:
   map_output:
   # Overpass database. Sized from the extract: roughly 8-12x the compressed
-  # PBF, so Sweden's 0.76 GB extract lands around 8 GB.
+  # PBF, so Sweden's 0.76 GB extract lands around 8 GB. Add the extract itself
+  # once more: it is cached under /db/extract_cache until the import succeeds,
+  # so a retry does not re-download it.
   overpass_db:
   # Tiny volume carrying the resolved region + URLs between the init step,
   # the sidecar and the web app.

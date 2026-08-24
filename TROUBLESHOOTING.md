@@ -291,7 +291,7 @@ If public mirrors keep letting you down, run your own. Set `OVERPASS_LOCAL_COUNT
 docker compose --profile local-osm up -d
 ```
 
-The sidecar downloads that country's Geofabrik extract, builds an Overpass database, and then keeps itself current from Geofabrik's daily diff stream. No cron job is involved.
+The sidecar downloads that country's Geofabrik extract, builds an Overpass database, and then keeps itself current from the mirror's diff stream. No cron job is involved. It sweeps for diffs once a week by default — OSM geometry does not move fast enough for a terrain generator to notice, and the mirrors are volunteer-run. Lower `OVERPASS_UPDATE_SLEEP` if you want fresher data; anything under an hour is clamped.
 
 **What to expect on first boot.** The import takes hours for a large country and needs roughly 10x the compressed extract on disk — Sweden's 0.76 GB extract lands near 8 GB. Nothing breaks meanwhile: the app keeps using public mirrors, and the web UI shows a progress banner until the sidecar answers.
 
@@ -304,6 +304,56 @@ docker compose --profile local-osm up -d --force-recreate overpass-local
 The init step notices the change, clears the old database and re-imports. Until you restart, the web UI flags that the running container no longer matches `.env`.
 
 **Coverage.** The sidecar holds one country, not the planet. The app only queries it for areas inside that country and uses the public pool everywhere else — you don't choose per generation, and there is no way to accidentally ask a Sweden extract about France. Which source served a generation is recorded in the Activity Log and in the SETUP_GUIDE's Data Sources appendix.
+
+### Sidecar cannot download the extract — connections to download.geofabrik.de time out
+
+```
+Failed to download planet file. HTTP status code: 000
+```
+
+or, from v1.11.0 on, the clearer form:
+
+```
+FATAL: the downloaded extract is empty.
+  The download did not fail loudly -- curl reports 000 for both a
+  file:// read and a connection that never opened...
+```
+
+**Cause**: almost never a changed URL. `https://download.geofabrik.de/<region>-latest.osm.pbf` and `<region>-updates/` are still correct. Geofabrik **firewalls IP addresses that re-download large extracts repeatedly**, and the block is a silent packet drop, so connections hang and time out instead of returning 403 or 404. Confirm it from the host — a block hits your browser too, not just Docker:
+
+```bash
+curl -sSI --max-time 15 https://download.geofabrik.de/europe/sweden-latest.osm.pbf
+```
+
+A `Failed to connect ... Could not connect to server` after the full timeout, while other sites load normally, is a firewall block. A `404` would mean a genuinely wrong path.
+
+Repeated failed imports are the usual cause: before v1.11.0 a failed import left no database, so every container restart pulled the whole extract again.
+
+**Fix — switch mirrors.** In `.env`:
+
+```bash
+OVERPASS_LOCAL_MIRROR=osmfr
+```
+
+Then recreate the sidecar:
+
+```bash
+docker compose --profile local-osm up -d --force-recreate overpass-local
+```
+
+[download.openstreetmap.fr](https://download.openstreetmap.fr/) serves the same data with minutely diffs. It covers SE NO DK FI DE PL RU GB FR ES IT AT CH CZ NL BE UA SK PT IE, but **not** EE, LV, LT, RO, HU, HR, RS, BG, GR or IS — asking for one of those is reported as a config error at startup rather than failing mid-import. Switching mirrors does not re-import: the region marker is mirror-independent.
+
+**Fix — use an extract you already have.** If you downloaded the PBF before the block (or from another machine), drop it on the volume and point the sidecar at it:
+
+```bash
+docker run --rm -v arma-map-generator_overpass_db:/db -v "$PWD:/src" alpine sh -c "mkdir -p /db/extract_cache && cp /src/sweden-latest.osm.pbf /db/extract_cache/planet-europe_sweden.osm.pbf"
+```
+
+The launcher prefers that file over any download, with no configuration needed — the name must match `planet-<region with / replaced by _>.osm.pbf`. For a path of your own, set `OVERPASS_PLANET_URL=file:///db/whatever.osm.pbf` instead; it overrides the mirror entirely. Pair it with `OVERPASS_DIFF_URL` if you want updates.
+
+**Getting unblocked.** Geofabrik's contact address is on their [legal notice](https://www.geofabrik.de/geofabrik/imprint.html). They are reasonable about it — explain what caused the repeated downloads and that it is fixed.
+
+**Not repeating it.** From v1.11.0 the extract is cached under `/db/extract_cache` until the import succeeds, so a restart reads it from disk instead of the network, and the download is verified to be an actual PBF before the import touches it. `restart: on-failure:3` still caps the restarts. Together those remove the loop that earns the block.
 
 ### Sidecar fails with "bunzip2: (stdin) is not a bzip2 file"
 
