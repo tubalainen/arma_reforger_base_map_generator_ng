@@ -1,8 +1,18 @@
 services:
   arma-map-generator:
-    image: ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest
-    # To build locally instead of pulling from GHCR, comment out 'image' above
-    # and uncomment the 'build' section below:
+    # APP_IMAGE switches the whole stack at once. It has to, because
+    # overpass-local-init runs this same image and carries most of the sidecar
+    # logic — rebuilding only this service would test new app code against the
+    # old init script.
+    #
+    # To test a branch:
+    #   docker build -t arma-map-generator:test .
+    #   APP_IMAGE=arma-map-generator:test docker compose --profile local-osm up -d
+    #
+    # `build:` stays commented out on purpose — with it present, a fresh
+    # `docker compose up` builds from a source tree instead of pulling the
+    # published image, which is not what a GHCR deployment wants.
+    image: ${APP_IMAGE:-ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest}
     # build:
     #   context: .
     #   dockerfile: Dockerfile
@@ -85,7 +95,9 @@ services:
   # restarting if you interrupt it.
   overpass-local-init:
     profiles: ["local-osm"]
-    image: ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest
+    # Same image as the web app, deliberately: the country -> extract mapping
+    # and the download budget then exist in exactly one place.
+    image: ${APP_IMAGE:-ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:latest}
     entrypoint: ["python", "/app/scripts/overpass_local_init.py"]
     # Needs to remove files written by the Overpass container, which runs as root.
     user: "0:0"
