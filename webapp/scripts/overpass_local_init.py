@@ -187,13 +187,15 @@ def main() -> int:
     cadence = "minutely" if mirror_name == "osmfr" else "daily"
     log(f"Region:    {region}  (countries: {', '.join(countries) or 'n/a'})")
     log(f"Mirror:    {mirror_name}")
-    log(f"Extract:   {planet}  (~{size_gb} GB compressed)")
+    approx = "~" if mirror_name == "geofabrik" else ">"
+    log(f"Extract:   {planet}  ({approx}{size_gb} GB compressed)")
     log(f"Diffs:     {diffs}  ({cadence}, swept every {update_sleep_seconds()}s)")
     if cache_file.is_file():
         log(f"Cache:     {cache_path} — the sidecar will import from disk.")
     if not _db_is_populated():
         log(
-            f"NOTE: first import of a {size_gb} GB extract. The mirrors ship PBF "
+            f"NOTE: first import of a {size_gb} GB extract (Geofabrik's "
+            f"figure; other mirrors run larger). The mirrors ship PBF "
             f"and the Overpass importer requires bzip2 XML, so the file is "
             f"converted after download — that conversion alone can take an hour "
             f"or more before the import even starts. Budget roughly "

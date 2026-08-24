@@ -27,7 +27,10 @@ import os
 # Country code -> (Geofabrik extract path, PBF size in GB).
 #
 # Every path and its `-updates/` diff directory was verified live against
-# download.geofabrik.de on 2026-08-23. Sizes are the published PBF; the
+# download.geofabrik.de on 2026-08-23. Sizes are Geofabrik's published PBF and
+# are used only for log lines and disk estimates — other mirrors cut their
+# extracts differently and run larger (OSM France's Sweden is 0.90 GB against
+# Geofabrik's 0.76), so treat the figure as a floor, not a measurement. The
 # Overpass database that gets built from it runs roughly 8-12x larger, so
 # budget accordingly — Sweden's 0.76 GB extract becomes ~8 GB on disk.
 #

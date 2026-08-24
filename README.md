@@ -298,7 +298,12 @@ OVERPASS_LOCAL_MIRROR=osmfr
 ```
 
 [download.openstreetmap.fr](https://download.openstreetmap.fr/) serves the same
-data with minutely diffs. It covers SE NO DK FI DE PL RU GB FR ES IT AT CH CZ NL
+data with minutely diffs. Treat it as the fallback, not the destination:
+Geofabrik covers every country here and publishes one diff a day, where OSM
+France cuts fewer countries, runs slightly larger extracts (Sweden 0.90 GB
+against 0.76), and publishes only minutely replication — about 1,400 small
+diff fetches a day whatever `OVERPASS_UPDATE_SLEEP` is set to, since every
+sequence gets fetched eventually. Move back to Geofabrik once you can. It covers SE NO DK FI DE PL RU GB FR ES IT AT CH CZ NL
 BE UA SK PT IE — but **not** EE, LV, LT, RO, HU, HR, RS, BG, GR or IS; choosing
 it for one of those is reported as a configuration error rather than failing
 mid-import. The region marker is mirror-independent, so switching does **not**
