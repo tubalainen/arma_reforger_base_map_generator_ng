@@ -1207,3 +1207,53 @@ class TestSeedingIsWiredIn:
         assert init.main() == 0
         assert saw["pbf_present"] is True
         assert saw["diffs"].endswith("sweden-updates/")
+
+
+class TestSeededFileOwnership:
+    """This container runs as root; the sidecar's update loop runs as
+    `overpass` and *rewrites* the sequence file after every batch. A
+    root-owned replicate_id is readable but not advanceable, so the loop
+    re-downloads the same diffs on every cycle, forever."""
+
+    def _seed(self, tmp_path, monkeypatch, sequence=4242, ok=True):
+        import scripts.overpass_local_init as init
+
+        monkeypatch.undo()  # drop the autouse stub of _seed_replication
+        chowned = []
+
+        db = tmp_path / "db"
+        db.mkdir()
+        monkeypatch.setattr(init, "DB_DIR", db)
+
+        def _fake_seed(sequence_file, diff_url, target):
+            if ok:
+                sequence_file.write_text("%d\n" % sequence)
+                return replication.SeedOutcome(
+                    ok=True, sequence=sequence, reason="seeded"
+                )
+            return replication.SeedOutcome(ok=False, reason="mirror unreachable")
+
+        monkeypatch.setattr(replication, "seed", _fake_seed)
+        # raising=False both creates the attribute on Windows dev hosts and
+        # satisfies the hasattr() guard, so the real code path is exercised.
+        monkeypatch.setattr(
+            init.os,
+            "chown",
+            lambda p, u, g: chowned.append((str(p), u, g)),
+            raising=False,
+        )
+        init._seed_replication("https://x.test/u/", None, tmp_path / "extract")
+        return chowned, db
+
+    def test_the_sequence_file_is_handed_to_the_db_owner(self, tmp_path, monkeypatch):
+        chowned, db = self._seed(tmp_path, monkeypatch)
+        assert len(chowned) == 1
+        path, uid, gid = chowned[0]
+        assert path.endswith("replicate_id")
+        # Taken from /db rather than hardcoded, so it survives the upstream
+        # image renumbering its user.
+        assert (uid, gid) == (db.stat().st_uid, db.stat().st_gid)
+
+    def test_nothing_is_chowned_when_seeding_failed(self, tmp_path, monkeypatch):
+        chowned, _ = self._seed(tmp_path, monkeypatch, ok=False)
+        assert chowned == []

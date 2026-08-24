@@ -23,6 +23,7 @@ app keeps serving from public mirrors while the sidecar rebuilds, and only
 starts using it again once it answers queries.
 """
 
+import os
 import shutil
 import stat
 import sys
@@ -200,6 +201,27 @@ def _ensure_db_traversable() -> None:
         log(f"WARNING: could not adjust permissions on {DB_DIR}: {e}")
 
 
+def _match_db_owner(path: Path) -> None:
+    """Give `path` the same owner as /db.
+
+    This container runs as root so it can clear the database volume, which
+    means anything it creates in /db is root-owned. The Overpass image runs its
+    update loop as `overpass`, and pyosmium *rewrites* the sequence file after
+    every batch — so a root-owned replicate_id is readable but not advanceable.
+    The loop then re-downloads the same diffs on every cycle, forever.
+
+    The uid is taken from /db rather than hardcoded, so this keeps working if
+    the upstream image renumbers its user.
+    """
+    if not hasattr(os, "chown"):  # pragma: no cover - Windows dev hosts
+        return
+    try:
+        owner = DB_DIR.stat()
+        os.chown(path, owner.st_uid, owner.st_gid)
+    except OSError as e:
+        log(f"WARNING: could not set ownership on {path}: {e}")
+
+
 def _seed_replication(diffs: str, extract_file, extracts: Path) -> None:
     """Give the sidecar's update loop a starting point.
 
@@ -229,6 +251,7 @@ def _seed_replication(diffs: str, extract_file, extracts: Path) -> None:
     if outcome.already_present:
         return
     if outcome.ok and outcome.sequence is not None:
+        _match_db_owner(sequence_file)
         log(f"Replication: {outcome.reason} Derived from {source}.")
     elif outcome.ok:
         log(f"Replication: {outcome.reason}")

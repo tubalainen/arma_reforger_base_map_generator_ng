@@ -411,7 +411,13 @@ rm: cannot remove '/db/diffs/changes.osc': No such file or directory
 
 It is easy to lose. The seeding script ends in `) 2>&1 | tee -a /db/changes.log` with no `pipefail`, so the pipeline reports `tee`'s exit status — always zero. A momentary DNS or network fault during that single call is invisible: the entrypoint sees success, writes `/db/init_done`, and the sidecar is permanently stuck.
 
-**Fix**: upgrade to v1.14.0, which seeds the file from our init container — reading the replication timestamp from the PBF before it is converted, resolving the matching sequence on the configured mirror, and reporting loudly if it cannot. An install already in this state self-heals on the next start.
+If instead it downloads diffs and then dies on `PermissionError: [Errno 13] ... '/db/replicate_id'`, the sequence file exists but is owned by `root` while the update loop runs as `overpass`. pyosmium rewrites that file after every batch, so the loop re-downloads the same diffs on every cycle. Fixed in v1.14.1; to unstick a running container:
+
+```bash
+docker compose exec -u root overpass-local chown --reference=/db /db/replicate_id
+```
+
+**Fix**: upgrade to v1.14.1, which seeds the file from our init container — reading the replication timestamp from the PBF before it is converted, resolving the matching sequence on the configured mirror, and reporting loudly if it cannot. An install already in this state self-heals on the next start.
 
 ### Sidecar fails with "bunzip2: (stdin) is not a bzip2 file"
 
