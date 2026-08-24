@@ -19,6 +19,7 @@ import httpx
 from services import overpass_local as svc
 from services import overpass_extract_converter as conv
 from services import overpass_extract_fetcher as fetcher
+from services import overpass_replication as replication
 from services.osm_service import _pool_with_local
 
 # Smallest thing that passes both of the fetcher's checks: the PBF magic in the
@@ -62,6 +63,11 @@ def no_real_downloads(monkeypatch):
         )
 
     monkeypatch.setattr(fetcher.httpx, "Client", _refuse)
+    monkeypatch.setattr(replication.httpx, "Client", _refuse)
+
+    # Stub the init-level wrapper rather than replication.seed itself, so the
+    # seeder's own tests still exercise the real thing over a mock transport.
+    monkeypatch.setattr(init, "_seed_replication", lambda *a, **k: None)
 
 
 @pytest.fixture
@@ -995,3 +1001,209 @@ class TestConverter:
         dest.write_bytes(b"BZh9" + b"z" * 4096)
         out = conv.convert(tmp_path / "in.osm.pbf", dest)
         assert out.ok and out.already_present
+
+
+@pytest.fixture
+def mock_replication(monkeypatch):
+    """Serve the replication seeder a scripted state server."""
+
+    def install(handler):
+        def _client(**kwargs):
+            kwargs.pop("transport", None)
+            return _REAL_HTTPX_CLIENT(transport=httpx.MockTransport(handler), **kwargs)
+
+        monkeypatch.setattr(replication.httpx, "Client", _client)
+
+    return install
+
+
+def _state_body(seq, iso):
+    """An osmosis state file. Colons in the timestamp come back escaped,
+    because the format is a Java properties file."""
+    escaped = iso.replace(":", "\\:")
+    return "#comment\nsequenceNumber=%d\ntimestamp=%s\n" % (seq, escaped)
+
+
+class TestDbPermissions:
+    """The Overpass image runs its query CGI as `nginx` but owns /db as
+    `overpass`, and Debian bookworm's adduser makes home directories 0700.
+    The result is a database that imports perfectly and then refuses every
+    query with `open64: 13 Permission denied /db/db//osm3s_osm_base`."""
+
+    def _run(self, monkeypatch, mode):
+        import scripts.overpass_local_init as init
+
+        applied = []
+
+        class FakeStat:
+            st_mode = 0o040000 | mode
+
+        class FakeDir:
+            def stat(self):
+                return FakeStat()
+
+            def chmod(self, new):
+                applied.append(new)
+
+        monkeypatch.setattr(init, "DB_DIR", FakeDir())
+        init._ensure_db_traversable()
+        return applied
+
+    def test_a_private_db_directory_is_opened_up(self, monkeypatch):
+        assert self._run(monkeypatch, 0o700) == [0o755]
+
+    def test_an_already_traversable_directory_is_left_alone(self, monkeypatch):
+        assert self._run(monkeypatch, 0o755) == []
+
+    def test_only_read_and_traverse_are_added(self, monkeypatch):
+        # Never write: other users have no business modifying the database.
+        applied = self._run(monkeypatch, 0o750)[0]
+        assert applied == 0o755
+        assert not applied & 0o022
+
+
+class TestReplicationSeeding:
+    """Without /db/replicate_id the diff loop cannot start and cannot create
+    the file either, so the sidecar serves data that ages forever in silence."""
+
+    def test_an_existing_sequence_file_is_never_touched(self, tmp_path):
+        # Once the sidecar is running it owns this file; rewriting it would
+        # rewind or skip the update stream.
+        seq = tmp_path / "replicate_id"
+        seq.write_text("12345\n")
+        outcome = replication.seed(seq, "https://example.org/updates/", None)
+        assert outcome.ok and outcome.already_present
+        assert seq.read_text() == "12345\n"
+
+    def test_missing_timestamp_is_reported_not_guessed(self, tmp_path):
+        outcome = replication.seed(
+            tmp_path / "replicate_id", "https://example.org/updates/", None
+        )
+        assert not outcome.ok
+        assert "starting point" in outcome.reason
+
+    def test_no_diff_url_means_nothing_to_seed(self, tmp_path):
+        outcome = replication.seed(tmp_path / "replicate_id", "", None)
+        assert outcome.ok and outcome.sequence is None
+
+    def test_state_path_uses_the_osmosis_layout(self):
+        assert replication._state_path(7256890) == "007/256/890.state.txt"
+        assert replication._state_path(1) == "000/000/001.state.txt"
+
+    def test_escaped_timestamps_parse(self):
+        seq, stamp = replication._parse_state(
+            _state_body(7256888, "2026-08-24T14:55:21Z")
+        )
+        assert seq == 7256888
+        assert stamp.year == 2026 and stamp.hour == 14
+
+    def _days(self):
+        return {n: "2026-08-%02dT20:00:00Z" % (10 + n) for n in range(1, 11)}
+
+    def _server(self, newest, per_seq):
+        def handler(request):
+            path = request.url.path
+            if path.endswith("/state.txt") and path.count("/") <= 2:
+                return httpx.Response(200, text=_state_body(*newest))
+            for seq, iso in per_seq.items():
+                if path.endswith(replication._state_path(seq)):
+                    return httpx.Response(200, text=_state_body(seq, iso))
+            return httpx.Response(404)
+
+        return handler
+
+    def test_resolves_the_sequence_at_or_before_the_target(
+        self, mock_replication, monkeypatch
+    ):
+        from datetime import datetime, timezone
+
+        days = self._days()
+        mock_replication(self._server((10, days[10]), days))
+        target = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+        # Sequence 5 is 2026-08-15T20:00, after the target; 4 is 08-14T20:00.
+        assert replication.sequence_for_timestamp("https://x.test/u/", target) == 4
+
+    def test_resuming_early_is_preferred_to_resuming_late(
+        self, mock_replication, monkeypatch
+    ):
+        # Re-applying changes the database already has is harmless. Skipping
+        # changes leaves a permanent hole.
+        from datetime import datetime, timezone
+
+        days = self._days()
+        mock_replication(self._server((10, days[10]), days))
+        target = datetime(2026, 8, 15, 19, 59, tzinfo=timezone.utc)
+        assert replication.sequence_for_timestamp("https://x.test/u/", target) == 4
+
+    def test_a_target_newer_than_the_server_takes_the_head(
+        self, mock_replication, monkeypatch
+    ):
+        from datetime import datetime, timezone
+
+        days = self._days()
+        mock_replication(self._server((10, days[10]), days))
+        target = datetime(2027, 1, 1, tzinfo=timezone.utc)
+        assert replication.sequence_for_timestamp("https://x.test/u/", target) == 10
+
+    def test_probes_are_bounded(self, mock_replication, monkeypatch):
+        # A server laid out differently than we assume must not turn into an
+        # unbounded crawl against someone else's infrastructure.
+        from datetime import datetime, timezone
+
+        seen = []
+
+        def handler(request):
+            seen.append(request.url.path)
+            path = request.url.path
+            if path.endswith("/state.txt") and path.count("/") <= 2:
+                return httpx.Response(
+                    200, text=_state_body(9000000, "2026-08-24T00:00:00Z")
+                )
+            return httpx.Response(500)
+
+        mock_replication(handler)
+        replication.sequence_for_timestamp(
+            "https://x.test/u/", datetime(2020, 1, 1, tzinfo=timezone.utc)
+        )
+        assert len(seen) <= replication.MAX_STATE_PROBES
+
+    def test_an_unreachable_server_returns_none_rather_than_raising(
+        self, mock_replication, monkeypatch
+    ):
+        from datetime import datetime, timezone
+
+        def handler(request):
+            raise httpx.ConnectError("blocked")
+
+        mock_replication(handler)
+        assert (
+            replication.sequence_for_timestamp(
+                "https://x.test/u/", datetime(2026, 1, 1, tzinfo=timezone.utc)
+            )
+            is None
+        )
+
+
+class TestSeedingIsWiredIn:
+    def test_init_seeds_while_the_pbf_still_exists(self, tmp_path, monkeypatch):
+        # The replication headers live in the PBF, do not survive conversion,
+        # and the PBF is deleted once converted — so ordering is the fix.
+        import scripts.overpass_local_init as init
+
+        saw = {}
+
+        def _spy(diffs, extract_file, extracts):
+            saw["diffs"] = diffs
+            saw["pbf_present"] = extract_file is not None and extract_file.is_file()
+
+        monkeypatch.setattr(init, "_seed_replication", _spy)
+        monkeypatch.setenv("OVERPASS_LOCAL_COUNTRIES", "SE")
+        monkeypatch.setattr(init, "DB_DIR", tmp_path / "db")
+        monkeypatch.setattr(init, "META_DIR", tmp_path / "meta")
+        monkeypatch.setattr(init, "EXTRACT_DIR", tmp_path / "extract")
+        monkeypatch.setattr(init.Path, "is_mount", lambda self: True, raising=False)
+        (tmp_path / "db").mkdir()
+
+        assert init.main() == 0
+        assert saw["pbf_present"] is True
+        assert saw["diffs"].endswith("sweden-updates/")

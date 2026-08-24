@@ -380,6 +380,39 @@ docker compose --profile local-osm up -d
 
 Only remove `arma-map-generator_overpass_extract` if you actually want to re-download, or to clear the attempt ledger after fixing whatever was failing.
 
+### Sidecar imports fine, then every query fails with "Permission denied"
+
+```
+runtime error: open64: 13 Permission denied /db/db//osm3s_osm_base Unix_Socket::7
+```
+
+and `/api/osm/local-status` reports `importing` forever with a `JSONDecodeError`, because Overpass returns that error as HTML even when asked for JSON.
+
+**Cause**: errno 13, not errno 2 — the database is complete and the file exists; the process cannot reach it. `wiktorn/overpass-api` creates `/db` as the `overpass` user's home directory, and Debian bookworm's `adduser` defaults home directories to `0700`. Its Dockerfile fixes ownership on the next line but never the mode. Meanwhile supervisord runs `fcgiwrap` as user `nginx`, which then cannot traverse into `/db` to reach the dispatcher socket. A named volume copies the mode when first populated, so it survives every restart.
+
+**Fix**: upgrade to v1.14.0 — the init step corrects the mode on every start. To unstick a running container immediately:
+
+```bash
+docker compose exec -u root overpass-local chmod 0755 /db
+```
+
+No restart needed; the next query succeeds.
+
+### Sidecar serves fine but its data never updates
+
+`docker compose logs overpass-local` repeats:
+
+```
+FileNotFoundError: [Errno 2] No such file or directory: '/db/replicate_id'
+rm: cannot remove '/db/diffs/changes.osc': No such file or directory
+```
+
+**Cause**: `/db/replicate_id` holds the sidecar's position in the mirror's diff stream. The upstream image writes it once, during the import, and the update loop cannot create it — so if that one write is lost, the sidecar serves perfectly and silently ages forever.
+
+It is easy to lose. The seeding script ends in `) 2>&1 | tee -a /db/changes.log` with no `pipefail`, so the pipeline reports `tee`'s exit status — always zero. A momentary DNS or network fault during that single call is invisible: the entrypoint sees success, writes `/db/init_done`, and the sidecar is permanently stuck.
+
+**Fix**: upgrade to v1.14.0, which seeds the file from our init container — reading the replication timestamp from the PBF before it is converted, resolving the matching sequence on the configured mirror, and reporting loudly if it cannot. An install already in this state self-heals on the next start.
+
 ### Sidecar fails with "bunzip2: (stdin) is not a bzip2 file"
 
 ```

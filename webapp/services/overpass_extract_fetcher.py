@@ -200,6 +200,18 @@ class _Lock:
             self.path.unlink(missing_ok=True)
 
 
+def last_successful_download(cache_dir: Path) -> Optional[datetime]:
+    """When this volume last completed a download, from the ledger.
+
+    Used as a rough stand-in for the extract's replication timestamp when the
+    PBF itself is gone — after a successful import it is pruned, and its
+    headers go with it.
+    """
+    ledger = _Ledger.load(cache_dir / LEDGER_NAME)
+    stamps = [_parse_ts(a) for a in ledger.attempts if a.get("ok")]
+    return max(stamps) if stamps else None
+
+
 def fetch_extract(
     url: str,
     destination: Path,

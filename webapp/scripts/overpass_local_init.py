@@ -24,7 +24,9 @@ starts using it again once it answers queries.
 """
 
 import shutil
+import stat
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 sys.path.insert(0, "/app")
@@ -48,7 +50,11 @@ from config.overpass_local import (  # noqa: E402
     update_sleep_seconds,
 )
 from services import overpass_extract_converter as converter  # noqa: E402
-from services.overpass_extract_fetcher import fetch_extract  # noqa: E402
+from services import overpass_replication as replication  # noqa: E402
+from services.overpass_extract_fetcher import (  # noqa: E402
+    fetch_extract,
+    last_successful_download,
+)
 
 DB_DIR = Path("/db")
 META_DIR = Path("/overpass_meta")
@@ -153,6 +159,87 @@ def _log_progress(done: int, total: int) -> None:
 _log_progress.last = 0
 
 
+# How far before the extract's download time to resume when the extract itself
+# is gone and its replication timestamp with it. Geofabrik cuts its extracts up
+# to a day before publishing them, so two days of margin covers the gap.
+# Re-applying changes the database already has is harmless; missing some is not.
+RECOVERY_MARGIN_HOURS = 48
+
+
+def _ensure_db_traversable() -> None:
+    """Make /db traversable by the Overpass image's non-owner services.
+
+    The image creates /db as the `overpass` user's home directory, and Debian
+    bookworm's adduser defaults home directories to 0700. The next line in that
+    Dockerfile fixes ownership but not the mode. Meanwhile supervisord runs
+    fcgiwrap as user `nginx`, which then cannot traverse into /db to reach the
+    dispatcher socket — every query fails with
+
+        runtime error: open64: 13 Permission denied /db/db//osm3s_osm_base
+
+    while the database itself is perfectly fine. A named volume copies the mode
+    from the image, so the fault is baked in at first start and survives every
+    restart. We run as root here and can simply correct it.
+    """
+    try:
+        mode = stat.S_IMODE(DB_DIR.stat().st_mode)
+    except OSError as e:
+        log(f"WARNING: cannot inspect {DB_DIR}: {e}")
+        return
+
+    if mode & 0o055 == 0o055:
+        return
+
+    try:
+        DB_DIR.chmod(mode | 0o055)
+        log(
+            f"Made {DB_DIR} traversable (was {mode:04o}) — the Overpass image "
+            f"runs its query CGI as a different user than it owns /db with."
+        )
+    except OSError as e:
+        log(f"WARNING: could not adjust permissions on {DB_DIR}: {e}")
+
+
+def _seed_replication(diffs: str, extract_file, extracts: Path) -> None:
+    """Give the sidecar's update loop a starting point.
+
+    Without /db/replicate_id the loop cannot start and cannot bootstrap itself,
+    so the sidecar serves data that silently ages forever. The upstream image
+    seeds this during import through a script whose exit status is swallowed by
+    a pipe, so a momentary network fault loses it permanently — which is
+    exactly what happened to the deployment this was written for.
+    """
+    sequence_file = DB_DIR / "replicate_id"
+
+    target = None
+    source = ""
+    if extract_file is not None and extract_file.is_file():
+        target = replication.replication_timestamp_from_pbf(extract_file)
+        source = "the extract's replication header"
+    if target is None:
+        downloaded = last_successful_download(extracts)
+        if downloaded is not None:
+            target = downloaded - timedelta(hours=RECOVERY_MARGIN_HOURS)
+            source = (
+                f"the download time less {RECOVERY_MARGIN_HOURS}h "
+                f"(the extract is gone, so its header is too)"
+            )
+
+    outcome = replication.seed(sequence_file, diffs, target)
+    if outcome.already_present:
+        return
+    if outcome.ok and outcome.sequence is not None:
+        log(f"Replication: {outcome.reason} Derived from {source}.")
+    elif outcome.ok:
+        log(f"Replication: {outcome.reason}")
+    else:
+        log(
+            f"WARNING: {outcome.reason} The sidecar will serve queries but its "
+            f"data will not update. Re-run this container once the mirror is "
+            f"reachable."
+        )
+
+
 def main() -> int:
     try:
         region = local_region()
@@ -172,6 +259,8 @@ def main() -> int:
 
     countries = local_countries()
     size_gb = local_extract_size_gb()
+
+    _ensure_db_traversable()
 
     META_DIR.mkdir(parents=True, exist_ok=True)
     marker = META_DIR / "region.txt"
@@ -251,6 +340,11 @@ def main() -> int:
             return 1
         if outcome.already_present:
             log("  (no bytes pulled from the mirror)")
+
+    # Before converting, not after: the replication headers this needs live in
+    # the PBF and do not survive the conversion, and the PBF is dropped once
+    # converted.
+    _seed_replication(diffs, extract_file, extracts)
 
     # Convert here rather than in the sidecar when this image can: the Overpass
     # image ships bzip2 but no parallel implementation, so `osmium cat -o
