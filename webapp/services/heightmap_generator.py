@@ -269,9 +269,14 @@ def compute_land_datum(
 
     Returns the global minimum when there is no land at all (an all-water tile),
     which reproduces the previous behaviour rather than failing.
+
+    The mask is coerced to bool before inversion. Every rasterizer in
+    `services/utils/rasterize.py` returns uint8 0/1, and `~uint8` is 254/255 —
+    integer *values*, not a boolean mask — so `elevation[~mask]` silently
+    became fancy indexing and tried to allocate an (N, N, N) array (issue #183).
     """
     if water_mask is not None and water_mask.shape == elevation.shape and water_mask.any():
-        land = elevation[~water_mask]
+        land = elevation[~water_mask.astype(bool)]
         if land.size:
             return float(np.min(land))
         logger.warning(
@@ -735,6 +740,7 @@ def generate_heightmap(
 
     # Union of every water mask, kept for the land-datum shift in step 5b
     # (issue #165) so "lowest land" ignores carved lake and sea beds.
+    # Kept as bool, not the rasterizers' uint8 — see compute_land_datum (#183).
     water_mask_union: np.ndarray | None = None
 
     # 4. Level water bodies — four passes, one per water type, so each
@@ -789,9 +795,10 @@ def generate_heightmap(
             ):
                 if mask.sum() == 0:
                     continue
+                mask_bool = mask.astype(bool)
                 water_mask_union = (
-                    mask.copy() if water_mask_union is None
-                    else (water_mask_union | mask)
+                    mask_bool if water_mask_union is None
+                    else (water_mask_union | mask_bool)
                 )
                 logger.info(
                     f"Carving bathymetry for {label} mask: "
