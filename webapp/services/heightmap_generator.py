@@ -618,7 +618,14 @@ def flatten_water_in_heightmap(
 
 def save_heightmap_png(heightmap: np.ndarray, output_path: str) -> str:
     """Save a 16-bit heightmap as PNG."""
-    img = Image.fromarray(heightmap, mode="I;16")
+    # The 16-bit mode is derived from the array dtype, never passed as `mode=`:
+    # Pillow removes that parameter in 13, and it reinterpreted the raw buffer
+    # rather than converting, so a dtype drift would have silently emitted a
+    # garbage heightmap. A C-contiguous uint16 array maps to an "I;16" image,
+    # which Pillow writes as a 16-bit greyscale PNG - the format Enfusion's
+    # terrain importer expects.
+    heightmap = np.ascontiguousarray(heightmap, dtype=np.uint16)
+    img = Image.fromarray(heightmap)
     img.save(output_path)
     logger.info(f"Saved heightmap PNG: {output_path} ({heightmap.shape[1]}x{heightmap.shape[0]})")
     return output_path
@@ -628,7 +635,7 @@ def save_heightmap_preview(heightmap: np.ndarray, output_path: str) -> str:
     """Save an 8-bit grayscale preview of the heightmap."""
     try:
         preview = (heightmap.astype(np.float32) / 256).astype(np.uint8)
-        img = Image.fromarray(preview, mode="L")
+        img = Image.fromarray(preview)  # uint8 -> "L", no `mode=` (Pillow 13)
         img.save(output_path)
         logger.info(f"Saved heightmap preview: {output_path}")
         return output_path

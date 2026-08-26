@@ -31,7 +31,7 @@ def _write_asc(path, ncols, nrows):
 
 def _write_mask(path, w, h, mode="L"):
     arr = np.zeros((h, w), dtype=np.uint8)
-    Image.fromarray(arr, mode="L").convert(mode).save(str(path))
+    Image.fromarray(arr).convert(mode).save(str(path))
 
 
 def _good_project(tmp_path):
