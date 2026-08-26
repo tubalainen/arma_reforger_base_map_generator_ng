@@ -30,6 +30,25 @@ MAX_WMS_RETRIES = 3
 WMS_RETRY_WAIT_S = 5.0
 RETRYABLE_STATUS_CODES = (429, 502, 503, 504)
 
+# EOX's WMS rejects any GetMap larger than this per axis with HTTP 400. The
+# limit is undocumented - it does not appear as MaxWidth/MaxHeight in their
+# GetCapabilities - and was found by bisection: 4096 succeeds, 4097 does not.
+#
+# Since v1.3.6 the satellite target has been 4x the heightmap capped at 8192, so
+# every non-Swedish map above ~2 km asked for more than 4096 and got nothing
+# back at all (issue #97). Swedish maps were unaffected because the Lantmateriet
+# STAC path reads tiled COGs and has no such limit.
+#
+# The fix is to tile the request, NOT to clamp it: clamping would shrink the
+# satellite for every non-Swedish user, and the output resolution is something
+# users have specifically asked us to preserve.
+EOX_WMS_MAX_DIM = 4096
+
+# How many tiles to request at once. EOX takes ~14 s for a full 4096 tile, so
+# some concurrency is needed, but a 3x3 fetch firing nine simultaneous
+# multi-megapixel renders is a good way to get rate-limited.
+EOX_WMS_TILE_CONCURRENCY = 4
+
 
 async def _wms_request_with_retry(
     client: httpx.AsyncClient,
@@ -111,22 +130,58 @@ async def _wms_request_with_retry(
     )
 
 
-async def fetch_sentinel2_cloudless(
+def split_pixel_axis(total_px: int, max_px: int) -> list[tuple[int, int]]:
+    """
+    Split ``total_px`` into contiguous ``(start, end)`` ranges of at most
+    ``max_px``, as evenly as possible.
+
+    The ranges tile the axis exactly - no gaps, no overlap, and the last range
+    ends at ``total_px`` - so a stitched mosaic is exactly the requested size.
+    """
+    if total_px <= max_px:
+        return [(0, total_px)]
+    n = math.ceil(total_px / max_px)
+    edges = [round(i * total_px / n) for i in range(n + 1)]
+    return [(edges[i], edges[i + 1]) for i in range(n)]
+
+
+def _sub_bbox(
+    bbox_wgs84: tuple[float, float, float, float],
+    width: int,
+    height: int,
+    x_range: tuple[int, int],
+    y_range: tuple[int, int],
+) -> tuple[float, float, float, float]:
+    """
+    Map a pixel window back to its WGS84 sub-bbox.
+
+    A WMS GetMap in EPSG:4326 is a linear mapping from the bbox to the pixel
+    grid, so a pixel sub-rectangle corresponds to a proportional lon/lat
+    sub-rectangle. Row 0 is the *north* edge, hence the inverted y mapping.
+
+    Each tile's bbox aspect therefore matches its pixel aspect automatically -
+    which matters, because EOX returns HTTP 400 when the two disagree.
+    """
+    west, south, east, north = bbox_wgs84
+    lon_span = east - west
+    lat_span = north - south
+    x0, x1 = x_range
+    y0, y1 = y_range
+    return (
+        west + lon_span * (x0 / width),
+        north - lat_span * (y1 / height),
+        west + lon_span * (x1 / width),
+        north - lat_span * (y0 / height),
+    )
+
+
+async def _fetch_sentinel2_window(
+    client: httpx.AsyncClient,
     bbox_wgs84: tuple[float, float, float, float],
     width: int,
     height: int,
 ) -> bytes | None:
-    """
-    Fetch Sentinel-2 Cloudless imagery from EOX WMS.
-
-    Args:
-        bbox_wgs84: (west, south, east, north)
-        width: Image width in pixels
-        height: Image height in pixels
-
-    Returns:
-        PNG image bytes or None on failure.
-    """
+    """Fetch a single GetMap window (must already be within EOX_WMS_MAX_DIM)."""
     w, s, e, n = bbox_wgs84
     params = {
         "SERVICE": "WMS",
@@ -140,20 +195,171 @@ async def fetch_sentinel2_cloudless(
         "HEIGHT": str(height),
         "FORMAT": "image/png",
     }
+    resp = await _wms_request_with_retry(client, SENTINEL2_WMS_ENDPOINT, params)
+    content_type = resp.headers.get("content-type", "")
+    if "image" not in content_type:
+        logger.warning(f"Unexpected content type from EOX: {content_type}")
+        return None
+    return resp.content
 
+
+def _stitch_tiles(
+    tiles: dict[tuple[int, int], bytes],
+    x_ranges: list[tuple[int, int]],
+    y_ranges: list[tuple[int, int]],
+    width: int,
+    height: int,
+) -> bytes:
+    """Paste the fetched tiles into one PNG of exactly ``width`` x ``height``."""
+    import io
+
+    from PIL import Image
+
+    canvas = Image.new("RGB", (width, height))
+    for (col, row), data in tiles.items():
+        x0, x1 = x_ranges[col]
+        y0, y1 = y_ranges[row]
+        with Image.open(io.BytesIO(data)) as tile:
+            # EOX answers image/jpeg even when FORMAT=image/png is requested,
+            # so normalise rather than assuming the mode.
+            rgb = tile.convert("RGB")
+        if rgb.size != (x1 - x0, y1 - y0):
+            # A server that ignored our WIDTH/HEIGHT would silently shift every
+            # later tile; resample so the mosaic stays aligned.
+            logger.warning(
+                f"EOX tile ({col},{row}) came back {rgb.size}, expected "
+                f"{(x1 - x0, y1 - y0)} - resampling to keep the mosaic aligned"
+            )
+            rgb = rgb.resize((x1 - x0, y1 - y0), Image.LANCZOS)
+        canvas.paste(rgb, (x0, y0))
+
+    out = io.BytesIO()
+    canvas.save(out, format="PNG")
+    return out.getvalue()
+
+
+async def fetch_sentinel2_cloudless(
+    bbox_wgs84: tuple[float, float, float, float],
+    width: int,
+    height: int,
+) -> bytes | None:
+    """
+    Fetch Sentinel-2 Cloudless imagery from EOX WMS.
+
+    Requests larger than ``EOX_WMS_MAX_DIM`` on either axis are split into a
+    grid of tiles and stitched back together, because EOX rejects anything
+    bigger with HTTP 400 (issue #97). The returned image is always the full
+    requested size - tiling is an implementation detail, not a downgrade.
+
+    Args:
+        bbox_wgs84: (west, south, east, north)
+        width: Image width in pixels
+        height: Image height in pixels
+
+    Returns:
+        PNG image bytes or None on failure.
+    """
+    x_ranges = split_pixel_axis(width, EOX_WMS_MAX_DIM)
+    y_ranges = split_pixel_axis(height, EOX_WMS_MAX_DIM)
+
+    # Fast path: small enough for a single request, exactly as before.
+    if len(x_ranges) == 1 and len(y_ranges) == 1:
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                data = await _fetch_sentinel2_window(client, bbox_wgs84, width, height)
+            if data:
+                logger.info(f"Received {len(data)} bytes of Sentinel-2 imagery")
+            return data
+        except Exception as e:
+            logger.error(f"Failed to fetch Sentinel-2 imagery: {e}")
+            return None
+
+    jobs = [
+        (col, row, x_ranges[col], y_ranges[row])
+        for row in range(len(y_ranges))
+        for col in range(len(x_ranges))
+    ]
+    logger.info(
+        f"Sentinel-2 request is {width}x{height}, above EOX's {EOX_WMS_MAX_DIM} px "
+        f"limit - fetching as {len(x_ranges)}x{len(y_ranges)} tiles "
+        f"({len(jobs)} requests)"
+    )
+
+    tiles: dict[tuple[int, int], bytes] = {}
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await _wms_request_with_retry(client, SENTINEL2_WMS_ENDPOINT, params)
-            content_type = resp.headers.get("content-type", "")
-            if "image" in content_type:
-                logger.info(f"Received {len(resp.content)} bytes of Sentinel-2 imagery")
-                return resp.content
-            else:
-                logger.warning(f"Unexpected content type from EOX: {content_type}")
-                return None
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            # Phase 1: bounded-concurrency sweep. _wms_request_with_retry
+            # already handles retryable statuses within each request.
+            sem = asyncio.Semaphore(EOX_WMS_TILE_CONCURRENCY)
+
+            async def _one(col, row, xr, yr):
+                async with sem:
+                    try:
+                        return (col, row), await _fetch_sentinel2_window(
+                            client,
+                            _sub_bbox(bbox_wgs84, width, height, xr, yr),
+                            xr[1] - xr[0],
+                            yr[1] - yr[0],
+                        )
+                    except Exception as e:  # noqa: BLE001 - retried in phase 2
+                        logger.warning(f"Sentinel-2 tile ({col},{row}) failed: {e}")
+                        return (col, row), None
+
+            for key, data in await asyncio.gather(
+                *(_one(c, r, xr, yr) for c, r, xr, yr in jobs)
+            ):
+                if data:
+                    tiles[key] = data
+
+            # Phase 2: serial sweep for whatever phase 1 missed. A flaky
+            # upstream recovers far better when it is not being hammered in
+            # parallel (same pattern as the STAC reader).
+            missing = [j for j in jobs if (j[0], j[1]) not in tiles]
+            if missing:
+                logger.warning(
+                    f"{len(missing)} Sentinel-2 tile(s) failed the parallel sweep - "
+                    f"retrying them serially"
+                )
+                for col, row, xr, yr in missing:
+                    try:
+                        data = await _fetch_sentinel2_window(
+                            client,
+                            _sub_bbox(bbox_wgs84, width, height, xr, yr),
+                            xr[1] - xr[0],
+                            yr[1] - yr[0],
+                        )
+                        if data:
+                            tiles[(col, row)] = data
+                    except Exception as e:  # noqa: BLE001
+                        logger.error(
+                            f"Sentinel-2 tile ({col},{row}) failed the serial "
+                            f"retry too: {e}"
+                        )
     except Exception as e:
         logger.error(f"Failed to fetch Sentinel-2 imagery: {e}")
         return None
+
+    if len(tiles) != len(jobs):
+        # A hole in the mosaic would import as a black rectangle in the middle
+        # of the terrain. Fail loudly and let the caller continue without a
+        # satellite rather than ship a visibly broken texture.
+        logger.error(
+            f"Sentinel-2 tiling incomplete: {len(tiles)}/{len(jobs)} tiles - "
+            f"discarding the mosaic rather than shipping one with holes"
+        )
+        return None
+
+    try:
+        stitched = _stitch_tiles(tiles, x_ranges, y_ranges, width, height)
+    except Exception as e:
+        logger.error(f"Failed to stitch Sentinel-2 tiles: {e}")
+        return None
+
+    logger.info(
+        f"Received {len(stitched)} bytes of Sentinel-2 imagery "
+        f"({len(jobs)} tiles stitched to {width}x{height})"
+    )
+    return stitched
 
 
 async def fetch_copernicus_landcover(
