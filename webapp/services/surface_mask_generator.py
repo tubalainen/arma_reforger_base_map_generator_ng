@@ -109,6 +109,24 @@ def slope_ramp_mask(
 # Block saturation analysis
 # ---------------------------------------------------------------------------
 
+def _block_max(mask: np.ndarray, block_size: int) -> np.ndarray:
+    """
+    Per-block maximum of `mask`, as a (blocks_y, blocks_x) array.
+
+    Zero-padded up to a whole number of blocks: the masks are uint8, so the
+    padding can never raise a block's maximum and a partial edge block sees
+    exactly the pixels it saw when this was a Python loop over slices.
+    """
+    h, w = mask.shape
+    n_by = -(-h // block_size)
+    n_bx = -(-w // block_size)
+    pad_y = n_by * block_size - h
+    pad_x = n_bx * block_size - w
+    if pad_y or pad_x:
+        mask = np.pad(mask, ((0, pad_y), (0, pad_x)))
+    return mask.reshape(n_by, block_size, n_bx, block_size).max(axis=(1, 3))
+
+
 def check_block_saturation(
     masks: dict[str, np.ndarray],
     block_size: int = BLOCK_FACE_SIZE,
@@ -134,38 +152,38 @@ def check_block_saturation(
         Dict with violation count, total blocks, and per-block details.
     """
     if not masks:
-        return {"violations": 0, "total_blocks": 0, "details": []}
+        return {
+            "violations": 0, "total_blocks": 0, "details": [],
+            "block_max": None, "surface_order": [],
+        }
 
-    h, w = next(iter(masks.values())).shape
-    violations = 0
-    total_blocks = 0
-    violation_details = []
+    # One vectorized reduction per surface instead of a Python loop over every
+    # (block, surface) pair. A 4993x4993 map has 24,649 blocks, so the old
+    # nested loop made ~250,000 tiny numpy calls per pass — and
+    # generate_surface_masks runs this up to eleven times (issue #185).
+    names = list(masks.keys())
+    block_max = np.stack([_block_max(masks[n], block_size) for n in names])
+    over = block_max > threshold
+    counts = over.sum(axis=0)
 
-    for y in range(0, h, block_size):
-        for x in range(0, w, block_size):
-            total_blocks += 1
-            surfaces_in_block = 0
-            surface_names = []
-
-            for name, mask in masks.items():
-                block = mask[y:y + block_size, x:x + block_size]
-                if block.max() > threshold:
-                    surfaces_in_block += 1
-                    surface_names.append(name)
-
-            if surfaces_in_block > MAX_SURFACES_PER_BLOCK:
-                violations += 1
-                violation_details.append({
-                    "block_x": x // block_size,
-                    "block_y": y // block_size,
-                    "surfaces": surfaces_in_block,
-                    "surface_names": surface_names,
-                })
+    violating = counts > MAX_SURFACES_PER_BLOCK
+    violation_details = [
+        {
+            "block_x": int(bx),
+            "block_y": int(by),
+            "surfaces": int(counts[by, bx]),
+            "surface_names": [names[i] for i in np.flatnonzero(over[:, by, bx])],
+        }
+        for by, bx in np.argwhere(violating)
+    ]
 
     return {
-        "violations": violations,
-        "total_blocks": total_blocks,
+        "violations": int(violating.sum()),
+        "total_blocks": int(counts.size),
         "details": violation_details,
+        # Reused by auto_merge_violations so it does not rescan the masks.
+        "block_max": block_max,
+        "surface_order": names,
     }
 
 
@@ -174,6 +192,7 @@ def auto_merge_violations(
     block_size: int = BLOCK_FACE_SIZE,
     threshold: int = BLOCK_SURFACE_THRESHOLD,
     default_surface: str = "grass",
+    saturation: dict | None = None,
 ) -> dict[str, np.ndarray]:
     """
     Auto-merge surfaces in blocks that exceed the 5-surface limit.
@@ -190,12 +209,20 @@ def auto_merge_violations(
     Returns:
         Modified masks dict (modified in-place and returned).
     """
-    saturation = check_block_saturation(masks, block_size, threshold)
+    # The caller has usually just run this scan; reuse it rather than paying
+    # for a second full pass over every mask.
+    if saturation is None:
+        saturation = check_block_saturation(masks, block_size, threshold)
 
     if saturation["violations"] == 0:
         return masks
 
     logger.info(f"Found {saturation['violations']} block saturation violations, auto-merging...")
+
+    # Block maxima already came out of the scan, so picking the weakest
+    # surface in a block is a lookup rather than another slice-and-max.
+    block_max = saturation.get("block_max")
+    order = {n: i for i, n in enumerate(saturation.get("surface_order") or [])}
 
     for detail in saturation["details"]:
         bx = detail["block_x"] * block_size
@@ -208,8 +235,14 @@ def auto_merge_violations(
         for name in detail["surface_names"]:
             if name == default_surface:
                 continue
-            block = masks[name][by:by + block_size, bx:bx + block_size]
-            max_val = block.max()
+            if block_max is not None and name in order:
+                max_val = int(
+                    block_max[order[name], detail["block_y"], detail["block_x"]]
+                )
+            else:
+                max_val = int(
+                    masks[name][by:by + block_size, bx:bx + block_size].max()
+                )
             if max_val < min_max_val:
                 min_max_val = max_val
                 min_surface = name
@@ -816,6 +849,7 @@ def generate_surface_masks(
         mask_arrays = auto_merge_violations(
             mask_arrays,
             default_surface=default_surface,
+            saturation=saturation,
         )
 
     saturation_final = check_block_saturation(mask_arrays)

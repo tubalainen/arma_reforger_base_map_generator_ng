@@ -5,7 +5,7 @@ Merges:
 - generate_heightmap_from_array() from app/services/heightmap.py (cleaner API)
 - flatten_roads_in_heightmap() from app/ (uses ndimage properly)
 - flatten_water_in_heightmap() from app/ (labels connected water regions)
-- nodata interpolation from webapp/ (NearestNDInterpolator)
+- nodata interpolation from webapp/ (nearest-neighbour via EDT indices)
 - 8-bit preview generation from webapp/
 - save_heightmap_png/asc/metadata from app/
 """
@@ -21,12 +21,15 @@ from typing import Optional
 import numpy as np
 from PIL import Image
 from scipy import ndimage
-from scipy.interpolate import NearestNDInterpolator
 
 # Rasterization utilities live in the shared utils module.
 # Re-exported here for backward compatibility (surface_mask_generator imports from here).
 from services.utils.rasterize import rasterize_features_to_mask  # noqa: F401
-from services.utils.parallel import parallel_gaussian_filter, parallel_zoom
+from services.utils.parallel import (
+    parallel_edt,
+    parallel_gaussian_filter,
+    parallel_zoom,
+)
 from config.enfusion import snap_to_tile_multiple, pick_clean_height_scale
 from config.lakes import LAKE_MAX_DEPTH_M, LAKE_SHORE_SLOPE_M_PER_M
 
@@ -121,16 +124,24 @@ def geotiff_to_array(geotiff_bytes: bytes) -> tuple[np.ndarray, dict]:
     else:
         nodata_mask = np.isnan(elevation)
 
-    if np.any(nodata_mask):
-        valid = ~nodata_mask
-        if np.any(valid):
-            rows, cols = np.where(valid)
-            values = elevation[valid]
-            interp = NearestNDInterpolator(list(zip(rows, cols)), values)
-            nodata_rows, nodata_cols = np.where(nodata_mask)
-            if len(nodata_rows) > 0:
-                elevation[nodata_mask] = interp(nodata_rows, nodata_cols)
-                logger.info(f"Interpolated {len(nodata_rows)} nodata pixels")
+    n_nodata = int(np.count_nonzero(nodata_mask))
+    if n_nodata and n_nodata < nodata_mask.size:
+        # Exact nearest-neighbour fill via the EDT's index output.
+        # The previous NearestNDInterpolator built a Python list of one tuple
+        # per *valid* pixel and a KD-tree over all of them — ~25 million points
+        # on a 4993x4993 DEM, minutes of work and gigabytes of RAM to patch a
+        # handful of voids. The EDT gives the same nearest source pixel for
+        # every hole (verified: identical distances, only equidistant ties
+        # break differently) at a cost that depends on the raster, not on how
+        # many valid pixels surround it.
+        nearest = ndimage.distance_transform_edt(
+            nodata_mask, return_distances=False, return_indices=True,
+        )
+        elevation[nodata_mask] = elevation[
+            nearest[0][nodata_mask], nearest[1][nodata_mask]
+        ]
+        del nearest
+        logger.info(f"Interpolated {n_nodata} nodata pixels")
 
     # Safety check 1: detect implausible elevation ranges.
     # Real-world elevation spans from ~-430 m (Dead Sea) to ~8849 m (Everest).
@@ -495,52 +506,86 @@ def flatten_water_in_heightmap(
     per labelled region so different water types (lakes/rivers/sea) can be
     carved with different ceilings in a single call.
     """
-    if water_mask.sum() == 0:
+    water_mask_bool = water_mask.astype(bool, copy=False)
+    if not water_mask_bool.any():
         return elevation
 
-    result = elevation.copy()
-    water_surface_field = elevation.copy()
-
-    water_mask_bool = water_mask.astype(bool)
     labeled, n_features = ndimage.label(water_mask_bool)
     if n_features == 0:
         return elevation
 
-    region_levels: dict[int, float] = {}
-    for i in range(1, n_features + 1):
-        region_mask = labeled == i
-        region_elevations = elevation[region_mask]
-        if region_elevations.size == 0:
-            continue
-        water_level = float(np.percentile(region_elevations, 10))
-        region_levels[i] = water_level
-        water_surface_field[region_mask] = water_level
+    # Everything below works on the *water pixels only*, grouped by label.
+    # The obvious `labeled == region_id` per region is an O(regions x N^2)
+    # trap: a 4993x4993 Swedish tile with ~360 lakes scanned 9 billion cells
+    # per loop and this function took 20 s (issue #185). Sorting the water
+    # pixels by label once makes every per-region step touch only that
+    # region's own pixels, so the total cost is O(water px).
+    flat_idx = np.flatnonzero(labeled)
+    labs = labeled.reshape(-1)[flat_idx]
+    order = np.argsort(labs, kind="stable")
+    flat_idx = flat_idx[order]
+    labs = labs[order]
+    del order, labeled          # ~130 MB of temporaries at 4993x4993
+
+    region_ids = np.arange(1, n_features + 1)
+    starts = np.searchsorted(labs, region_ids, side="left")
+    ends = np.searchsorted(labs, region_ids, side="right")
+
+    elev_sorted = elevation.reshape(-1)[flat_idx]
+
+    # Water-surface level per region: 10th percentile of the region's source
+    # elevations, robust against DEM/OSM misalignment leaving a peak inside
+    # the polygon.
+    levels = np.zeros(n_features + 1, dtype=np.float64)
+    for i, (lo, hi) in enumerate(zip(starts, ends), start=1):
+        if hi > lo:
+            levels[i] = np.percentile(elev_sorted[lo:hi], 10)
+
+    del elev_sorted
+
+    # `.copy()` is C-ordered by definition, so `reshape(-1)` on it is a view
+    # and these flat writes land in the array. Never reshape-and-assign into
+    # an array you did not allocate here: on a non-contiguous one the reshape
+    # silently returns a copy and the write goes nowhere.
+    water_surface_field = elevation.copy()
+    water_surface_field.reshape(-1)[flat_idx] = levels[labs]
 
     # Single global EDT, then scale per region by that region's maximum
     # shore distance so every region reaches its full `max_depth_m` at its
     # deepest interior point — small ponds get a shallow bowl, large lakes
     # a deep one, both with a continuous gradient.
-    dist_px = ndimage.distance_transform_edt(water_mask_bool)
-    region_ids = np.arange(1, n_features + 1)
-    max_dist_per_region = ndimage.maximum(dist_px, labeled, index=region_ids)
+    dist_px = parallel_edt(water_mask_bool)
+    dist_sorted = dist_px.reshape(-1)[flat_idx]
+    del dist_px                 # only the per-water-pixel values are needed
+
+    max_dist = np.zeros(n_features + 1, dtype=np.float64)
+    for i, (lo, hi) in enumerate(zip(starts, ends), start=1):
+        if hi > lo:
+            max_dist[i] = dist_sorted[lo:hi].max()
 
     region_depth_map = region_depth_map or {}
+    ceilings = np.full(n_features + 1, float(max_depth_m), dtype=np.float64)
+    for region_id, depth in region_depth_map.items():
+        if 1 <= region_id <= n_features:
+            ceilings[region_id] = float(depth)
 
-    for region_id, water_level in region_levels.items():
-        region_mask = labeled == region_id
-        max_d_px = float(max_dist_per_region[region_id - 1])
-        if max_d_px <= 0:
-            continue
-        ceiling = float(region_depth_map.get(region_id, max_depth_m))
-        # Per-region cap: small ponds stay shallow (slope × radius caps depth
-        # below max_depth_m), large lakes hit `ceiling` at their deepest
-        # point. Either way the depth ramps linearly to that maximum.
-        region_max_depth = min(
-            ceiling,
-            max_d_px * pixel_size_m * shore_slope_m_per_m,
-        )
-        norm = dist_px[region_mask] / max_d_px  # 0 at shore, 1 at deepest pt
-        result[region_mask] = water_level - region_max_depth * norm
+    # Per-region cap: small ponds stay shallow (slope x radius caps depth
+    # below max_depth_m), large lakes hit `ceiling` at their deepest point.
+    # Either way the depth ramps linearly to that maximum.
+    region_max_depth = np.minimum(
+        ceilings, max_dist * pixel_size_m * shore_slope_m_per_m,
+    )
+
+    # A region with no shore distance at all is left at its source elevation,
+    # exactly as the per-region loop did when it hit `max_d_px <= 0`.
+    valid = max_dist > 0
+    safe_max_dist = np.where(valid, max_dist, 1.0)
+    norm = dist_sorted / safe_max_dist[labs]   # 0 at shore, 1 at deepest pt
+    carved = levels[labs] - region_max_depth[labs] * norm
+
+    result = elevation.copy()
+    write = valid[labs]
+    result.reshape(-1)[flat_idx[write]] = carved[write]
 
     # Shore blending: smooth land just outside water toward the water *surface*
     # level — not the carved bed — so the bowl doesn't bleed into the terrain.

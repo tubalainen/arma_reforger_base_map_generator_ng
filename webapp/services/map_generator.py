@@ -23,6 +23,7 @@ import math
 import secrets
 import shutil
 import threading
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -50,7 +51,13 @@ class MapGenerationJob:
         self.session_id = session_id  # Owner session for access control
         self.status = "pending"
         self.progress = 0
-        self.current_step = ""
+        # Phase timing. Assigning to `current_step` closes the previous phase
+        # and opens a new one, so every step boundary in run_generation is
+        # measured without the orchestrator having to say so.
+        self._current_step = ""
+        self._phase_name: Optional[str] = None
+        self._phase_start = time.perf_counter()
+        self.step_timings: list[dict] = []
         self.steps_completed = []
         self.logs = []  # Activity log messages for frontend display
         self.errors = []
@@ -66,6 +73,42 @@ class MapGenerationJob:
         # set by osm_service on the first successful query. Distinguishes the
         # local sidecar from a public mirror in the Activity Log and metadata.
         self.overpass_source: Optional[str] = None
+
+    @property
+    def current_step(self) -> str:
+        return self._current_step
+
+    @current_step.setter
+    def current_step(self, value: str) -> None:
+        now = time.perf_counter()
+        if value != self._phase_name:
+            if self._phase_name:
+                self.step_timings.append({
+                    "step": self._phase_name,
+                    "seconds": round(now - self._phase_start, 2),
+                })
+            self._phase_name = value
+            self._phase_start = now
+        self._current_step = value
+
+    def close_timing(self) -> None:
+        """Close the phase that is still open, so the last step is measured."""
+        if self._phase_name:
+            self.step_timings.append({
+                "step": self._phase_name,
+                "seconds": round(time.perf_counter() - self._phase_start, 2),
+            })
+            self._phase_name = None
+
+    def timing_summary(self, top: int = 5) -> str:
+        """`step: 12.3 s` for the slowest phases, longest first."""
+        ranked = sorted(
+            self.step_timings, key=lambda s: s["seconds"], reverse=True,
+        )[:top]
+        return ", ".join(
+            f"{s['step'].rstrip('.!').rstrip()} {s['seconds']:.1f}s"
+            for s in ranked
+        )
 
     def add_log(self, message: str, level: str = "info"):
         """
@@ -88,6 +131,7 @@ class MapGenerationJob:
             "progress": self.progress,
             "current_step": self.current_step,
             "steps_completed": self.steps_completed,
+            "step_timings": self.step_timings,
             "logs": self.logs,
             "errors": self.errors,
             "result": self.result,
@@ -737,6 +781,16 @@ def build_metadata(
 # Orchestrator
 # ---------------------------------------------------------------------------
 
+# Formats that already carry their own compression. Re-deflating them in the
+# export ZIP costs CPU and saves nothing, so they go in stored. Anything not
+# listed here is still deflated, which keeps the conservative default for any
+# new asset type the pipeline starts emitting.
+PRECOMPRESSED_SUFFIXES = frozenset({
+    ".png", ".jpg", ".jpeg", ".webp", ".gif",
+    ".edds", ".dds", ".zip", ".gz", ".xz", ".7z",
+})
+
+
 def _write_zip_archive(
     output_dir: Path,
     zip_file: Path,
@@ -763,13 +817,21 @@ def _write_zip_archive(
     with zipfile.ZipFile(str(zip_file), "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for done, fpath in enumerate(files_to_zip, start=1):
             arcname = sanitized_name + "/" + str(fpath.relative_to(output_dir))
-            zf.write(str(fpath), arcname)
+            size = fpath.stat().st_size
+            # Deflating a PNG re-compresses data that is already deflated:
+            # all CPU, no saving. Storing those and compressing only the text
+            # assets (.asc, .layer, .ent, .gproj, SETUP_GUIDE.md …) packs the
+            # tree ~14x faster for well under 1% more bytes.
+            compress_type = (
+                zipfile.ZIP_STORED
+                if fpath.suffix.lower() in PRECOMPRESSED_SUFFIXES
+                else zipfile.ZIP_DEFLATED
+            )
+            zf.write(str(fpath), arcname, compress_type=compress_type)
             # Narrate the long files individually — a single 200 MB
             # satellite image otherwise looks like the job has hung.
-            if fpath.stat().st_size > 5 * 1024 * 1024:
-                logger.info(
-                    f"  + {arcname} ({fpath.stat().st_size / (1024 * 1024):.1f} MB)"
-                )
+            if size > 5 * 1024 * 1024:
+                logger.info(f"  + {arcname} ({size / (1024 * 1024):.1f} MB)")
             if done % 25 == 0:
                 logger.info(f"  … zipped {done}/{len(files_to_zip)} files")
     return raw_bytes
@@ -1481,7 +1543,17 @@ async def run_generation(job: MapGenerationJob):
             "files": [f.name for f in output_dir.iterdir() if f.is_file()],
         }
 
-        logger.info(f"[{job.job_id}] Generation complete! Output: {output_dir}")
+        job.close_timing()
+        total = sum(t["seconds"] for t in job.step_timings)
+        logger.info(
+            f"[{job.job_id}] Generation complete in {total:.1f}s. "
+            f"Slowest steps: {job.timing_summary()}. Output: {output_dir}"
+        )
+        job.add_log(
+            f"Finished in {total / 60:.1f} min — slowest steps: "
+            f"{job.timing_summary()}",
+            "info",
+        )
         job.add_log("Map generation completed successfully!", "success")
 
         # Schedule cleanup now that generation is complete
@@ -1493,6 +1565,7 @@ async def run_generation(job: MapGenerationJob):
         logger.exception(f"[{job.job_id}] Generation failed: {e}")
         job.status = "failed"
         job.current_step = f"Error: {str(e)}"
+        job.close_timing()
         job.errors.append(str(e))
     finally:
         current_job_var.reset(job_token)
