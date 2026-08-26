@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 
 import httpx
 
@@ -331,6 +332,25 @@ SATELLITE_RESOLUTION_MULTIPLIER = 4
 # size; larger values risk Workbench import problems and big RAM/disk costs.
 SATELLITE_MAX_DIM = 8192
 
+# Hard cap on the *fetch* dimensions, which are deliberately allowed to exceed
+# SATELLITE_MAX_DIM. When the terrain uses a projected CRS the WGS84 fetch box
+# is the envelope of the projected rectangle, so it covers more ground than the
+# terrain does. Fetching that envelope at SATELLITE_MAX_DIM leaves the terrain
+# occupying only 1/ratio of those pixels, and the reprojection upsamples the
+# difference back out. Fetching at target x ratio keeps the terrain at full
+# target density instead.
+#
+# The ratio is small because SWEREF/UTM are conformal and near north-up over a
+# 5-10 km box: measured 1.006 at Froson, 1.026 in Skane, rising to 1.139 in the
+# far north-east of Sweden (68N 23E) where grid convergence is largest. So this
+# is worth ~0.5-3% of linear detail on a typical map and ~14% at the extreme -
+# a real fix, not a dramatic one.
+#
+# The output PNG is still capped at SATELLITE_MAX_DIM; this governs only the
+# intermediate fetch. 16384 bounds the worst case at ~800 MB of RGB working
+# set, which the tiled STAC reader handles comfortably.
+SATELLITE_MAX_FETCH_DIM = 16384
+
 
 def compute_satellite_target_dims(
     heightmap_x: int, heightmap_z: int,
@@ -349,6 +369,30 @@ def compute_satellite_target_dims(
     sat_x = max(sat_x, heightmap_x)
     sat_z = max(sat_z, heightmap_z)
     return int(sat_x), int(sat_z)
+
+
+def compute_satellite_fetch_dims(
+    target_x: int, target_z: int, ratio_x: float, ratio_y: float,
+) -> tuple[int, int]:
+    """
+    Compute the WGS84 fetch dimensions for a projected-CRS terrain.
+
+    ``ratio_*`` is how much wider/taller the WGS84 envelope of the projected
+    rectangle is than the terrain's own WGS84 bbox (always >= 1.0). The fetch
+    has to cover that whole envelope, so it needs ``target x ratio`` pixels to
+    leave the terrain itself at ``target`` density once the reprojection crops
+    back down.
+
+    Capped at ``SATELLITE_MAX_FETCH_DIM``, deliberately above
+    ``SATELLITE_MAX_DIM`` - this sizes the intermediate fetch, not the output
+    PNG, which ``compute_satellite_target_dims`` still caps at
+    ``SATELLITE_MAX_DIM``.
+    """
+    fetch_x = min(SATELLITE_MAX_FETCH_DIM, int(math.ceil(target_x * max(ratio_x, 1.0))))
+    fetch_z = min(SATELLITE_MAX_FETCH_DIM, int(math.ceil(target_z * max(ratio_y, 1.0))))
+    # Never fetch below the target: that would upsample, which is the whole
+    # defect this function exists to avoid.
+    return int(max(fetch_x, target_x)), int(max(fetch_z, target_z))
 
 
 # ---------------------------------------------------------------------------
