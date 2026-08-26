@@ -19,7 +19,6 @@ The orchestrator (run_generation) coordinates them and tracks progress.
 import asyncio
 import json
 import logging
-import math
 import secrets
 import shutil
 import threading
@@ -1163,7 +1162,7 @@ async def run_generation(job: MapGenerationJob):
         # more of the source detail (Lantmäteriet STAC Bild is 0.16 m/px, vs
         # the heightmap's ~2.4 m/px at 2049 vertices on a 5 km map — fixes #67).
         from services.satellite_service import (
-            SATELLITE_MAX_DIM,
+            compute_satellite_fetch_dims,
             compute_satellite_target_dims,
         )
 
@@ -1191,8 +1190,20 @@ async def run_generation(job: MapGenerationJob):
             if orig_lon_span > 0 and orig_lat_span > 0:
                 ratio_x = (env_e - env_w) / orig_lon_span
                 ratio_y = (env_n - env_s) / orig_lat_span
-                sat_fetch_w = min(SATELLITE_MAX_DIM, int(math.ceil(sat_target_x * ratio_x)))
-                sat_fetch_h = min(SATELLITE_MAX_DIM, int(math.ceil(sat_target_z * ratio_y)))
+                # Clamp to SATELLITE_MAX_FETCH_DIM, not SATELLITE_MAX_DIM:
+                # the envelope covers more ground than the terrain, so clamping
+                # the fetch to the *output* cap handed the reprojection a source
+                # below target density and it upsampled the difference back out.
+                # The output PNG is still capped at SATELLITE_MAX_DIM by
+                # compute_satellite_target_dims - only the fetch grows.
+                sat_fetch_w, sat_fetch_h = compute_satellite_fetch_dims(
+                    sat_target_x, sat_target_z, ratio_x, ratio_y,
+                )
+                logger.info(
+                    f"[{job.job_id}] Satellite fetch {sat_fetch_w}x{sat_fetch_h} px "
+                    f"over the projected envelope (ratio {ratio_x:.3f}x{ratio_y:.3f}) "
+                    f"-> {sat_target_x}x{sat_target_z} px after reprojection"
+                )
 
         job.current_step = "Downloading satellite imagery..."
         job.progress = 75
