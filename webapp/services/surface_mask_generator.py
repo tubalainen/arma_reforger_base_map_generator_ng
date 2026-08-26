@@ -875,7 +875,7 @@ def generate_surface_masks(
 
     def _save_mask(name: str, data: np.ndarray):
         path = output_dir / f"surface_{name}.png"
-        img = Image.fromarray(data, mode="L")
+        img = Image.fromarray(data)  # uint8 -> "L", no `mode=` (Pillow 13)
         img.save(str(path))
         masks[name] = str(path)
 
@@ -982,7 +982,8 @@ def generate_surface_masks(
         preview[water_mask_bool] = [30, 30, 200]
 
         preview_path = output_dir / "surface_preview.png"
-        Image.fromarray(preview, mode="RGB").save(str(preview_path))
+        # uint8 (H, W, 3) -> "RGB", no `mode=` (removed in Pillow 13).
+        Image.fromarray(preview).save(str(preview_path))
         masks["preview"] = str(preview_path)
         logger.info(f"Saved surface preview: {preview_path}")
     except Exception as e:
