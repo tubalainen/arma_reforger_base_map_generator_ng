@@ -362,6 +362,41 @@ class TestLandDatum:
         water = np.ones((10, 10), dtype=bool)
         assert compute_land_datum(elev, water) == -5.0
 
+    def test_uint8_mask_is_treated_as_boolean(self):
+        """Issue #183: every rasterizer returns uint8 0/1, and `~uint8` is
+        254/255 — integer indices, not an inverted mask. `elevation[~mask]`
+        therefore tried to allocate an (N, N, N) array and blew up with
+        `Unable to allocate 464 GiB` on a real 4993x4993 Swedish map."""
+        import numpy as np
+        from services.heightmap_generator import compute_land_datum
+
+        elev = np.full((300, 300), 300.0)
+        water = np.zeros((300, 300), dtype=np.uint8)   # as the rasterizers emit
+        # Rows 250-260 deliberately span 254/255 — the two row indices `~uint8`
+        # degenerates into — so the buggy version returns the lake bed, 277.
+        water[250:260, :] = 1
+        elev[water.astype(bool)] = 277.0
+
+        assert compute_land_datum(elev, water) == 300.0, (
+            "uint8 water mask must invert as a boolean mask, not as indices"
+        )
+
+    def test_water_mask_union_stays_boolean(self):
+        """The union built in generate_heightmap must not leak uint8 into the
+        datum calculation (#183)."""
+        import numpy as np
+
+        lake = np.zeros((8, 8), dtype=np.uint8)
+        lake[2, 2] = 1
+        river = np.zeros((8, 8), dtype=np.uint8)
+        river[5, 5] = 1
+
+        union = lake.astype(bool)
+        union = union | river.astype(bool)
+
+        assert union.dtype == np.bool_
+        assert np.array_equal(np.unique(~union), [False, True])
+
     def test_mismatched_mask_shape_is_ignored(self):
         import numpy as np
         from services.heightmap_generator import compute_land_datum
