@@ -39,7 +39,9 @@ api-expansion.md
 
 # Local-only reference material (third-party docs, PDFs, etc.) — never push
 docs/*
-# …except the architecture diagram linked from README.md
+# …except the guides and the architecture diagram linked from README.md
+!docs/*.md
+docs/ENFUSION_CONTRACT.md
 !docs/architecture.html
 !docs/architecture.archify.json
 !docs/architecture-preview.png
