@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Arma Reforger Base Map Generator NG",
+    "output": "architecture.html",
+    "quality_profile": "showcase",
+    "animation": "trace",
+    "viewBox": [1380, 750],
+    "views": [
+      { "id": "request-path", "label": "Request path", "focus": ["browser", "guard", "api", "orchestrator"], "note": "A drawn square becomes a generation job owned by the caller's session." },
+      { "id": "geodata", "label": "Geodata sources", "focus": ["elevation", "osm", "satellite", "orchestrator"], "note": "Three upstream families, each with its own fallback chain." },
+      { "id": "output", "label": "Enfusion output", "focus": ["builders", "enfusion", "store", "browser"], "note": "Builders feed the project writer, which produces the downloadable ZIP." }
+    ]
+  },
+  "components": [
+    { "id": "elevation", "type": "external", "label": "Elevation APIs", "sublabel": "national DTM \u2192 COP30 \u2192 SRTM", "pos": [360, 70], "size": [210, 88] },
+    { "id": "osm", "type": "external", "label": "OSM Overpass", "sublabel": "mirror pool + sidecar", "pos": [595, 70], "size": [210, 88] },
+    { "id": "satellite", "type": "external", "label": "Imagery APIs", "sublabel": "STAC Bild, WMS, Sentinel-2", "pos": [830, 70], "size": [210, 88] },
+    { "id": "browser", "type": "frontend", "label": "Leaflet UI", "sublabel": "draw a square", "pos": [50, 300], "size": [190, 96] },
+    { "id": "api", "type": "backend", "label": "FastAPI app", "sublabel": "main.py routes", "pos": [310, 300], "size": [190, 96] },
+    { "id": "orchestrator", "type": "backend", "label": "Generation pipeline", "sublabel": "run_generation", "pos": [570, 296], "size": [200, 104], "tag": "13 steps" },
+    { "id": "builders", "type": "backend", "label": "Terrain builders", "sublabel": "heightmap, masks, splines", "pos": [850, 300], "size": [200, 96] },
+    { "id": "enfusion", "type": "backend", "label": "Enfusion writer", "sublabel": ".gproj / .ent / .layer", "pos": [1120, 296], "size": [200, 104], "tag": "versioned" },
+    { "id": "guard", "type": "security", "label": "Middleware", "sublabel": "session, rate limit, CSP", "pos": [310, 530], "size": [190, 88] },
+    { "id": "store", "type": "database", "label": "Job store", "sublabel": "output dir + ZIP", "pos": [1120, 530], "size": [200, 88], "tag": "auto-purged" }
+  ],
+  "connections": [
+    { "id": "draw-square", "from": "browser", "to": "api", "label": "POST /api/generate", "variant": "emphasis", "labelDy": -76 },
+    { "id": "guarded", "from": "guard", "to": "api", "label": "cookie + CSP", "variant": "security", "fromSide": "top", "toSide": "bottom" },
+    { "id": "start-job", "from": "api", "to": "orchestrator", "label": "MapGenerationJob", "variant": "emphasis", "labelDy": -76 },
+    { "id": "dem", "from": "elevation", "to": "orchestrator", "label": "DEM tiles", "fromSide": "bottom", "toSide": "top" },
+    { "id": "overpass", "from": "osm", "to": "orchestrator", "label": "OSM features", "fromSide": "bottom", "toSide": "top" },
+    { "id": "ortho", "from": "satellite", "to": "orchestrator", "label": "orthophoto", "fromSide": "bottom", "toSide": "top" },
+    { "id": "to-builders", "from": "orchestrator", "to": "builders", "label": "rasters + vectors", "labelDy": -80 },
+    { "id": "builders-out", "from": "builders", "to": "enfusion", "label": ".asc, PNG, splines", "labelDy": -76 },
+    { "id": "write-zip", "from": "enfusion", "to": "store", "label": "project ZIP + SETUP_GUIDE", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "labelDy": 85 },
+    { "id": "download", "from": "store", "to": "browser", "label": "GET /download/{job_id}", "variant": "dashed", "fromSide": "bottom", "toSide": "bottom", "via": [[1220, 690], [145, 690]] }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Request path", "items": ["The drawn square derives the terrain grid: metres \u00f7 2 m, snapped to 128 faces", "Session middleware owns the job; /status is public, job data is not"] },
+    { "dot": "violet", "title": "Geodata", "items": ["Every source has a fallback chain and every failure is non-fatal", "Blocking IO runs in threads so the progress UI keeps streaming"] },
+    { "dot": "emerald", "title": "Enfusion output", "items": ["Heightmap (N+1)\u00b2, masks N\u00b2, square RGB satellite", "The ZIP is auto-deleted after the retention window"] }
+  ]
+}

@@ -637,6 +637,36 @@ docker pull ghcr.io/tubalainen/arma_reforger_base_map_generator_ng:v1.7.0
 
 The `docker-compose.yml` is pre-configured to use the GHCR.io image. See the [Quick Start Guide](#quick-start-guide) for setup instructions.
 
+## Architecture
+
+The whole system on one page — how a drawn square becomes an Enfusion project ZIP.
+
+[![Architecture overview](docs/architecture-preview.png)](https://htmlpreview.github.io/?https://github.com/tubalainen/arma_reforger_base_map_generator_ng/blob/main/docs/architecture.html)
+
+**Open the interactive version** — it is a single self-contained HTML file with no server,
+build step or network access required:
+
+- **In your browser, right now:** [open the live diagram](https://htmlpreview.github.io/?https://github.com/tubalainen/arma_reforger_base_map_generator_ng/blob/main/docs/architecture.html)
+- **Offline:** download [`docs/architecture.html`](docs/architecture.html) and open it in any browser
+
+### Things to try in it
+
+| Control | What it does |
+|---|---|
+| **Play story** | Runs the three guided chapters — *Request path*, *Geodata sources*, *Enfusion output* — panning and re-framing the diagram as it narrates each one |
+| **Live** / **Still** | Animates the arrows so you can watch data flow along every relationship; pauses on demand and respects `prefers-reduced-motion` |
+| Click any box | Opens its passport: upstream and downstream neighbours, connected relationships, and a copyable deep link straight back to that node |
+| **PATH** | Pick two components and it traces the directed route between them, step by step |
+| **LENS** | Compare component kinds — frontend, backend, database, security, external — without changing the drawing |
+| **MAP** | Minimap for panning around when you zoom past 100% (zooming past 175% reveals extra detail) |
+| **Light** / **Dark** / **Classic** | Theme and visual-style switches, both preserved in exports |
+| **Present** | Fullscreen presentation stage |
+| **Export** | PNG (file or clipboard), JPEG, WebP, dual-theme SVG, an animated WebM recording, or a 1200x630 Share Card |
+
+The diagram is generated from [`docs/architecture.archify.json`](docs/architecture.archify.json)
+with [Archify](https://github.com/tt-a1i/archify) — edit that file and re-render rather than
+hand-editing the HTML.
+
 ## Tech Stack
 
 - **Backend**: Python 3.11 + FastAPI + Uvicorn
