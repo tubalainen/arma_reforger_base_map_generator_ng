@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from config.terrain import (
     MAX_MAP_EXTENT_M, TERRAIN_TILE_FACES, DEFAULT_GRID_CELL_SIZE,
+    MAX_TERRAIN_GRID_SIZE,
 )
 
 # Job IDs are URL-safe base64, 16-32 characters
@@ -140,9 +141,14 @@ def validate_polygon(polygon: list[list[float]]) -> list[list[float]]:
     m_per_deg_lng = 111_320 * math.cos(math.radians(lat_mid))
     width_m = lng_range * m_per_deg_lng
     height_m = lat_range * m_per_deg_lat
-    # Allow one tile of slack: the frontend auto-snaps the square to a terrain
+    # Each axis is capped independently. A rectangular selection (issue #197)
+    # is never larger than the square that would contain it, so this is the
+    # same ceiling as before: MAX_TERRAIN_GRID_SIZE (16384) faces x 2 m =
+    # 32.768 km per axis, which is the engine's terrain grid maximum.
+    #
+    # Allow one tile of slack: the frontend auto-snaps each axis to a terrain
     # grid size, and this metre estimate can differ slightly from the browser's
-    # due to projection rounding — without slack an exactly-max square is
+    # due to projection rounding — without slack an exactly-max selection is
     # falsely rejected.
     max_allowed_m = MAX_MAP_EXTENT_M + TERRAIN_TILE_FACES * DEFAULT_GRID_CELL_SIZE
     max_km = MAX_MAP_EXTENT_M / 1000
@@ -152,7 +158,9 @@ def validate_polygon(polygon: list[list[float]]) -> list[list[float]]:
             status_code=400,
             detail=(
                 f"Selected area is too large (~{width_m/1000:.1f} x {height_m/1000:.1f} km). "
-                f"Maximum allowed size is {max_km:.0f} x {max_km:.0f} km."
+                f"Maximum is {max_km:.3f} km per axis "
+                f"({MAX_TERRAIN_GRID_SIZE} terrain faces at "
+                f"{DEFAULT_GRID_CELL_SIZE} m)."
             ),
         )
 

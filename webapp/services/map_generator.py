@@ -1304,6 +1304,34 @@ async def run_generation(job: MapGenerationJob):
                         "warning",
                     )
 
+            # Record what actually shipped. step_fetch_satellite_imagery
+            # reports the *fetch* size, which is the WGS84 envelope of the
+            # projected extent and so both larger and a different shape than
+            # the final texture (5125x2822 fetched vs 5124x2564 written, on
+            # the map that exposed this). Metadata that misstates the
+            # satellite's aspect ratio is actively misleading now that
+            # terrain can be rectangular (issue #197).
+            if satellite_path.exists():
+                try:
+                    from PIL import Image
+
+                    def _read_size(path):
+                        with Image.open(path) as img:
+                            return img.size
+
+                    sat_w, sat_h = await asyncio.to_thread(
+                        _read_size, satellite_path
+                    )
+                    satellite_result["dimensions"] = f"{sat_w}x{sat_h}"
+                    # steps_completed recorded the fetch size a moment ago.
+                    for step in job.steps_completed:
+                        if step.get("step") == "satellite_imagery":
+                            step["dimensions"] = f"{sat_w}x{sat_h}"
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Could not read final satellite dimensions: %s", exc
+                    )
+
         # Step 8: Process roads (78% -> 82%)
         job.current_step = "Processing road network..."
         job.progress = 78

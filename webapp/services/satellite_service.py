@@ -564,17 +564,33 @@ def compute_satellite_target_dims(
     """
     Compute the target satellite texture dimensions given the heightmap size.
 
-    Multiplies each axis by ``SATELLITE_RESOLUTION_MULTIPLIER`` and caps at
-    ``SATELLITE_MAX_DIM`` so we don't exceed the engine's texture limit or
-    blow up the export size.
+    Multiplies each axis by ``SATELLITE_RESOLUTION_MULTIPLIER``, then scales
+    **both axes by the same factor** so the longer one lands on
+    ``SATELLITE_MAX_DIM``. Uniform scaling is the whole point: the satellite is
+    stretched over the terrain by the Terrain Tool, so its aspect ratio has to
+    match the heightmap's. Clamping each axis independently at the same cap
+    silently squashed the imagery on any non-square terrain — a 4096x2048-face
+    map produced an 8192x8192 texture (issue #197).
+
+    The cap is also a real cap. The previous ``max(sat_x, heightmap_x)`` floor,
+    written when the grid maximum was believed to be 8192 faces, overrode it:
+    with ``MAX_TERRAIN_GRID_SIZE`` at 16384 a 10240-face terrain emitted a
+    10241 px satellite, 25% past the texture limit this function exists to
+    enforce.
     """
-    # Never let the satellite be smaller than the heightmap, even at the
-    # 8193 vertex max where multiplier × dim exceeds the cap by a lot.
-    sat_x = min(SATELLITE_MAX_DIM, heightmap_x * SATELLITE_RESOLUTION_MULTIPLIER)
-    sat_z = min(SATELLITE_MAX_DIM, heightmap_z * SATELLITE_RESOLUTION_MULTIPLIER)
-    sat_x = max(sat_x, heightmap_x)
-    sat_z = max(sat_z, heightmap_z)
-    return int(sat_x), int(sat_z)
+    want_x = heightmap_x * SATELLITE_RESOLUTION_MULTIPLIER
+    want_z = heightmap_z * SATELLITE_RESOLUTION_MULTIPLIER
+
+    longest = max(want_x, want_z)
+    if longest > SATELLITE_MAX_DIM:
+        scale = SATELLITE_MAX_DIM / longest
+        want_x = max(1, int(round(want_x * scale)))
+        want_z = max(1, int(round(want_z * scale)))
+        # Rounding can push the longer axis one pixel past the cap.
+        want_x = min(want_x, SATELLITE_MAX_DIM)
+        want_z = min(want_z, SATELLITE_MAX_DIM)
+
+    return int(want_x), int(want_z)
 
 
 def compute_satellite_fetch_dims(
