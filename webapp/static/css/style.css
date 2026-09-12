@@ -365,6 +365,18 @@ body {
     background-repeat: no-repeat !important;
 }
 
+/* Rectangle draw tool (issue #197) — sits directly below the square button.
+ * Same inline-SVG treatment so the two read as a pair: a 1:1 box and a wide
+ * box. Enfusion supports non-square terrain, so this is a first-class shape,
+ * not a fallback. */
+.leaflet-draw-toolbar a.leaflet-draw-draw-rect,
+.leaflet-retina .leaflet-draw-toolbar a.leaflet-draw-draw-rect {
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 18'><rect x='2' y='5' width='14' height='8' fill='none' stroke='%23464646' stroke-width='1.6'/><path d='M4.5 9h9M4.5 9l1.6-1.4M4.5 9l1.6 1.4M13.5 9l-1.6-1.4M13.5 9l-1.6 1.4' fill='none' stroke='%23464646' stroke-width='1.1' stroke-linecap='round'/></svg>") !important;
+    background-size: 18px 18px !important;
+    background-position: center center !important;
+    background-repeat: no-repeat !important;
+}
+
 .leaflet-draw-toolbar {
     border: 1px solid var(--border-default) !important;
     border-radius: 6px;

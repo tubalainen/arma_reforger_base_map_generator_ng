@@ -1,6 +1,6 @@
 # Arma Reforger Base Map Generator
 
-**Draw a square on a map, get an Enfusion-ready terrain package.** This tool builds realistic
+**Draw an area on a map, get an Enfusion-ready terrain package.** This tool builds realistic
 terrain from real-world geodata, replacing hours of manual work in the
 [Arma Reforger World Editor](https://community.bistudio.com/wiki/Arma_Reforger:World_Editor) —
 sourcing elevation, painting surface masks, and placing roads one by one.
@@ -25,11 +25,17 @@ cp .env.example .env        # optional — only needed for high-res national dat
 docker compose up -d
 ```
 
-Open **[http://localhost:8080](http://localhost:8080)**, draw a square, name your map, hit
-Generate, and download the ZIP when the pipeline finishes.
+Open **[http://localhost:8080](http://localhost:8080)**, draw a **square** or a **rectangle**,
+name your map, hit Generate, and download the ZIP when the pipeline finishes.
 
-The terrain grid is derived from the square you drew — cell size is fixed at 2 m and the square
-snaps to a whole number of 128-face tiles, up to 16384 x 16384 (32.8 km). There is nothing to pick.
+The terrain grid is derived from the shape you drew — cell size is fixed at 2 m and each axis snaps
+independently to a whole number of 128-face tiles, up to 16384 faces (32.768 km) **per axis**.
+There is nothing to pick.
+
+Square is the default and what most maps want. Reach for the rectangle when the region itself is
+oblong: Enfusion supports non-square terrain (the New Terrain dialog takes a grid size per axis,
+with no ratio restriction), and squaring off a 20.5 x 12.5 km region pulls in 63% more terrain —
+elevation, imagery and OSM features fetched and processed for ground the map never uses.
 
 Full walkthrough, upgrades and image tags: **[docs/setup.md](docs/setup.md)**.
 
@@ -88,7 +94,7 @@ community-standard manual workflow, for entity names, prefab paths and surface p
 
 ## Architecture
 
-The whole system on one page — how a drawn square becomes an Enfusion project ZIP.
+The whole system on one page — how a drawn area becomes an Enfusion project ZIP.
 
 [![Architecture overview](docs/architecture-preview.png)](https://htmlpreview.github.io/?https://github.com/tubalainen/arma_reforger_base_map_generator_ng/blob/main/docs/architecture.html)
 

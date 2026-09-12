@@ -116,14 +116,18 @@ Docker will automatically pull the latest image from `ghcr.io/tubalainen/arma_re
 
 ## 3. Generate Your First Map
 
-1. **Select an area** on the interactive map by clicking the rectangle or 1:1 square tool in the top-left (Enfusion only supports square / rectangular terrain)
+1. **Select an area** on the interactive map using the tools in the top-left: the **1:1 square**
+   tool, or the **rectangle** tool below it for a free aspect ratio. Enfusion supports square and
+   rectangular terrain — the New Terrain dialog takes a grid size per axis, with no ratio
+   restriction. Square is the default; the rectangle is worth reaching for when the region is
+   oblong, since squaring it off means fetching and processing terrain the map never uses.
 2. **Set options** in the sidebar:
    - **Map Name** — letters, numbers, underscores (used as the Enfusion project folder name)
    - **Features** — toggle roads, water, forests, buildings and surface masks, plus road
      flattening and water levelling
-   - The terrain grid is **derived from the square you drew** — cell size is fixed at 2 m
-     (the Arma Reforger standard) and the square snaps to a whole number of 128-face tiles,
-     up to 16384 x 16384 (32.8 km). There is nothing to pick.
+   - The terrain grid is **derived from the shape you drew** — cell size is fixed at 2 m
+     (the Arma Reforger standard) and each axis snaps independently to a whole number of
+     128-face tiles, up to 16384 faces (32.768 km) **per axis**. There is nothing to pick.
 3. **Click Generate** and watch the 13-step pipeline progress in real-time
 4. **Download the ZIP** when complete
 

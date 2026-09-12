@@ -77,11 +77,21 @@ const drawnItems = new L.FeatureGroup();
 map.addLayer(drawnItems);
 
 // ---------------------------------------------------------------------------
-// Square drawing tool (custom Leaflet.Draw handler)
-// Forces 1:1 aspect ratio in metres so Enfusion heightmap isn't distorted.
-// Only square selections are supported — Enfusion World Editor only handles
-// square / rectangular terrain (issue #50) and the workflow defaults to
-// square. Rectangles were removed in v1.5.9 (issue #128).
+// Selection drawing tools (custom Leaflet.Draw handlers)
+//
+// Two shapes, both valid terrain:
+//   • Square    — 1:1, the default and what most maps want.
+//   • Rectangle — free aspect, for oblong regions (issue #197). Enfusion's
+//                  TerrainEntity supports non-square terrain: the New Terrain
+//                  dialog takes a grid size per axis. There is no ratio
+//                  restriction, only the per-axis tile and maximum rules.
+//
+// Rectangles avoid paying for terrain the map never uses: a 20.5 x 12.5 km
+// region forced to a square covers +63% more ground, and every extra square
+// kilometre is elevation, imagery and OSM features fetched and processed.
+//
+// Rectangles were removed in v1.5.9 as part of a toolbar tidy (issue #128),
+// not for a technical reason; v1.17.0 brings them back alongside the square.
 // ---------------------------------------------------------------------------
 const SHAPE_STYLE = {
     color: '#26cd4d',
@@ -96,50 +106,72 @@ function mPerDegLng(lat) {
 }
 
 // ---------------------------------------------------------------------------
-// Terrain sizing — the drawn square is the only size input. Grid cell size is
-// locked at 2 m; the terrain grid size (faces per axis) must be a multiple of
-// the 128-face tile size. Mirrors config/terrain.py + config/enfusion.py.
+// Terrain sizing — the drawn shape is the only size input. Grid cell size is
+// locked at 2 m; the terrain grid size must be a multiple of the 128-face tile
+// size on each axis, and no axis may exceed MAX_TERRAIN_GRID_SIZE.
+// Mirrors config/terrain.py + config/enfusion.py.
 // ---------------------------------------------------------------------------
 const GRID_CELL_SIZE_M = 2;
 const TERRAIN_TILE_FACES = 128;
 const MAX_TERRAIN_GRID_SIZE = 16384;
 
-// Derive the Enfusion terrain parameters from a drawn side length in metres.
-function deriveTerrain(sideMetres) {
+// Derive one terrain axis from a drawn length in metres. Each axis snaps to a
+// whole number of 128-face tiles independently and is clamped to
+// MAX_TERRAIN_GRID_SIZE — so no axis can ever exceed 16384 faces x 2 m =
+// 32.768 km, whatever shape the user draws. Mirrors snap_to_tile_multiple().
+function deriveAxis(metres) {
     const tiles = Math.min(
         MAX_TERRAIN_GRID_SIZE / TERRAIN_TILE_FACES,
-        Math.max(1, Math.round(sideMetres / GRID_CELL_SIZE_M / TERRAIN_TILE_FACES)),
+        Math.max(1, Math.round(metres / GRID_CELL_SIZE_M / TERRAIN_TILE_FACES)),
     );
     const N = tiles * TERRAIN_TILE_FACES;
     return {
-        N: N,                        // terrain grid size (faces per axis)
-        tiles: tiles,                // tiles per axis (N / 128)
-        sideM: N * GRID_CELL_SIZE_M, // in-game terrain side, metres
-        heightmapPx: N + 1,          // heightmap PNG dimension
+        N: N,                    // terrain grid size on this axis (faces)
+        tiles: tiles,            // tiles on this axis (N / 128)
+        m: N * GRID_CELL_SIZE_M, // in-game length of this axis, metres
+        heightmapPx: N + 1,      // heightmap pixels on this axis
     };
 }
 
-// Side length (metres) of a square Leaflet bounds — uses the larger axis so a
-// slightly non-square bounds still resolves to a single value.
-function squareSideMetres(bounds) {
-    const widthM = (bounds.getEast() - bounds.getWest())
-        * mPerDegLng(bounds.getCenter().lat);
-    const heightM = (bounds.getNorth() - bounds.getSouth()) * M_PER_DEG_LAT;
-    return Math.max(widthM, heightM);
+// Derive both terrain axes from a drawn bounds. `square` ties them to the
+// longer axis; otherwise each axis is derived from what was actually drawn.
+function deriveTerrain(bounds, square) {
+    const { widthM, heightM } = boundsMetres(bounds);
+    if (square) {
+        const side = deriveAxis(Math.max(widthM, heightM));
+        return { x: side, z: side, square: true };
+    }
+    return { x: deriveAxis(widthM), z: deriveAxis(heightM), square: false };
 }
 
-// Resize a square layer in place so its side equals a valid terrain size,
-// keeping it centred where the user left it.
-function snapSquareToTerrain(layer) {
+// Width and height of a Leaflet bounds, in metres.
+function boundsMetres(bounds) {
+    return {
+        widthM: (bounds.getEast() - bounds.getWest())
+            * mPerDegLng(bounds.getCenter().lat),
+        heightM: (bounds.getNorth() - bounds.getSouth()) * M_PER_DEG_LAT,
+    };
+}
+
+// Resize a layer in place so each axis equals a valid terrain size, keeping it
+// centred where the user left it. What the user sees on the map is then
+// exactly the terrain that will be generated — including the per-axis maximum.
+function snapToTerrain(layer, square) {
     const bounds = layer.getBounds();
     const centre = bounds.getCenter();
-    const { sideM } = deriveTerrain(squareSideMetres(bounds));
-    const halfLat = (sideM / 2) / M_PER_DEG_LAT;
-    const halfLng = (sideM / 2) / mPerDegLng(centre.lat);
+    const t = deriveTerrain(bounds, square);
+    const halfLat = (t.z.m / 2) / M_PER_DEG_LAT;
+    const halfLng = (t.x.m / 2) / mPerDegLng(centre.lat);
     layer.setBounds(L.latLngBounds(
         L.latLng(centre.lat - halfLat, centre.lng - halfLng),
         L.latLng(centre.lat + halfLat, centre.lng + halfLng),
     ));
+}
+
+// Which shape a selection layer was drawn with — decides whether later edits
+// and re-snaps keep it square. Defaults to square for safety.
+function selectionIsSquare(layer) {
+    return !layer || layer._selectionShape !== 'rectangle';
 }
 
 // Given a fixed corner and a free corner, return the bounds of the
@@ -189,6 +221,26 @@ L.Draw.Square = L.Draw.Rectangle.extend({
 
 L.drawLocal.draw.toolbar.buttons.square = 'Draw a square area';
 
+// Free-aspect rectangle. L.Draw.Rectangle already does exactly this; the
+// subclass exists only to fire CREATED with layerType:'rect' so the handler
+// can tell the two shapes apart. As with L.Draw.Square, `this.type` must be
+// set AFTER the super call — the parent's initialize overwrites it.
+L.Draw.Rect = L.Draw.Rectangle.extend({
+    statics: { TYPE: 'rect' },
+
+    options: {
+        shapeOptions: { ...SHAPE_STYLE },
+        metric: true,
+    },
+
+    initialize: function (map, options) {
+        L.Draw.Rectangle.prototype.initialize.call(this, map, options);
+        this.type = 'rect';
+    },
+});
+
+L.drawLocal.draw.toolbar.buttons.rect = 'Draw a rectangular area';
+
 // Square-aware edit handler: corner-drag preserves 1:1 aspect ratio so the
 // shape stays a square while the user adjusts its size. The center marker
 // (inherited from L.Edit.SimpleShape) handles moves without modification.
@@ -201,9 +253,10 @@ L.Edit.Square = L.Edit.Rectangle.extend({
 });
 
 // Custom selection toolbar (replaces L.Control.Draw entirely so the UI
-// only exposes the two buttons that make sense for this workflow):
-//   • Square — start drawing a new 1:1 selection
-//   • Delete — clear the current selection (no two-step "remove mode")
+// only exposes the buttons that make sense for this workflow):
+//   • Square    — start drawing a new 1:1 selection
+//   • Rectangle — start drawing a new free-aspect selection (issue #197)
+//   • Delete    — clear the current selection (no two-step "remove mode")
 // Re-uses Leaflet.Draw's CSS classes so styling matches the rest of the app.
 const SelectionToolbar = L.Control.extend({
     options: { position: 'topleft' },
@@ -219,8 +272,16 @@ const SelectionToolbar = L.Control.extend({
         const squareBtn = L.DomUtil.create(
             'a', 'leaflet-draw-draw-square', drawToolbar);
         squareBtn.href = '#';
-        squareBtn.title = 'Draw a square area';
+        squareBtn.title = 'Draw a square area (1:1)';
         squareBtn.setAttribute('role', 'button');
+
+        // Sits directly below the square in the same toolbar section: square
+        // stays the default, rectangle is the opt-in (issue #197).
+        const rectBtn = L.DomUtil.create(
+            'a', 'leaflet-draw-draw-rect', drawToolbar);
+        rectBtn.href = '#';
+        rectBtn.title = 'Draw a rectangular area (any aspect ratio)';
+        rectBtn.setAttribute('role', 'button');
 
         const editSection = L.DomUtil.create(
             'div', 'leaflet-draw-section', container);
@@ -235,6 +296,11 @@ const SelectionToolbar = L.Control.extend({
         L.DomEvent.on(squareBtn, 'click', function (e) {
             L.DomEvent.stop(e);
             new L.Draw.Square(map, { shapeOptions: { ...SHAPE_STYLE } }).enable();
+        });
+
+        L.DomEvent.on(rectBtn, 'click', function (e) {
+            L.DomEvent.stop(e);
+            new L.Draw.Rect(map, { shapeOptions: { ...SHAPE_STYLE } }).enable();
         });
 
         L.DomEvent.on(deleteBtn, 'click', function (e) {
@@ -284,18 +350,19 @@ function boundsToCoords(bounds) {
 }
 
 map.on(L.Draw.Event.CREATED, function (event) {
-    if (event.layerType !== 'square') return;
+    if (event.layerType !== 'square' && event.layerType !== 'rect') return;
 
     // Replace any previous selection.
     drawnItems.clearLayers();
 
     const layer = event.layer;
+    layer._selectionShape = event.layerType === 'rect' ? 'rectangle' : 'square';
     drawnItems.addLayer(layer);
     currentPolygon = layer;
 
-    // Snap the drawn square to a valid terrain grid size so what the user
-    // sees on the map is exactly the terrain that will be generated.
-    snapSquareToTerrain(layer);
+    // Snap the drawn shape to a valid terrain grid size on each axis so what
+    // the user sees on the map is exactly the terrain that will be generated.
+    snapToTerrain(layer, selectionIsSquare(layer));
 
     currentPolygonCoords = boundsToCoords(layer.getBounds());
     onPolygonSelected(currentPolygonCoords);
@@ -307,11 +374,14 @@ map.on(L.Draw.Event.CREATED, function (event) {
 });
 
 function enableLiveEditing(layer) {
-    // Swap in the square-aware edit handler (Leaflet auto-attaches the
-    // standard L.Edit.Rectangle in an init hook). Always disable the
-    // existing handler before replacing — otherwise its markers leak.
+    // A square selection needs the aspect-preserving edit handler; a
+    // rectangle uses Leaflet's stock one, which resizes each axis freely.
+    // Always disable the existing handler before replacing — otherwise its
+    // markers leak. (Leaflet auto-attaches L.Edit.Rectangle in an init hook.)
     if (layer.editing) layer.editing.disable();
-    layer.editing = new L.Edit.Square(layer);
+    layer.editing = selectionIsSquare(layer)
+        ? new L.Edit.Square(layer)
+        : new L.Edit.Rectangle(layer);
     layer.editing.enable();
 
     // Update the sidebar bbox / size readout live while the user drags.
@@ -332,7 +402,7 @@ function enableLiveEditing(layer) {
         // corner markers sit on the snapped bounds. The re-init is deferred so
         // the current drag event finishes unwinding before its handler is
         // torn down.
-        snapSquareToTerrain(layer);
+        snapToTerrain(layer, selectionIsSquare(layer));
         currentPolygonCoords = boundsToCoords(layer.getBounds());
         onPolygonSelected(currentPolygonCoords);
         setTimeout(() => enableLiveEditing(layer), 0);
@@ -409,8 +479,8 @@ function updateSelectionDisplay(coords) {
     document.getElementById('info-size').textContent =
         `~${lngKm.toFixed(1)} x ${latKm.toFixed(1)} km`;
 
-    // The square auto-snaps to a valid terrain size and is clamped to the
-    // maximum, so any drawn selection is generatable.
+    // The selection auto-snaps to a valid terrain size on each axis and each
+    // axis is clamped to the maximum, so any drawn selection is generatable.
     document.getElementById('btn-generate').disabled = false;
     updateTerrainSizeDisplay();
 }
@@ -451,13 +521,16 @@ function updateTerrainSizeDisplay() {
     const lats = currentPolygonCoords.map(c => c[1]);
     const west = Math.min(...lngs), east = Math.max(...lngs);
     const south = Math.min(...lats), north = Math.max(...lats);
-    const midLat = (south + north) / 2;
-    const widthM = (east - west) * mPerDegLng(midLat);
-    const heightM = (north - south) * M_PER_DEG_LAT;
+    const bounds = L.latLngBounds(
+        L.latLng(south, west), L.latLng(north, east));
 
-    const t = deriveTerrain(Math.max(widthM, heightM));
-    const km = (t.sideM / 1000).toFixed(2);
-    const advisory = t.N > 8192
+    const t = deriveTerrain(bounds, selectionIsSquare(currentPolygon));
+    const kmX = (t.x.m / 1000).toFixed(2);
+    const kmZ = (t.z.m / 1000).toFixed(2);
+    // Cost tracks total area, not the longest axis — a long thin rectangle is
+    // cheaper than the square that would contain it (issue #197).
+    const megaFaces = (t.x.N * t.z.N) / 1e6;
+    const advisory = megaFaces > (8192 * 8192) / 1e6
         ? '<div class="alert alert-warning py-1 px-2 mb-0 mt-2 small">'
           + '<i class="bi bi-exclamation-triangle-fill"></i> Large map &mdash; '
           + 'generation will be slow and memory-heavy.</div>'
@@ -465,10 +538,11 @@ function updateTerrainSizeDisplay() {
 
     el.innerHTML =
         '<table class="table table-sm table-dark mb-0">'
-        + `<tr><td>Terrain grid size</td><td><strong>${t.N} &times; ${t.N}</strong></td></tr>`
-        + `<tr><td>Tiles</td><td>${t.tiles} &times; ${t.tiles}</td></tr>`
-        + `<tr><td>In-game size</td><td>${km} &times; ${km} km</td></tr>`
-        + `<tr><td>Heightmap</td><td>${t.heightmapPx} &times; ${t.heightmapPx} px</td></tr>`
+        + `<tr><td>Terrain grid size</td><td><strong>${t.x.N} &times; ${t.z.N}</strong>`
+        + `${t.square ? '' : ' <span class="text-info">(rectangular)</span>'}</td></tr>`
+        + `<tr><td>Tiles</td><td>${t.x.tiles} &times; ${t.z.tiles}</td></tr>`
+        + `<tr><td>In-game size</td><td>${kmX} &times; ${kmZ} km</td></tr>`
+        + `<tr><td>Heightmap</td><td>${t.x.heightmapPx} &times; ${t.z.heightmapPx} px</td></tr>`
         + `<tr><td>Grid cell size</td><td>${GRID_CELL_SIZE_M} m</td></tr>`
         + '</table>' + advisory;
 }

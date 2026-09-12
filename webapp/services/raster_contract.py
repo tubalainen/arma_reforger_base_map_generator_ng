@@ -9,7 +9,8 @@ per axis the contract is:
 
 * ``heightmap.asc``   -> ``(N+1) x (N+1)``  (faces + 1 vertices)
 * ``surface_*.png``   -> ``N x N``          (face resolution, 8-bit grayscale "L")
-* ``satellite_map.png`` -> square, plain 8-bit ``RGB`` (no alpha / ICC profile)
+* ``satellite_map.png`` -> any size, but ``N_x : N_z`` aspect ratio, plain
+  8-bit ``RGB`` (no alpha / ICC profile)
 
 ``validate_and_harden_rasters`` checks every emitted raster against this
 contract, *auto-fixes* encoding issues it can fix safely (mask mode, satellite
@@ -27,6 +28,22 @@ from typing import Optional
 from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+# How far the satellite's aspect ratio may drift from the terrain's before it
+# counts as a defect. An exact match is not always reachable, for two reasons:
+#
+#   * The satellite is sized from heightmap *vertices* (N+1, so it never loses
+#     detail against the heightmap) but covers the terrain's *face* extent
+#     (N x cell size). 129/257 is not 128/256 — 0.39% out on the smallest
+#     terrain. The gap closes as the terrain grows (8193/4097 vs 8192/4096 is
+#     0.01%), so it only ever shows up where it cannot matter.
+#   * At SATELLITE_MAX_DIM both axes are rounded to whole pixels.
+#
+# Measured worst case over every valid 128-face-multiple grid up to 16384:
+# 0.39% within 2:1, 0.78% within 16:1, 1.51% at the 128:1 extreme (a 66 px
+# axis). 2% covers all of it and still catches the bug this check exists for —
+# pre-#197, a 4096x2048-face terrain got a square texture, a 100% error.
+SATELLITE_ASPECT_TOLERANCE = 0.02
 
 
 def parse_asc_header_dims(path: Path) -> tuple[int, int]:
@@ -150,11 +167,21 @@ def validate_and_harden_rasters(
                         f"{sat.name}: {mode}"
                         f"{'+icc' if has_profile else ''} -> RGB"
                     )
-                if size[0] != size[1]:
-                    # Non-square is not fatal (Workbench resamples) but flag it.
-                    _log_issue(
-                        f"satellite_map.png is non-square {size[0]}x{size[1]}"
-                    )
+                # The satellite is stretched over the whole terrain by the
+                # Terrain Tool, so its aspect ratio must match the terrain's —
+                # NOT be square. Terrain may legitimately be rectangular
+                # (issue #197). A mismatch means the imagery is squashed or
+                # stretched on the ground, which is not fatal (Workbench
+                # resamples) but is always an upstream defect.
+                if size[1] > 0 and faces_z > 0:
+                    want = faces_x / faces_z
+                    got = size[0] / size[1]
+                    if abs(got - want) > SATELLITE_ASPECT_TOLERANCE * want:
+                        _log_issue(
+                            f"satellite_map.png is {size[0]}x{size[1]} "
+                            f"(aspect {got:.3f}), expected aspect {want:.3f} "
+                            f"to match the {faces_x}x{faces_z} terrain"
+                        )
         except Exception as exc:  # noqa: BLE001
             _log_issue(f"could not read satellite_map.png: {exc}")
         report["satellite"] = entry

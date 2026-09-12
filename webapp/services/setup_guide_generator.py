@@ -79,6 +79,47 @@ class SetupGuideGenerator:
             self.surf.get("surfaces_present", ["grass"] + list(SURFACE_IMPORT_ORDER))
         )
 
+        # Terrain grid, per axis. Enfusion's TerrainEntity supports non-square
+        # terrain — the New Terrain dialog takes a grid size for X and one for
+        # Z — so every section reads these instead of assuming X == Z, which
+        # used to print "1280 x 1280" for a 1281x641 heightmap and walk the
+        # user into a terrain that did not match their rasters (issue #197).
+        self.vertex_x, self.vertex_z = self._parse_dimensions()
+        self.face_x = self.vertex_x - 1 if self.vertex_x > 0 else 0
+        self.face_z = self.vertex_z - 1 if self.vertex_z > 0 else 0
+        self.is_square = self.face_x == self.face_z
+
+    def _parse_dimensions(self) -> tuple[int, int]:
+        """Parse ``heightmap.dimensions`` ("WxH") into vertex counts."""
+        parts = str(self.hm.get("dimensions", "")).lower().split("x")
+        try:
+            vx = int(parts[0])
+        except (ValueError, IndexError):
+            return (0, 0)
+        try:
+            vz = int(parts[1])
+        except (ValueError, IndexError):
+            vz = vx
+        return (vx, vz)
+
+    @property
+    def grid_size_str(self) -> str:
+        """``"1280 x 1280"`` / ``"10240 x 6272"`` — always both axes."""
+        if not self.face_x:
+            return "?"
+        return f"{self.face_x} × {self.face_z}"
+
+    @property
+    def shape_note(self) -> str:
+        """One-line reminder when the terrain is not square."""
+        if self.is_square:
+            return ""
+        return (
+            " — **rectangular terrain**: the New Terrain dialog ties the "
+            "two grid-size fields together by default, so unlink them (the "
+            "`=` control between the fields) before entering the second value"
+        )
+
     def generate(self, output_dir: Path) -> Path:
         """
         Generate the full SETUP_GUIDE.md.
@@ -135,9 +176,6 @@ class SetupGuideGenerator:
         information — no how-to. Values, paths, dialog flags, gotchas.
         """
         dims = self.hm.get("dimensions", "unknown")
-        parts = dims.split("x")
-        vertex_x = int(parts[0]) if parts and parts[0].isdigit() else 0
-        face_x = vertex_x - 1 if vertex_x > 0 else "?"
         cell_size = self.hm.get("grid_cell_size_m", 2.0)
         terrain_size = self.hm.get("terrain_size_m", "unknown")
         height_scale = self.elev.get("dialog_height_scale", 0.03125)
@@ -202,7 +240,7 @@ phases below. All numeric values are pre-computed for **this** generation.
 |----------|-------|
 | Project name / addon dir | `{self.map_name}` |
 | Region | {countries} ({crs}) |
-| Terrain grid size (faces) | **{face_x} × {face_x}** |
+| Terrain grid size (faces) | **{self.grid_size_str}**{' (square)' if self.is_square else ' (rectangular)'} |
 | Grid cell size | **{cell_size} m** |
 | Terrain size | {terrain_size} |
 | Heightmap dimensions | {dims} px (faces+1, 16-bit) |
@@ -218,7 +256,7 @@ phases below. All numeric values are pre-computed for **this** generation.
 ### Dialog values that aren't the default
 
 **New Terrain** (right-click `Terrain` entity → *Create new terrain…*)
-- Terrain grid size X = Z: **{face_x}**
+- Terrain grid size X: **{self.face_x}**, Z: **{self.face_z}**{self.shape_note}
 - Grid cell size: **{cell_size} m**
 - Height scale: **{height_scale:.6g}** — {height_scale_note}
 - Everything else: defaults
@@ -327,9 +365,6 @@ If anything in this section is unclear, the step-by-step phases below have the l
 
     def _quick_path(self) -> str:
         """Compact 8-step summary for experienced World Editor creators."""
-        dims = self.hm.get("dimensions", "")
-        parts = dims.split("x")
-        face_x = int(parts[0]) - 1 if parts and parts[0].isdigit() else "?"
         cell_size = self.hm.get("grid_cell_size_m", 2.0)
         height_scale = self.elev.get("dialog_height_scale", 0.03125)
 
@@ -339,7 +374,7 @@ If anything in this section is unclear, the step-by-step phases below have the l
 
 1. **Copy** `{self.map_name}/` from the ZIP → `{DEFAULT_ADDON_DIR}\\`
 2. **Add project** in Workbench launcher → `{self.map_name}\\addon.gproj` → open `{self.map_name}.ent`
-3. **Create terrain** (right-click **Terrain** in hierarchy): grid `{face_x}×{face_x}`, cell `{cell_size}m`, height scale `{height_scale:.6g}` (default)
+3. **Create terrain** (right-click **Terrain** in hierarchy): grid `{self.face_x}×{self.face_z}`{'' if self.is_square else ' (unlink the two grid-size fields — this terrain is rectangular)'}, cell `{cell_size}m`, height scale `{height_scale:.6g}` (default)
 4. **Import heightmap**: `Sourcefiles/heightmap.asc` — ✓ Invert Z axis, ✗ Resample heights → **Generate normal map** → **File > Save World** → reopen
 5. **Paint surfaces** (Terrain Tool → Paint tab): for each surface, right-click the `.emat` in the Resource Browser → **Fill surface layer** → right-click surface in panel → **Priority Surface Mask Import** → pick `Sourcefiles/surface_<name>.png`
 6. **Import satellite**: `Sourcefiles/satellite_map.png` — turn **off** Linear Color Space → **File > Save World** → reopen
@@ -396,12 +431,8 @@ You should see this structure inside:
 > that ArmaReforger is listed as a dependency in the Projects panel."""
 
     def _phase_terrain_creation(self) -> str:
-        dims = self.hm.get("dimensions", "2049x2049")
-        parts = dims.split("x")
-        vertex_x = int(parts[0])
-        vertex_z = int(parts[1]) if len(parts) > 1 else vertex_x
-        face_x = vertex_x - 1
-        face_z = vertex_z - 1
+        face_x = self.face_x
+        face_z = self.face_z
         cell_size = self.hm.get("grid_cell_size_m", 2.0)
         height_scale = self.elev.get("dialog_height_scale", 0.03125)
         min_elev = self.elev.get("min_elevation_m", 0.0)
@@ -420,7 +451,7 @@ You should see this structure inside:
 | Parameter | Value |
 |-----------|-------|
 | **Name** | **{self.map_name}** |
-| **Terrain grid size** | **{face_x}** = **{face_z}** |
+| **Terrain grid size** | X **{face_x}**, Z **{face_z}**{' (the dialog ties the two fields together by default and that is what you want here)' if self.is_square else ' — **unlink the two fields first** (the `=` control between them); they are tied together by default'} |
 | **Blocks per tile** | **4** (default) |
 | **Grid cell size (meters)** | **{cell_size}** |
 | **Height scale (meters)** | **{height_scale:.6g}** {'(leave at the **default** — do not change it)' if is_default_scale else '(this map needs a larger-than-default scale — see note below)'} |
@@ -1072,10 +1103,9 @@ of one building — and are version-specific.
 
     def _appendix_parameters(self) -> str:
         settings = self.settings
+        face_x = self.face_x
+        face_z = self.face_z
         dims = self.hm.get("dimensions", "unknown")
-        parts = dims.split("x")
-        vertex_x = int(parts[0]) if parts[0].isdigit() else 0
-        face_x = vertex_x - 1 if vertex_x > 0 else 0
 
         return f"""## Appendix B: Terrain Parameters Reference
 
@@ -1083,7 +1113,7 @@ All values are pre-computed and ready to use:
 
 ```
 Terrain Grid Size X:    {face_x}
-Terrain Grid Size Z:    {face_x}
+Terrain Grid Size Z:    {face_z}
 Grid Cell Size:         {self.hm.get('grid_cell_size_m', 2.0)}m
 Terrain Size:           {self.hm.get('terrain_size_m', 'unknown')}
 Height Scale:           {self.elev.get('dialog_height_scale', 0.03125):.6g}  (New Terrain dialog value — leave at default)
