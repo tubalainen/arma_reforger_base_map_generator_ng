@@ -442,6 +442,63 @@ def _rasterize_river_mask(
     )
 
 
+def dem_bbox_wgs84(metadata: dict) -> tuple[float, float, float, float] | None:
+    """The DEM's bounds as a WGS84 (west, south, east, north) tuple.
+
+    Every rasterizer in ``services/utils/rasterize.py`` maps a GeoJSON
+    coordinate to a pixel with ``(lng - west) / lng_range * width`` — it assumes
+    degrees. The DEM's own bounds are in the DEM's own CRS, and only some
+    providers hand us WGS84:
+
+    * COP30 / OpenTopography deliver EPSG:4326, so bounds are already degrees.
+    * **Lantmäteriet STAC Höjd delivers EPSG:5845** (SWEREF99 TM + RH2000) and
+      the merge keeps that CRS, so bounds are metres — around 742354, 6470557
+      for Gotska Sandön.
+
+    Feeding those metres in as degrees put every water and road feature far
+    outside the raster, where ``_coords_to_pixels`` clamped it into the corner.
+    On the Gotska Sandön run the lake mask came out as **1 pixel** and the sea
+    mask as zero, so no bathymetry was carved and the island was written as an
+    inland map — and road flattening had silently done nothing on every Swedish
+    map for as long as the Lantmäteriet path has existed.
+
+    Returns None when the DEM carries no bounds at all.
+    """
+    bounds = metadata.get("bounds")
+    if not bounds:
+        return None
+    box = (
+        float(bounds.left), float(bounds.bottom),
+        float(bounds.right), float(bounds.top),
+    )
+    crs = str(metadata.get("crs") or "").strip()
+    if not crs:
+        logger.warning(
+            "DEM has bounds but no CRS; assuming they are already WGS84. "
+            "If features land in the corner of the map, this is why."
+        )
+        return box
+    if "4326" in crs or crs.upper() in ("EPSG:4326", "WGS84"):
+        return box
+    try:
+        from rasterio.warp import transform_bounds
+
+        converted = transform_bounds(crs, "EPSG:4326", *box)
+        logger.info(
+            f"DEM bounds converted {crs} -> EPSG:4326 for feature "
+            f"rasterisation: {box[0]:.1f},{box[1]:.1f},{box[2]:.1f},{box[3]:.1f}"
+            f" -> {converted[0]:.4f},{converted[1]:.4f},"
+            f"{converted[2]:.4f},{converted[3]:.4f}"
+        )
+        return converted
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            f"Could not convert DEM bounds from {crs} to WGS84 ({exc}); "
+            f"using them unchanged. Water and road masks may be misplaced."
+        )
+        return box
+
+
 def _synthesize_sea_mask(
     water_features: dict,
     elevation: np.ndarray,
@@ -955,12 +1012,12 @@ def generate_heightmap(
         if job:
             job.add_log(f"Flattening terrain along {len(road_features['features'])} road segments...")
             job.progress = 50
-        bbox = metadata.get("bounds")
-        if bbox:
+        bbox_tuple = dem_bbox_wgs84(metadata)
+        if bbox_tuple:
             road_mask = rasterize_features_to_mask(
                 road_features,
                 elevation.shape[1], elevation.shape[0],
-                (bbox.left, bbox.bottom, bbox.right, bbox.top),
+                bbox_tuple,
                 buffer_px=2,
             )
             elevation = flatten_roads_in_heightmap(
@@ -983,9 +1040,8 @@ def generate_heightmap(
         if job:
             job.add_log(f"Leveling {len(water_features['features'])} water bodies...")
             job.progress = 53
-        bbox = metadata.get("bounds")
-        if bbox:
-            bbox_tuple = (bbox.left, bbox.bottom, bbox.right, bbox.top)
+        bbox_tuple = dem_bbox_wgs84(metadata)
+        if bbox_tuple:
             arr_h, arr_w = elevation.shape
 
             lake_mask = rasterize_features_to_mask(
