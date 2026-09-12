@@ -35,7 +35,10 @@ from config.lakes import (  # noqa: E402
     SEA_SHELF_WIDTH_M,
 )
 from services.heightmap_generator import (  # noqa: E402
+    ElevationTruncatedError,
+    _synthesize_sea_mask,
     carve_sea_bathymetry,
+    geotiff_to_array,
     qualifying_sea_regions,
 )
 
@@ -207,3 +210,133 @@ class TestIslandEndToEnd:
         sea = qualifying_sea_regions(lake)
         assert sea.sum() == 0
         np.testing.assert_array_equal(carve_sea_bathymetry(elev, sea, PIXEL_M), elev)
+
+
+# ---------------------------------------------------------------------------
+# Island regressions found by generating real island maps (#193 follow-up)
+# ---------------------------------------------------------------------------
+
+BBOX = (0.0, 0.0, 0.04, 0.04)
+
+
+def _coastline_polygon_feature() -> dict:
+    """Lantmäteriet Marktäcke ships the sea itself as a Polygon (objekttyp
+    2631 -> water_type "coastline"), not as a line."""
+    return {
+        "type": "Feature",
+        "properties": {"water_type": "coastline", "natural": "water"},
+        "geometry": {"type": "Polygon", "coordinates": [[
+            [0.0, 0.0], [0.04, 0.0], [0.04, 0.04], [0.0, 0.04], [0.0, 0.0],
+        ]]},
+    }
+
+
+def _coastline_line_feature() -> dict:
+    """OSM ships natural=coastline as a LineString."""
+    return {
+        "type": "Feature",
+        "properties": {"water_type": "coastline", "natural": "water"},
+        "geometry": {"type": "LineString", "coordinates": [
+            [0.0, 0.02], [0.02, 0.02], [0.04, 0.02],
+        ]},
+    }
+
+
+class TestCoastlineArrivesInTwoShapes:
+    """The sea was never detected on any Swedish map.
+
+    `_synthesize_sea_mask` rasterised only LineStrings, because OSM ships
+    `natural=coastline` as a line. Lantmäteriet Marktäcke ships the sea as a
+    **Polygon**, so the mask came back empty, no bathymetry was carved, and a
+    real island in the Gulf of Bothnia was written with `is_coastal_map: false`.
+    """
+
+    def test_polygon_coastline_is_detected(self):
+        elev = _island(radius_px=80.0)
+        water = {"type": "FeatureCollection",
+                 "features": [_coastline_polygon_feature()]}
+
+        sea = _synthesize_sea_mask(water, elev, BBOX, PIXEL_M)
+
+        assert sea.sum() > 0, (
+            "a Polygon coastline produced an empty sea mask — this is why "
+            "Swedish island maps came out as inland"
+        )
+
+    def test_linestring_coastline_still_works(self):
+        elev = _island(radius_px=80.0)
+        water = {"type": "FeatureCollection",
+                 "features": [_coastline_line_feature()]}
+
+        assert _synthesize_sea_mask(water, elev, BBOX, PIXEL_M).sum() > 0
+
+    def test_no_coastline_at_all_is_still_inland(self):
+        elev = _island(radius_px=80.0)
+        water = {"type": "FeatureCollection", "features": [
+            {"type": "Feature",
+             "properties": {"water_type": "lake", "natural": "water"},
+             "geometry": {"type": "Polygon", "coordinates": [[
+                 [0.01, 0.01], [0.02, 0.01], [0.02, 0.02],
+                 [0.01, 0.02], [0.01, 0.01]]]}},
+        ]}
+
+        assert _synthesize_sea_mask(water, elev, BBOX, PIXEL_M).sum() == 0
+
+
+class TestSmallIslandIsNotATruncatedDem:
+    """A 3.6 km selection around Isla Grosa (ES) is 97.4% ocean and 2.6%
+    island. The truncation guard required >= 10% land, so generation aborted
+    with "select an area with sufficient land coverage" — rejecting exactly the
+    kind of map v1.16.0's bathymetry exists to serve.
+
+    These call the guard through geotiff_to_array via a real in-memory GeoTIFF,
+    so they exercise the shipped code path rather than a copy of the rule.
+    """
+
+    @staticmethod
+    def _geotiff(arr: np.ndarray) -> bytes:
+        rasterio = pytest.importorskip("rasterio")
+        from rasterio.io import MemoryFile
+        from rasterio.transform import from_origin
+
+        with MemoryFile() as mem:
+            with mem.open(
+                driver="GTiff", height=arr.shape[0], width=arr.shape[1],
+                count=1, dtype="float32",
+                transform=from_origin(0, arr.shape[0], 1, 1),
+                crs="EPSG:4326",
+            ) as ds:
+                ds.write(arr.astype(np.float32), 1)
+            return mem.read()
+
+    def test_small_island_is_accepted(self):
+        """2.6% land, realistic relief -> a real island, not a bad response."""
+        rng = np.random.default_rng(0)
+        arr = np.zeros((130, 130), dtype=np.float32)       # ocean at exactly 0
+        yy, xx = np.mgrid[0:130, 0:130]
+        r = np.hypot(yy - 65, xx - 65)
+        island = r < 10.5                                   # ~2.6% of pixels
+        arr[island] = 5.0 + rng.normal(0, 2.0, island.sum())
+        assert 0.5 < island.mean() * 100 < 10, "fixture must sit under the old 10% floor"
+
+        elev, _ = geotiff_to_array(self._geotiff(arr))
+        assert elev.shape == (130, 130)
+
+    def test_genuinely_truncated_dem_is_still_rejected(self):
+        """A corner of flat data and nothing else is a broken API response."""
+        arr = np.zeros((130, 130), dtype=np.float32)
+        arr[:12, :12] = 3.0                                 # flat, no variation
+
+        with pytest.raises(ElevationTruncatedError):
+            geotiff_to_array(self._geotiff(arr))
+
+    def test_near_empty_response_is_still_rejected(self):
+        """Below the 0.5% floor there is nothing usable regardless of values."""
+        rng = np.random.default_rng(1)
+        arr = np.zeros((200, 200), dtype=np.float32)
+        flat = arr.ravel()
+        flat[:60] = 40.0 + rng.normal(0, 5.0, 60)           # 0.15% of pixels
+        arr = flat.reshape(200, 200)
+
+        with pytest.raises(ElevationTruncatedError):
+            geotiff_to_array(self._geotiff(arr))
