@@ -56,6 +56,25 @@ def soft_edge_mask(binary_mask: np.ndarray, transition_px: int = 8) -> np.ndarra
     - Gradual ramp from 1.0 to 0.0 over `transition_px` pixels at edges
     - 0.0 outside the masked area
 
+    **The raster border is not a boundary.** A forest that runs off the side of
+    the map continues off the side of the map; it does not stop there. Before
+    the fix for issue #202 this function fed the raw mask to the EDT, and the
+    `edt` fast path treats the array border as background — so every mask was
+    feathered inward from all four map edges over exactly `transition_px`
+    pixels. On a 2 m/px map with the 20 m forest transition that painted a
+    ~20 m ring of wrong surface around the entire terrain: forest and pine
+    ramped to zero at the edge, and grass (which is ``1 - sum(others)``) rose
+    to fill the gap, producing the bright border reported on #202.
+
+    The mask is therefore padded with edge replication before the transform and
+    cropped afterwards. Replication means a region touching the border is
+    treated as continuing outward, so no ramp is generated there, while genuine
+    interior boundaries are unaffected. Padding by more than `transition_px`
+    also puts the padded array's own border beyond the clip range, which makes
+    the result identical whether `parallel_edt` uses the `edt` package or the
+    scipy fallback (those two disagree about border semantics — see
+    `parallel_edt`).
+
     Args:
         binary_mask: Boolean or uint8 mask (non-zero = inside).
         transition_px: Width of the transition zone in pixels.
@@ -74,9 +93,14 @@ def soft_edge_mask(binary_mask: np.ndarray, transition_px: int = 8) -> np.ndarra
     if np.all(bool_mask):
         return np.ones_like(binary_mask, dtype=np.float32)
 
+    # Pad past the clip range so neither the real map edge nor the padded
+    # array's own edge can produce a ramp inside the returned window.
+    pad = int(np.ceil(transition_px)) + 1
+    padded = np.pad(bool_mask, pad, mode="edge")
+
     # Distance from nearest False pixel (grows inward from boundary)
     # Uses multi-threaded EDT via `edt` package when available
-    inner_dist = parallel_edt(bool_mask)
+    inner_dist = parallel_edt(padded)[pad:-pad, pad:-pad]
 
     # Normalize: ramp from 0 at boundary to 1.0 at transition_px depth
     soft = np.clip(inner_dist / transition_px, 0.0, 1.0)
