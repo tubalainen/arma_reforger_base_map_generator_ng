@@ -604,3 +604,105 @@ class TestParallelEdtBorderSemantics:
         np.testing.assert_allclose(
             parallel_edt(mask), distance_transform_edt(mask), atol=1e-4
         )
+
+
+class TestLinearSurfacesSurviveTheSaveThreshold:
+    """Issue #217: the main asphalt road was missing from a generated map.
+
+    The splines were all present; `surface_asphalt.png` was never written. The
+    save rule required a mask to cover 0.1% of the map — an **area** test
+    applied to a **linear** feature. A 6 m road is 3 px wide at 2 m/px, so even
+    one crossing the whole map covers almost none of its area, and the bar
+    scales with map size while a road's width does not.
+
+    On the reported 4096x4096 map the bar was 16777 px; the asphalt mask had
+    3911 non-zero and 1461 strongly-painted px, so it was dropped. That same map
+    kept `water_edge`, strongly painted on **zero** pixels, for hugging enough
+    shoreline to clear an area bar.
+    """
+
+    # 2048 faces with a *short* road — the regime the real report was in.
+    # A road spanning the whole map would clear the area bar on any map under
+    # ~5000 faces, so a full-width road would not reproduce the bug at all.
+    VERTEX = 2049
+    FACE = VERTEX - 1
+    AREA_BAR = (FACE * FACE) // 1000          # the old rule's threshold: 4194
+
+    def _generate(self, tmp_path, roads):
+        elevation = np.full((self.VERTEX, self.VERTEX), 100.0, dtype=np.float32)
+        osm = {
+            "roads": {"type": "FeatureCollection", "features": roads},
+            "water": _empty_collection(),
+            "forests": _empty_collection(),
+            "buildings": _empty_collection(),
+            "land_use": _empty_collection(),
+        }
+        generate_surface_masks(
+            elevation=elevation, osm_data=osm, bounds=BBOX, cell_size_m=2.0,
+            output_dir=tmp_path, country_code="SE",
+            heightmap_dimensions=(self.FACE, self.FACE),
+        )
+        return {p.stem.replace("surface_", "") for p in tmp_path.glob("surface_*.png")}
+
+    def test_a_short_road_still_gets_its_surface_mask(self, tmp_path: Path):
+        """The reported failure, end to end."""
+        from config.enfusion import (
+            MIN_STRONG_SURFACE_PIXELS,
+            STRONG_SURFACE_INTENSITY,
+        )
+
+        saved = self._generate(
+            tmp_path, [_road_feature(15.0005, 58.0015, 15.0013, "tertiary")]
+        )
+        assert "asphalt" in saved, (
+            f"surface_asphalt.png was not written for a real road — issue #217. "
+            f"Saved: {sorted(saved)}"
+        )
+
+        # Prove the fixture was in the failing regime, so this test cannot
+        # quietly stop reproducing the bug (the #198 lesson).
+        with Image.open(tmp_path / "surface_asphalt.png") as img:
+            arr = np.asarray(img)
+        meaningful = int((arr >= 64).sum())
+        strong = int((arr > STRONG_SURFACE_INTENSITY).sum())
+        assert meaningful < self.AREA_BAR, (
+            f"fixture no longer reproduces #217: {meaningful} meaningful px "
+            f"already clears the old area bar of {self.AREA_BAR}"
+        )
+        assert strong >= MIN_STRONG_SURFACE_PIXELS, (
+            f"fixture road is too faint to test the new rule: {strong} strong px"
+        )
+
+    def test_a_map_with_no_roads_writes_no_asphalt(self, tmp_path: Path):
+        """The rule must still drop surfaces that genuinely have nothing."""
+        saved = self._generate(tmp_path, [])
+        assert "asphalt" not in saved
+        assert "grass" in saved, "grass is always written as the base surface"
+
+    def test_strong_paint_bar_is_absolute_not_a_map_fraction(self):
+        """The defect was that the bar grew with the map while roads stayed
+        thin, so bigger maps lost more roads."""
+        from config.enfusion import MIN_STRONG_SURFACE_PIXELS
+
+        for side in (2048, 4096, 8192, 16384):
+            area_bar = (side * side) // 1000
+            assert MIN_STRONG_SURFACE_PIXELS < area_bar, (
+                f"on a {side}px map the area bar is {area_bar}; the strong-paint "
+                f"bar must stay below it or linear surfaces are lost again"
+            )
+
+    def test_reported_map_numbers_decide_correctly(self):
+        """The exact figures from the reported package."""
+        from config.enfusion import MIN_STRONG_SURFACE_PIXELS
+
+        assert (4096 * 4096) // 1000 == 16777
+        for name, strong_px, should_keep in (
+            ("asphalt", 1461, True),     # a real 13-segment road network
+            ("rock", 0, False),          # faint fringe only
+            ("water_edge", 0, False),    # strongly painted nowhere
+        ):
+            kept = strong_px >= MIN_STRONG_SURFACE_PIXELS
+            assert kept is should_keep, (
+                f"{name}: {strong_px} strong px -> kept={kept}, "
+                f"expected {should_keep}"
+            )
