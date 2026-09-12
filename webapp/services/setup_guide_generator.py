@@ -124,13 +124,14 @@ class SetupGuideGenerator:
             return ""
         return f"""
 > **⚠ This map's satellite image has a gap.** {void:.0%} of
-> `satellite_map.png` is solid black because an imagery tile could not be
-> fetched. It will import fine and the terrain, surfaces and roads are
-> unaffected — but that area will be black on the ground.
+> `satellite_map.png` is solid black — no imagery source covered that part of
+> the area. It will import fine and the terrain, surfaces and roads are
+> unaffected, but that area will be black on the ground.
 >
-> To fix it, regenerate the map: the gap comes from a failed upstream request,
-> so a fresh run usually succeeds. Otherwise, import as-is and patch the area
-> by hand in the Terrain Tool.
+> **Regenerating will not fix it** — the gap is in the source data, so a
+> fresh run produces the same result. Either shift or shrink your selection so
+> it avoids the uncovered area, or import as-is and patch it by hand in the
+> Terrain Tool.
 """
 
     @property

@@ -23,7 +23,7 @@ from config.terrain import (
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.17.2"
+APP_VERSION = "1.17.3"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
