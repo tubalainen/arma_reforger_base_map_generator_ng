@@ -45,6 +45,24 @@ logger = logging.getLogger(__name__)
 # pre-#197, a 4096x2048-face terrain got a square texture, a 100% error.
 SATELLITE_ASPECT_TOLERANCE = 0.02
 
+# Maximum fraction of satellite_map.png that may be pure nodata (all three
+# bands exactly 0) before it counts as a defect.
+#
+# Every tiled imagery source composites into a zero-filled buffer, so a fetch
+# that loses a tile leaves a solid black block rather than failing. SE_59N_14E
+# shipped with 7% of its orthophoto black in one corner and passed every check
+# we had, because the contract only ever looked at dimensions and mode.
+#
+# Measured on that same real orthophoto, the natural rate of all-three-bands-
+# zero pixels is *exactly zero* outside the hole — even deep lake water bottoms
+# out at (0, 16, 12) — so this is an unambiguous signal, and the threshold only
+# needs to leave room for the odd compression artifact.
+#
+# This backstops the per-source coverage gates (e.g. STAC Bild's
+# MAX_NODATA_FRACTION): it catches a void from any source, including one
+# introduced after the fetch by reprojection or resampling.
+SATELLITE_MAX_NODATA_FRACTION = 0.005
+
 
 def parse_asc_header_dims(path: Path) -> tuple[int, int]:
     """Return ``(ncols, nrows)`` from an ESRI ASCII grid header."""
@@ -173,6 +191,24 @@ def validate_and_harden_rasters(
                 # (issue #197). A mismatch means the imagery is squashed or
                 # stretched on the ground, which is not fatal (Workbench
                 # resamples) but is always an upstream defect.
+                # Solid nodata: a lost tile in any tiled fetch composites as
+                # pure black rather than failing, so check the pixels, not
+                # just the header (issue found on SE_59N_14E).
+                try:
+                    import numpy as np
+
+                    arr = np.asarray(img.convert("RGB"))
+                    void = float(np.all(arr == 0, axis=2).mean())
+                    entry["nodata_fraction"] = round(void, 6)
+                    if void > SATELLITE_MAX_NODATA_FRACTION:
+                        _log_issue(
+                            f"satellite_map.png is {void:.1%} pure black "
+                            f"(limit {SATELLITE_MAX_NODATA_FRACTION:.1%}) — "
+                            f"an imagery tile is missing, leaving a hole"
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Could not measure satellite nodata: %s", exc)
+
                 if size[1] > 0 and faces_z > 0:
                     want = faces_x / faces_z
                     got = size[0] / size[1]
@@ -198,10 +234,18 @@ def validate_and_harden_rasters(
     for fix in fixes:
         logger.info("Raster contract: auto-fixed %s", fix)
     if issues:
+        # Dimension mismatches are the documented crash trigger; a nodata hole
+        # or a wrong aspect ratio is a visual defect, not a crash. Don't cry
+        # crash for every issue — an inaccurate warning gets ignored.
+        dimension_issue = any(
+            "expected" in str(i) or "aspect" in str(i) for i in issues
+        )
         logger.error(
-            "Raster contract FAILED with %d issue(s) — the generated project "
-            "may crash the World Editor on import",
+            "Raster contract FAILED with %d issue(s)%s",
             len(issues),
+            " — the generated project may crash the World Editor on import"
+            if dimension_issue
+            else " — the generated rasters have visible defects",
         )
     else:
         logger.info(

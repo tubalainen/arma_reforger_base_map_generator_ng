@@ -76,6 +76,33 @@ def _default_read_workers() -> int:
     return min(4, os.cpu_count() or 2)
 
 
+# Maximum fraction of the merged mosaic that may be nodata (all three bands
+# exactly 0) before the orthophoto is rejected and the caller falls back.
+#
+# Counting *failed tiles* is not a proxy for coverage, which is how a 7% black
+# corner shipped in SE_59N_14E: two tiles out of many failed, comfortably under
+# the one-third tile budget, but they were edge tiles with no overlapping older
+# tile to fill them in, so "newer-first overlap usually fills them in" did not
+# hold. Measure the hole, not the attempts.
+#
+# 0.5% is generous. Measured on a real Lantmäteriet orthophoto, the natural
+# rate of all-three-bands-zero pixels is *exactly zero* — even deep lake water
+# bottoms out at (0, 16, 12), never (0, 0, 0) — so pure black is an unambiguous
+# nodata signal. 0.5% of a 6617x8192 image is still a ~520 px block, roughly a
+# 430 m square of solid black in game: visible, and worth losing orthophoto
+# resolution to avoid.
+MAX_NODATA_FRACTION = 0.005
+
+
+def nodata_fraction(merged) -> float:
+    """Fraction of an ``(bands, H, W)`` uint8 mosaic that is pure nodata."""
+    import numpy as np
+
+    if merged is None or merged.size == 0:
+        return 1.0
+    return float(np.all(merged == 0, axis=0).mean())
+
+
 def _serial_retry_attempts() -> int:
     """Phase 2 serial retry budget per failed tile.
 
@@ -776,6 +803,31 @@ def _cog_merge_rgb(
             f"would be unacceptably degraded; aborting STAC Bild"
         )
         return None, None
+
+    # Coverage gate. The tile-count check above is about *attempts*; this is
+    # about the result. A handful of failed tiles is usually harmless because
+    # an overlapping older tile fills the gap — but an edge tile has nothing
+    # behind it, so even one failure can leave a large visible hole. Check the
+    # mosaic itself and let the caller fall back to WMS / Sentinel-2, which is
+    # what the "every service failure is non-fatal, return None" rule wants.
+    void = nodata_fraction(merged)
+    if void > MAX_NODATA_FRACTION:
+        logger.error(
+            f"STAC Bild: merged orthophoto is {void:.1%} nodata "
+            f"(limit {MAX_NODATA_FRACTION:.1%}, {permanent_failures} tile(s) "
+            f"permanently failed) — falling back to a lower-resolution source "
+            f"rather than shipping an image with holes in it"
+        )
+        if job:
+            job.add_log(
+                f"Lantmäteriet orthophoto came back {void:.1%} empty — "
+                f"falling back to another imagery source",
+                "warning",
+            )
+        return None, None
+
+    if void:
+        logger.info(f"STAC Bild: mosaic is {void:.3%} nodata (within limit)")
 
     return merged, out_transform
 

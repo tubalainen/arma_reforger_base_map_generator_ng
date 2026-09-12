@@ -38,7 +38,10 @@ def _good_project(tmp_path):
     _write_asc(tmp_path / "heightmap.asc", FACES + 1, FACES + 1)
     _write_mask(tmp_path / "surface_grass.png", FACES, FACES)
     _write_mask(tmp_path / "surface_asphalt.png", FACES, FACES)
-    Image.new("RGB", (1024, 1024)).save(str(tmp_path / "satellite_map.png"))
+    # Non-black: a satellite that is all (0,0,0) is 100% nodata, which is a
+    # real defect the contract now reports (issue found on SE_59N_14E).
+    Image.new("RGB", (1024, 1024), (90, 110, 70)).save(
+        str(tmp_path / "satellite_map.png"))
 
 
 class TestParseAscHeader:
@@ -93,7 +96,8 @@ class TestEncodingHardening:
 
     def test_rgba_satellite_is_flattened_to_rgb(self, tmp_path):
         _good_project(tmp_path)
-        Image.new("RGBA", (1024, 1024)).save(str(tmp_path / "satellite_map.png"))
+        Image.new("RGBA", (1024, 1024), (90, 110, 70, 255)).save(
+            str(tmp_path / "satellite_map.png"))
         report = validate_and_harden_rasters(tmp_path, FACES, FACES)
         with Image.open(tmp_path / "satellite_map.png") as img:
             assert img.mode == "RGB"
