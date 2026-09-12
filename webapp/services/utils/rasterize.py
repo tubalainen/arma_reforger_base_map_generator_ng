@@ -96,17 +96,19 @@ def rasterize_features_to_mask(
                 )
 
         elif geom_type == "LineString" and coords:
-            pixels = _coords_to_pixels(coords, west, north, lng_range, lat_range, width, height)
-            if len(pixels) >= 2:
-                line_width = max(1, buffer_px * 2) if buffer_px > 0 else 1
-                line_draw.line(pixels, fill=255, width=line_width)
+            line_width = max(1, buffer_px * 2) if buffer_px > 0 else 1
+            _draw_clipped_line(
+                line_draw, coords, west, north, lng_range, lat_range,
+                width, height, line_width,
+            )
 
         elif geom_type == "MultiLineString" and coords:
+            line_width = max(1, buffer_px * 2) if buffer_px > 0 else 1
             for line_coords in coords:
-                pixels = _coords_to_pixels(line_coords, west, north, lng_range, lat_range, width, height)
-                if len(pixels) >= 2:
-                    line_width = max(1, buffer_px * 2) if buffer_px > 0 else 1
-                    line_draw.line(pixels, fill=255, width=line_width)
+                _draw_clipped_line(
+                    line_draw, line_coords, west, north, lng_range, lat_range,
+                    width, height, line_width,
+                )
 
     # Merge polygon and line layers (per-pixel max)
     mask = np.array(ImageChops.lighter(polygon_img, line_img))
@@ -176,14 +178,16 @@ def rasterize_lines_per_feature_width(
         line_width = max(1, half * 2 + 1)
 
         if geom_type == "LineString":
-            pixels = _coords_to_pixels(coords, west, north, lng_range, lat_range, width, height)
-            if len(pixels) >= 2:
-                line_draw.line(pixels, fill=255, width=line_width)
+            _draw_clipped_line(
+                line_draw, coords, west, north, lng_range, lat_range,
+                width, height, line_width,
+            )
         elif geom_type == "MultiLineString":
             for line_coords in coords:
-                pixels = _coords_to_pixels(line_coords, west, north, lng_range, lat_range, width, height)
-                if len(pixels) >= 2:
-                    line_draw.line(pixels, fill=255, width=line_width)
+                _draw_clipped_line(
+                    line_draw, line_coords, west, north, lng_range, lat_range,
+                    width, height, line_width,
+                )
 
     return (np.array(line_img) > 0).astype(np.uint8)
 
@@ -216,6 +220,132 @@ def _composite_polygon_with_holes(
             fill = 255 if i == 0 else 0
             feature_draw.polygon(pixels, fill=fill)
     return ImageChops.lighter(accumulator, feature_img)
+
+
+def _coords_to_pixels_unclamped(
+    coords: list,
+    west: float,
+    north: float,
+    lng_range: float,
+    lat_range: float,
+    width: int,
+    height: int,
+) -> list[tuple[float, float]]:
+    """Geographic coordinates to *unclamped* float pixel coordinates.
+
+    Companion to ``_coords_to_pixels``; keeps vertices outside the raster where
+    they actually are, so ``_clip_polyline`` can cut the line at the map border
+    rather than folding it onto the border. See ``_clip_polyline``.
+    """
+    pixels = []
+    for coord in coords:
+        if isinstance(coord, (list, tuple)) and len(coord) >= 2:
+            lng, lat = float(coord[0]), float(coord[1])
+            pixels.append((
+                (lng - west) / lng_range * width,
+                (north - lat) / lat_range * height,
+            ))
+    return pixels
+
+
+def _clip_segment(
+    x0: float, y0: float, x1: float, y1: float,
+    xmax: float, ymax: float,
+) -> tuple[float, float, float, float] | None:
+    """Liang-Barsky clip of one segment to the box [0, xmax] x [0, ymax].
+
+    Returns the clipped endpoints, or None when the segment misses the box.
+    """
+    dx = x1 - x0
+    dy = y1 - y0
+    t0, t1 = 0.0, 1.0
+    for pp, qq in ((-dx, x0), (dx, xmax - x0), (-dy, y0), (dy, ymax - y0)):
+        if pp == 0:
+            if qq < 0:
+                return None          # parallel to this edge and outside it
+            continue
+        t = qq / pp
+        if pp < 0:
+            if t > t1:
+                return None
+            if t > t0:
+                t0 = t
+        else:
+            if t < t0:
+                return None
+            if t < t1:
+                t1 = t
+    return (x0 + t0 * dx, y0 + t0 * dy, x0 + t1 * dx, y0 + t1 * dy)
+
+
+def _clip_polyline(
+    pixels: list[tuple[float, float]],
+    width: int,
+    height: int,
+) -> list[list[tuple[int, int]]]:
+    """Split a polyline into the pieces that lie inside the raster.
+
+    ``_coords_to_pixels`` **clamps** out-of-range vertices onto the raster
+    edge. For a filled polygon that is harmless, but for a line it is not: a
+    road that leaves the map and runs two kilometres past it has every outside
+    vertex collapsed onto the border, and ImageDraw then joins them into a
+    solid road drawn *along* the map edge. On a generated Swedish map that
+    produced a single contiguous 1147 px (2.3 km) run of full-value gravel
+    across the top edge of ``surface_gravel.png``, and similar rings on the
+    other three edges of every map (found while verifying the #202 fix).
+
+    Clipping instead of clamping drops the outside portion entirely and keeps
+    the crossing point exact, so a road that merely passes through the corner
+    of the map paints only the part that is really there.
+
+    Returns a list of polylines, each with >= 2 integer points.
+    """
+    if len(pixels) < 2:
+        return []
+    xmax, ymax = float(width - 1), float(height - 1)
+    runs: list[list[tuple[int, int]]] = []
+    current: list[tuple[int, int]] = []
+    for (x0, y0), (x1, y1) in zip(pixels, pixels[1:]):
+        clipped = _clip_segment(x0, y0, x1, y1, xmax, ymax)
+        if clipped is None:
+            if len(current) >= 2:
+                runs.append(current)
+            current = []
+            continue
+        cx0, cy0, cx1, cy1 = clipped
+        a = (int(round(cx0)), int(round(cy0)))
+        b = (int(round(cx1)), int(round(cy1)))
+        if not current:
+            current = [a, b]
+        elif current[-1] == a:
+            current.append(b)
+        else:
+            # The previous segment was cut short: this one re-enters elsewhere.
+            if len(current) >= 2:
+                runs.append(current)
+            current = [a, b]
+    if len(current) >= 2:
+        runs.append(current)
+    return runs
+
+
+def _draw_clipped_line(
+    draw,
+    coords: list,
+    west: float,
+    north: float,
+    lng_range: float,
+    lat_range: float,
+    width: int,
+    height: int,
+    line_width: int,
+) -> None:
+    """Project, clip to the raster, and draw a LineString's inside portions."""
+    pixels = _coords_to_pixels_unclamped(
+        coords, west, north, lng_range, lat_range, width, height
+    )
+    for run in _clip_polyline(pixels, width, height):
+        draw.line(run, fill=255, width=line_width)
 
 
 def _coords_to_pixels(
