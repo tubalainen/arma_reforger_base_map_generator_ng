@@ -837,6 +837,34 @@ def _write_zip_archive(
     return raw_bytes
 
 
+def derive_terrain_grid(
+    width_m: float, height_m: float, cell_size: float,
+) -> tuple[int, int]:
+    """
+    Derive the terrain grid size (faces per axis) from a selection in metres.
+
+    Each axis is derived independently — Enfusion supports non-square terrain
+    (issue #197) — and snapped to a whole number of 128-face tiles.
+
+    **The metre-to-face division is deliberately not rounded here.** Rounding
+    to whole faces first and to whole tiles inside ``snap_to_tile_multiple()``
+    second is a double rounding, and the browser's ``deriveAxis()`` does it in
+    one step: a 383 m axis is 191.5 faces, which pre-rounds to 192 = exactly
+    1.5 tiles and then up to 2, where the single step gives 1.496 tiles and
+    therefore 1. The browser snaps the drawn box to its own answer, so any
+    divergence ships the user a terrain they did not draw.
+
+    Returns:
+        ``(faces_x, faces_z)``, each a multiple of ``TERRAIN_TILE_FACES``.
+    """
+    from config.enfusion import snap_to_tile_multiple
+
+    return (
+        snap_to_tile_multiple(width_m / cell_size),
+        snap_to_tile_multiple(height_m / cell_size),
+    )
+
+
 async def run_generation(job: MapGenerationJob):
     """
     Execute the full map generation pipeline.
@@ -895,15 +923,13 @@ async def run_generation(job: MapGenerationJob):
         # size, snapped to a valid tile multiple (×128). The heightmap PNG is
         # faces + 1 pixels. Enfusion supports non-square terrain, so each axis
         # is derived independently from the selected bbox.
-        from config.enfusion import snap_to_tile_multiple
         from config.terrain import DEFAULT_GRID_CELL_SIZE
         from services.utils.geo import estimate_bbox_dimensions_m
 
         cell_size = DEFAULT_GRID_CELL_SIZE
         width_m, height_m = estimate_bbox_dimensions_m(bbox)
 
-        faces_x = snap_to_tile_multiple(round(width_m / cell_size))
-        faces_z = snap_to_tile_multiple(round(height_m / cell_size))
+        faces_x, faces_z = derive_terrain_grid(width_m, height_m, cell_size)
         target_size_x = faces_x + 1
         target_size_z = faces_z + 1
 

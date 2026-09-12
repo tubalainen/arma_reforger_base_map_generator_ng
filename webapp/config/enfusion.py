@@ -8,6 +8,8 @@ All paths and GUIDs are verified against the official Bohemia Interactive
 Community Wiki (community.bistudio.com) as of 2025-02-09.
 """
 
+import math
+
 from config.terrain import (
     TERRAIN_TILE_FACES,
     MAX_TERRAIN_GRID_SIZE,
@@ -21,7 +23,7 @@ from config.terrain import (
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.17.0"
+APP_VERSION = "1.17.1"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
@@ -436,23 +438,43 @@ MIN_STRONG_SURFACE_PIXELS = 512
 STRONG_SURFACE_INTENSITY = 128
 
 
-def snap_to_tile_multiple(face_count: int) -> int:
+def snap_to_tile_multiple(face_count: float) -> int:
     """
     Snap a terrain grid size (faces per axis) to a valid Enfusion value.
 
     The "New Terrain" dialog requires the terrain grid size to be a multiple of
-    the tile size (``TERRAIN_TILE_FACES`` = 128) — not a power of two. The
-    requested value is rounded to the nearest tile multiple and clamped to
+    the tile size (``TERRAIN_TILE_FACES`` = 128) — not a power of two. Its own
+    size label spells the rule out: "Terrain grid size (multiple of tile size =
+    block size %1 x %2 = %3)", i.e. 32 faces per block x 4 blocks per tile.
+    The requested value is rounded to the nearest tile multiple and clamped to
     ``[TERRAIN_TILE_FACES, MAX_TERRAIN_GRID_SIZE]``. The imported heightmap PNG
     is ``face_count + 1`` pixels per axis.
 
+    **Rounds halves up, deliberately.** Python's built-in ``round()`` is
+    banker's rounding: it sends an exact half to the *even* tile count, so 2.5
+    tiles rounded down to 2 while 3.5 rounded up to 4. JavaScript's
+    ``Math.round()`` rounds halves up unconditionally, so the browser and the
+    pipeline disagreed on every odd half-tile — a 640 m axis (2.5 tiles) drew
+    as 768 m on the map and generated as 512 m. The user saw one terrain and
+    got another, silently. Reported by OrcVole on issue #197.
+
+    ``deriveAxis()`` in ``static/js/app.js`` must stay in step with this.
+
+    **Pass the raw ``metres / cell_size``, not a pre-rounded face count.**
+    Rounding to whole faces first and to whole tiles second is a double
+    rounding, and it does not agree with the browser's single step: a 383 m
+    axis is 191.5 faces, which pre-rounds to 192 = exactly 1.5 tiles and then
+    up to 2, where one step gives 1.496 tiles and therefore 1. That accounted
+    for 127 of the frontend/backend disagreements between 100 m and 40 km.
+
     Args:
-        face_count: Desired number of terrain faces per axis.
+        face_count: Desired number of terrain faces per axis. May be
+            fractional — that is the point.
 
     Returns:
         A valid terrain grid size — a multiple of 128.
     """
-    tiles = max(1, round(face_count / TERRAIN_TILE_FACES))
+    tiles = max(1, math.floor(face_count / TERRAIN_TILE_FACES + 0.5))
     snapped = tiles * TERRAIN_TILE_FACES
     return max(TERRAIN_TILE_FACES, min(snapped, MAX_TERRAIN_GRID_SIZE))
 

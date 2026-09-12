@@ -111,13 +111,23 @@ class SetupGuideGenerator:
 
     @property
     def shape_note(self) -> str:
-        """One-line reminder when the terrain is not square."""
+        """One-line reminder when the terrain is not square.
+
+        The dialog has separate width and height inputs plus a sync button,
+        tooltip *"Synchronize width and height to create square terrain"*,
+        which is **on** by default. Square is the opt-in toggle, not a rule.
+        The tooltip is quoted verbatim rather than described, because naming a
+        Workbench control from memory is how the guide starts lying — see
+        docs/ENFUSION_CONTRACT.md. (Strings confirmed by OrcVole against
+        Tools 1.8.0.13, issue #197.)
+        """
         if self.is_square:
             return ""
         return (
-            " — **rectangular terrain**: the New Terrain dialog ties the "
-            "two grid-size fields together by default, so unlink them (the "
-            "`=` control between the fields) before entering the second value"
+            " — **rectangular terrain**: the width and height inputs are "
+            "synchronised by default. Turn off the sync button (tooltip: "
+            '*"Synchronize width and height to create square terrain"*) '
+            "before entering the second value"
         )
 
     def generate(self, output_dir: Path) -> Path:
@@ -374,7 +384,7 @@ If anything in this section is unclear, the step-by-step phases below have the l
 
 1. **Copy** `{self.map_name}/` from the ZIP → `{DEFAULT_ADDON_DIR}\\`
 2. **Add project** in Workbench launcher → `{self.map_name}\\addon.gproj` → open `{self.map_name}.ent`
-3. **Create terrain** (right-click **Terrain** in hierarchy): grid `{self.face_x}×{self.face_z}`{'' if self.is_square else ' (unlink the two grid-size fields — this terrain is rectangular)'}, cell `{cell_size}m`, height scale `{height_scale:.6g}` (default)
+3. **Create terrain** (right-click **Terrain** in hierarchy): grid `{self.face_x}×{self.face_z}`{'' if self.is_square else ' (turn off the width/height sync button first — this terrain is rectangular)'}, cell `{cell_size}m`, height scale `{height_scale:.6g}` (default)
 4. **Import heightmap**: `Sourcefiles/heightmap.asc` — ✓ Invert Z axis, ✗ Resample heights → **Generate normal map** → **File > Save World** → reopen
 5. **Paint surfaces** (Terrain Tool → Paint tab): for each surface, right-click the `.emat` in the Resource Browser → **Fill surface layer** → right-click surface in panel → **Priority Surface Mask Import** → pick `Sourcefiles/surface_<name>.png`
 6. **Import satellite**: `Sourcefiles/satellite_map.png` — turn **off** Linear Color Space → **File > Save World** → reopen
@@ -451,7 +461,7 @@ You should see this structure inside:
 | Parameter | Value |
 |-----------|-------|
 | **Name** | **{self.map_name}** |
-| **Terrain grid size** | X **{face_x}**, Z **{face_z}**{' (the dialog ties the two fields together by default and that is what you want here)' if self.is_square else ' — **unlink the two fields first** (the `=` control between them); they are tied together by default'} |
+| **Terrain grid size** | X **{face_x}**, Z **{face_z}**{' (width and height are synchronised by default, which is what you want here)' if self.is_square else ' — **turn off the width/height sync button first** (tooltip: "Synchronize width and height to create square terrain"); it is on by default'} |
 | **Blocks per tile** | **4** (default) |
 | **Grid cell size (meters)** | **{cell_size}** |
 | **Height scale (meters)** | **{height_scale:.6g}** {'(leave at the **default** — do not change it)' if is_default_scale else '(this map needs a larger-than-default scale — see note below)'} |

@@ -183,24 +183,100 @@ class TestSetupGuideStatesBothAxes:
         assert f"Terrain Grid Size Z:    {FACES_Z}" in guide
         assert f"Terrain Grid Size X:    {FACES_X}" in guide
 
-    def test_rectangular_guide_warns_the_dialog_fields_are_tied(self):
-        """The New Terrain dialog ties the two grid-size fields together by
-        default; a user who does not unlink them gets a square terrain and a
-        heightmap that will not import."""
+    def test_rectangular_guide_warns_about_the_sync_button(self):
+        """The dialog's width/height sync button is ON by default; a user who
+        leaves it on gets a square terrain and a heightmap that will not
+        import.
+
+        The tooltip is quoted verbatim (confirmed against Tools 1.8.0.13 on
+        issue #197) rather than described from memory — the guide first
+        shipped with an invented "`=` control between the fields", which is
+        exactly the failure mode docs/ENFUSION_CONTRACT.md warns about. Both
+        the expert section and the terrain-creation phase must carry it, so
+        count occurrences rather than just testing for presence.
+        """
         guide = self._guide("10241x6273", "20480 x 12544 m")
-        assert "unlink" in guide.lower()
+        tooltip = "Synchronize width and height to create square terrain"
+        assert guide.count(tooltip) >= 2, (
+            f"tooltip quoted {guide.count(tooltip)}x; both the expert section "
+            "and Phase 2 must carry it"
+        )
+        assert "`=` control" not in guide, "the invented control name is back"
 
     def test_square_guide_is_unchanged_in_substance(self):
         guide = self._guide("2049x2049", "4096 x 4096 m")
         assert "Terrain Grid Size X:    2048" in guide
         assert "Terrain Grid Size Z:    2048" in guide
-        assert "unlink" not in guide.lower(), (
-            "a square terrain must not tell the user to unlink anything"
+        assert "turn off the width/height sync button" not in guide.lower(), (
+            "a square terrain must not tell the user to unsync anything"
         )
 
 
 # ---------------------------------------------------------------------------
-# 4. Frontend per-axis snapping and the per-axis maximum
+# 4. The pipeline's own sizing must match what the browser drew
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineGridMatchesTheBrowser:
+    """map_generator derives the grid the pipeline actually builds. The browser
+    snaps the drawn box to *its* answer, so if the two disagree the user is
+    shown one terrain and shipped another (issue #197, reported by OrcVole)."""
+
+    def test_axes_are_derived_independently(self):
+        from services.map_generator import derive_terrain_grid
+
+        assert derive_terrain_grid(20500, 12500, 2.0) == (FACES_X, FACES_Z)
+
+    def test_the_metre_to_face_division_is_not_pre_rounded(self):
+        """383 m is 191.5 faces. Pre-rounding gives 192 = exactly 1.5 tiles,
+        which rounds up to 2 tiles; one step gives 1.496 tiles -> 1."""
+        from services.map_generator import derive_terrain_grid
+
+        assert derive_terrain_grid(383, 383, 2.0) == (128, 128)
+
+    def test_exact_half_tiles_round_up_not_to_even(self):
+        from services.map_generator import derive_terrain_grid
+
+        # 640 m = 2.5 tiles; banker's rounding sent this DOWN to 512 m.
+        assert derive_terrain_grid(640, 640, 2.0) == (384, 384)
+
+    @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+    def test_agrees_with_the_real_browser_code_across_the_range(self):
+        """Run the shipped deriveAxis() in node over 100 m - 40 km and compare
+        against the pipeline. This runs the actual app.js source, not a port,
+        so the two cannot drift apart unnoticed."""
+        from services.map_generator import derive_terrain_grid
+
+        harness = _extract_js_sizing() + """
+const out = [];
+for (let m = 100; m <= 40000; m++) out.push(deriveAxis(m).N);
+console.log(JSON.stringify(out));
+"""
+        tmp = Path(tempfile.mkdtemp()) / "sweep.mjs"
+        tmp.write_text(harness, encoding="utf-8")
+        proc = subprocess.run(
+            ["node", str(tmp)], capture_output=True, text=True, timeout=60
+        )
+        assert proc.returncode == 0, proc.stderr
+        js = json.loads(proc.stdout)
+
+        bad = [
+            m
+            for i, m in enumerate(range(100, 40_001))
+            if derive_terrain_grid(m, m, 2.0)[0] != js[i]
+        ]
+        assert not bad, (
+            f"{len(bad)} sizes disagree with the browser, e.g. "
+            + ", ".join(
+                f"{m} m -> pipeline {derive_terrain_grid(m, m, 2.0)[0]} vs "
+                f"browser {js[m - 100]}"
+                for m in bad[:3]
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# 5. Frontend per-axis snapping and the per-axis maximum
 # ---------------------------------------------------------------------------
 
 
