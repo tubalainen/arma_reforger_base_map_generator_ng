@@ -4,7 +4,17 @@ Tests for the Phase 2 buildings layer (audit task A2 + L12).
 The buildings layer emits one entity per OSM building as a positioned
 prefab instance:
 
-    ${guid}path/to/Building_*.et { coords X Y Z; angles 0 yaw 0 }
+    SCR_DestructibleBuildingEntity : "{guid}path/to/Building_*.et" {
+        coords X Y Z
+        angles 0 yaw 0
+    }
+
+Until v1.15.3 this was ``${<addon GUID>}<path>`` with no entity class. That
+reference does not resolve in a ``.layer``: Workbench loads the world, creates
+no entity, and logs nothing, so every building of every generated map was
+silently dropped (issue #198 — a 7.9 km test lost all 5,991). The GUID must be
+the ``.et`` file's own resource GUID, from
+``config.buildings.BUILDING_PREFAB_GUIDS``.
 
 The ``angles`` line is omitted for cardinal-aligned buildings (yaw ≈ 0)
 to match shipped community convention.
@@ -22,6 +32,7 @@ road width + 1.5 m safety) are dropped (L12).
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -90,6 +101,19 @@ def _building(idx, lon, lat, building_type="house",
             ]],
         },
     }
+
+
+# The layer's own header comment documents the `<Class> : "{GUID}<path>"`
+# form, so a plain substring search for `: "{` also hits the documentation.
+# Match emitted entity lines only: a class name at the start of a line.
+_ENTITY_RE = re.compile(
+    r'^(\w+) : "\{([0-9A-F]{16})\}([^"]+)"', re.MULTILINE
+)
+
+
+def _entity_refs(layer_text):
+    """Every emitted prefab reference as (entity_class, guid, path)."""
+    return _ENTITY_RE.findall(layer_text)
 
 
 def _asphalt_road(idx, lon_start, lat_start, lon_end, lat_end, width_m=6):
@@ -248,22 +272,56 @@ class TestBuildingsLayerEmission:
         assert any(
             "KNOWN_BUILDING_PREFABS" in r.message for r in caplog.records
         ), "Expected a catalog-divergence warning."
+        # And it must not have fallen back to the addon GUID.
+        assert _entity_refs(out) == []
 
     def test_validated_building_emits_prefab_instance(self, make_generator):
-        from config.enfusion import ARMA_REFORGER_GUID
-        b = _building(0, lon=1.0, lat=1.0, building_type="house",
-                      prefab="Prefabs/Structures/Civilian/Test_House.et")
+        """issue #198: the reference must be the typed-inheritance form with
+        the prefab's **own** resource GUID, byte-for-byte the shape Workbench
+        writes when you place the same prefab by hand."""
+        from config.buildings import (
+            BUILDING_PREFAB_GUIDS,
+            KNOWN_BUILDING_PREFABS,
+        )
+
+        path = KNOWN_BUILDING_PREFABS["Building_House"]
+        b = _building(0, lon=1.0, lat=1.0, building_type="house", prefab=path)
         gen = make_generator(buildings=[b])
         out = gen._generate_buildings_layer()
 
         expected_ref = (
-            f"${{{ARMA_REFORGER_GUID}}}"
-            "Prefabs/Structures/Civilian/Test_House.et"
+            f'SCR_DestructibleBuildingEntity : '
+            f'"{{{BUILDING_PREFAB_GUIDS[path]}}}{path}"'
         )
-        assert expected_ref in out
+        assert expected_ref in out, (
+            f"expected {expected_ref!r} in:\n{out}"
+        )
         # Prefab-instance mode does NOT emit a SplineShapeEntity at all
         # for this building (no Building_* spline header).
         assert "SplineShapeEntity Building_" not in out
+
+    def test_prefab_path_without_a_verified_guid_is_skipped(
+        self, make_generator, caplog
+    ):
+        """A catalogue path with no BUILDING_PREFAB_GUIDS entry must be
+        skipped, never emitted with the addon GUID. That substitution is
+        issue #198 and Workbench swallows it without a log line."""
+        import logging
+
+        gen = make_generator(buildings=[
+            _building(0, lon=1.0, lat=1.0, building_type="house",
+                      prefab="Prefabs/Structures/Civilian/Not_Catalogued.et",
+                      name="NoGuid"),
+        ])
+        with caplog.at_level(logging.WARNING):
+            out = gen._generate_buildings_layer()
+
+        assert "Not_Catalogued.et" not in out
+        assert "NoGuid" not in out
+        assert _entity_refs(out) == []
+        assert any(
+            "BUILDING_PREFAB_GUIDS" in r.message for r in caplog.records
+        ), "expected a warning naming the GUID table"
 
     def test_rotated_building_emits_angles_line(self, make_generator):
         """Y-axis rotation from _estimate_building_rotation flows through to
@@ -297,21 +355,122 @@ class TestBuildingsLayerEmission:
             _building(0, lon=10.0, lat=10.0, building_type="house"),
         ])
         out = gen._generate_buildings_layer()
-        # No prefab reference was emitted for the out-of-bounds building.
-        from config.enfusion import ARMA_REFORGER_GUID
-        assert f"${{{ARMA_REFORGER_GUID}}}" not in out
+        # No prefab reference of any spelling was emitted for the
+        # out-of-bounds building.
+        assert _entity_refs(out) == []
+        assert "${" not in out
 
     def test_each_building_gets_one_entity(self, make_generator):
-        from config.enfusion import ARMA_REFORGER_GUID
         gen = make_generator(buildings=[
             _building(0, lon=0.5, lat=0.5),
             _building(1, lon=1.0, lat=1.0),
             _building(2, lon=1.5, lat=1.5),
         ])
         out = gen._generate_buildings_layer()
-        # Three positioned prefab instances. Count by the GUID reference
-        # since each building emits one ${guid}path { ... } block.
-        assert out.count(f"${{{ARMA_REFORGER_GUID}}}") == 3
+        # Three positioned prefab instances, one
+        # `<Class> : "{guid}<path>" { … }` block each.
+        assert len(_entity_refs(out)) == 3
+
+
+# ---------------------------------------------------------------------------
+# issue #198 — per-file GUID + entity class, on a POPULATED layer
+# ---------------------------------------------------------------------------
+
+class TestBuildingPrefabGuidContract:
+    """The equivalent guard in test_atlas2_alignment.py walks every
+    ``_generate_*_layer`` method, but it builds a generator with no feature
+    data, so the buildings layer there returns only its header comment. That
+    is precisely why #198 survived: the guard existed and the layer it needed
+    to check was empty. These tests run against a populated layer.
+    """
+
+    def test_no_addon_guid_in_a_populated_buildings_layer(self, make_generator):
+        from config.enfusion import ARMA_REFORGER_GUID
+
+        gen = make_generator(buildings=[
+            _building(0, lon=0.5, lat=0.5, building_type="house"),
+            _building(1, lon=1.0, lat=1.0, building_type="house",
+                      rotation_deg=33.0),
+        ])
+        out = gen._generate_buildings_layer()
+
+        # Sanity: the layer really did emit entities, so the assertions below
+        # are testing something.
+        assert len(_entity_refs(out)) == 2
+
+        for bad in (f"${{{ARMA_REFORGER_GUID}}}", f"{{{ARMA_REFORGER_GUID}}}"):
+            assert bad not in out, (
+                f"issue #198 regression: {bad!r} used as a prefab reference"
+            )
+
+    def test_every_emitted_entity_has_a_class_and_per_file_guid(
+        self, make_generator
+    ):
+        """Each emitted line must be ``<Class> : "{GUID}<path>"`` — the
+        reporter on #198 confirmed a bare or quoted reference without a class
+        fails even when the GUID is right."""
+        from config.buildings import BUILDING_PREFAB_GUIDS
+
+        gen = make_generator(buildings=[
+            _building(0, lon=0.5, lat=0.5, building_type="house"),
+            _building(1, lon=1.0, lat=1.0, building_type="church"),
+        ])
+        out = gen._generate_buildings_layer()
+
+        refs = _entity_refs(out)
+        assert len(refs) == 2, f"expected 2 entity lines, got {refs!r} in {out}"
+        for cls, guid, path in refs:
+            assert cls == "SCR_DestructibleBuildingEntity", cls
+            assert BUILDING_PREFAB_GUIDS.get(path) == guid, (
+                f"{path} emitted GUID {guid}, catalogue says "
+                f"{BUILDING_PREFAB_GUIDS.get(path)}"
+            )
+
+    def test_catalogue_tables_cover_every_path(self):
+        """Every catalogued path needs a GUID and a class. config.buildings
+        also raises at import time on this, but a named test says why."""
+        from config.buildings import (
+            BUILDING_PREFAB_CLASS,
+            BUILDING_PREFAB_GUIDS,
+            KNOWN_BUILDING_PREFABS,
+        )
+
+        for category, path in KNOWN_BUILDING_PREFABS.items():
+            assert path in BUILDING_PREFAB_GUIDS, (
+                f"{category} -> {path} has no resource GUID; emitting it "
+                f"would reproduce #198"
+            )
+            assert path in BUILDING_PREFAB_CLASS, (
+                f"{category} -> {path} has no entity class"
+            )
+
+    def test_guids_are_16_hex_uppercase_and_not_the_addon_guid(self):
+        import re
+
+        from config.buildings import BUILDING_PREFAB_GUIDS
+        from config.enfusion import ARMA_REFORGER_GUID
+
+        for path, guid in BUILDING_PREFAB_GUIDS.items():
+            assert re.fullmatch(r"[0-9A-F]{16}", guid), (path, guid)
+            assert guid != ARMA_REFORGER_GUID, (
+                f"{path} uses the addon GUID — issue #198"
+            )
+
+    def test_no_catalogue_path_points_at_the_prefablibrary_tree(self):
+        """The parallel ``PrefabLibrary/...`` resources are different files
+        with different GUIDs (House_Village_E_1I01 is EDBC0E94793BA9F1 under
+        ``Prefabs/Structures/`` but BB32FDB0A276A95D under
+        ``PrefabLibrary/``). Mixing the two trees is how a GUID ends up
+        wrong while looking plausible."""
+        from config.buildings import (
+            BUILDING_PREFAB_GUIDS,
+            KNOWN_BUILDING_PREFABS,
+        )
+
+        for path in set(KNOWN_BUILDING_PREFABS.values()) | set(
+            BUILDING_PREFAB_GUIDS
+        ):
+            assert path.startswith("Prefabs/Structures/"), path
 
 
 # ---------------------------------------------------------------------------

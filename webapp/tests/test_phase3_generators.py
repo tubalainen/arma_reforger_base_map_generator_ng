@@ -93,19 +93,41 @@ class TestForestGeneratorChild:
         assert "SplineShapeEntity Forest_Pine_" in out
         assert f"${{{_ARMA_GUID}}}" not in out
 
-    def test_populated_catalog_emits_child_prefab(self):
-        """When catalog has an entry, the child block appears in the spline."""
+    def test_populated_catalog_omits_child_prefab_without_a_real_guid(
+        self, caplog
+    ):
+        """issue #198: a populated catalogue used to emit
+        ``${<addon GUID>}<path> { coords 0 0 0 }`` as a spline child. That
+        reference does not resolve — Workbench creates no entity and logs
+        nothing — which is how every generated building was lost.
+
+        KNOWN_FOREST_PREFABS ships empty, so no release ever reached this
+        branch. It now logs an error and omits the child block instead of
+        writing an unresolvable reference. Re-enabling it needs real per-file
+        resource GUIDs, the way config/buildings.py::BUILDING_PREFAB_GUIDS
+        has them.
+        """
+        import logging
+
         fake_prefab = "Prefabs/WEGenerators/Forest/FG_PineForest_01.et"
         with patch("config.forests.KNOWN_FOREST_PREFABS", {"coniferous": fake_prefab}):
             gen = _make_gen(forest_features={
                 "type": "FeatureCollection",
                 "features": [_poly_feature([_RING], leaf_type="needleleaved")],
             })
-            out = gen._generate_vegetation_layer()
+            with caplog.at_level(logging.ERROR):
+                out = gen._generate_vegetation_layer()
 
+        # The footprint spline is still written — the user wires the
+        # generator onto it in World Editor.
         assert "SplineShapeEntity Forest_Pine_" in out
-        assert f"${{{_ARMA_GUID}}}{fake_prefab}" in out
-        assert "coords 0 0 0" in out
+        # But no unresolvable child reference.
+        assert f"${{{_ARMA_GUID}}}" not in out
+        assert fake_prefab not in out
+        assert any(
+            "#198" in r.message or "resource GUID" in r.message
+            for r in caplog.records
+        ), f"expected an error explaining the omission, got {caplog.records!r}"
 
     def test_unrecognised_leaf_type_falls_back_to_mixed_key(self):
         """Unknown leaf_type → forest_type_from_osm returns 'mixed'."""
@@ -134,8 +156,12 @@ class TestForestGeneratorChild:
             from config.forests import validate_forest_prefab
             assert validate_forest_prefab("coniferous") == fake
 
-    def test_mixed_forest_types_only_attach_when_catalog_has_matching_entry(self):
-        """Coniferous polygon gets child; deciduous polygon stays spline-only."""
+    def test_mixed_forest_types_both_stay_spline_only(self):
+        """Pre-#198 this asserted the coniferous polygon got a child block and
+        the deciduous one did not. Neither gets one now: the catalogue lookup
+        still distinguishes them (see
+        test_validate_forest_prefab_returns_path_when_configured), but an
+        addon-GUID child reference is never emitted."""
         pine_prefab = "Prefabs/WEGenerators/Forest/FG_PineForest_01.et"
         with patch("config.forests.KNOWN_FOREST_PREFABS", {"coniferous": pine_prefab}):
             gen = _make_gen(forest_features={
@@ -150,8 +176,10 @@ class TestForestGeneratorChild:
             })
             out = gen._generate_vegetation_layer()
 
-        assert f"${{{_ARMA_GUID}}}{pine_prefab}" in out
-        assert out.count(f"${{{_ARMA_GUID}}}") == 1  # only the coniferous one
+        assert f"${{{_ARMA_GUID}}}" not in out
+        assert pine_prefab not in out
+        # Both footprint splines are still emitted.
+        assert out.count("SplineShapeEntity Forest_") == 2
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +197,9 @@ class TestLakeGeneratorChild:
         assert "SplineShapeEntity Lake_" in out
         assert f"${{{_ARMA_GUID}}}" not in out
 
-    def test_populated_catalog_emits_child_prefab(self):
+    def test_populated_catalog_omits_child_prefab_without_a_real_guid(self):
+        """Same as the forest case — issue #198. See
+        TestForestGeneratorChild for the full reasoning."""
         fake_prefab = "Prefabs/WEGenerators/Water/Lake/LG_Lake_01.et"
         with patch("config.lakes.KNOWN_LAKE_PREFABS", {"lake": fake_prefab}):
             gen = _make_gen(water_features={
@@ -179,10 +209,10 @@ class TestLakeGeneratorChild:
             out = gen._generate_water_layer()
 
         assert "SplineShapeEntity Lake_" in out
-        assert f"${{{_ARMA_GUID}}}{fake_prefab}" in out
-        assert "coords 0 0 0" in out
+        assert f"${{{_ARMA_GUID}}}" not in out
+        assert fake_prefab not in out
 
-    def test_pond_and_reservoir_both_get_child_when_catalogued(self):
+    def test_pond_and_reservoir_get_no_child_without_a_real_guid(self):
         lake_pf = "Prefabs/WEGenerators/Water/Lake/LG_Lake_01.et"
         pond_pf = "Prefabs/WEGenerators/Water/Lake/LG_Lake_Small_01.et"
         catalog = {"lake": lake_pf, "pond": pond_pf}
@@ -197,8 +227,12 @@ class TestLakeGeneratorChild:
             })
             out = gen._generate_water_layer()
 
-        assert f"${{{_ARMA_GUID}}}{lake_pf}" in out
-        assert f"${{{_ARMA_GUID}}}{pond_pf}" in out
+        # issue #198: neither gets an unresolvable addon-GUID child block.
+        # Both footprint splines are still written.
+        assert f"${{{_ARMA_GUID}}}" not in out
+        assert lake_pf not in out
+        assert pond_pf not in out
+        assert out.count("SplineShapeEntity Lake_") == 2
 
     def test_validate_lake_prefab_none_for_empty_catalog(self):
         from config.lakes import validate_lake_prefab
