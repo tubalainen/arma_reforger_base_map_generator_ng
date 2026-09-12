@@ -63,6 +63,7 @@ class SetupGuideGenerator:
         self.settings = self.enfusion.get("recommended_settings", {})
         self.coord_info = metadata.get("coordinate_transform", {})
         self.feature_sources = metadata.get("feature_sources", {})
+        self.raster_validation = metadata.get("raster_validation", {})
 
         # Coverage data
         self.coverage = self.surf.get("coverage", {})
@@ -108,6 +109,29 @@ class SetupGuideGenerator:
         if not self.face_x:
             return "?"
         return f"{self.face_x} × {self.face_z}"
+
+    @property
+    def satellite_void_note(self) -> str:
+        """Warn about a hole in the imagery, if the raster contract found one.
+
+        A lost tile in a tiled fetch composites as solid black rather than
+        failing, so the user can otherwise only discover it by importing the
+        map and looking at it (SE_59N_14E shipped 7% black).
+        """
+        sat = (self.raster_validation or {}).get("satellite") or {}
+        void = sat.get("nodata_fraction") or 0
+        if void <= 0.005:
+            return ""
+        return f"""
+> **⚠ This map's satellite image has a gap.** {void:.0%} of
+> `satellite_map.png` is solid black because an imagery tile could not be
+> fetched. It will import fine and the terrain, surfaces and roads are
+> unaffected — but that area will be black on the ground.
+>
+> To fix it, regenerate the map: the gap comes from a failed upstream request,
+> so a fresh run usually succeeds. Otherwise, import as-is and patch the area
+> by hand in the Terrain Tool.
+"""
 
     @property
     def shape_note(self) -> str:
@@ -737,7 +761,7 @@ No satellite imagery was available for this region. You can add satellite imager
 manually later via Terrain Tool (Ctrl+T) > Manage tab > Import Satellite Map."""
 
         return f"""## Phase 5: Satellite Map (5 minutes)
-
+{self.satellite_void_note}
 ### Step 4.1: Import Satellite Image
 
 1. With the terrain entity selected, open the **Terrain Tool** _(Ctrl+T)_

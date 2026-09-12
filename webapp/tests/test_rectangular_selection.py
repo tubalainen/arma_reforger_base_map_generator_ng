@@ -116,7 +116,9 @@ class TestRasterContractAcceptsRectangles:
             "xllcorner 0\nyllcorner 0\ncellsize 2\nNODATA_value -9999\n"
         )
         Image.new("L", (faces_x, faces_z)).save(tmp / "surface_grass.png")
-        Image.new("RGB", sat).save(tmp / "satellite_map.png")
+        # Non-black fill: an all-zero satellite is 100% nodata, which the
+        # contract now reports as a missing imagery tile.
+        Image.new("RGB", sat, (90, 110, 70)).save(tmp / "satellite_map.png")
 
     def test_rectangular_rasters_pass(self):
         from services.raster_contract import validate_and_harden_rasters
