@@ -21,7 +21,7 @@ from config.terrain import (
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.16.3"
+APP_VERSION = "1.16.4"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
@@ -410,6 +410,30 @@ RECOMMENDED_MAX_EXTERNAL_MASKS = 3
 
 # Surface mask pixel threshold for "meaningful coverage" in block analysis
 BLOCK_SURFACE_THRESHOLD = 10  # out of 255
+
+# ---------------------------------------------------------------------------
+# Surface mask save rule (issue #217)
+# ---------------------------------------------------------------------------
+# A mask ships if it covers enough of the map OR if it is strongly painted on
+# at least MIN_STRONG_SURFACE_PIXELS pixels. The area test alone discards
+# *linear* surfaces: roads are thin (a 6 m road is 3 px at 2 m/px), so even one
+# crossing the whole map covers a tiny fraction of its area — and the area bar
+# scales with map size while a road's width does not. On the map reported in
+# #217 the bar was 16777 px and a real 13-segment asphalt network had 3911, so
+# the main north-south road shipped as splines with no surface to paint, while
+# `water_edge` (strongly painted nowhere at all) was kept for hugging enough
+# shoreline.
+#
+# 512 px is ~2048 m² at 2 m/px — roughly a 340 m stretch of single-lane road.
+# Low enough to keep any road worth driving, high enough that anti-aliased
+# polygon fringes never reach it (those are dim, and the intensity test filters
+# them first). Deliberately absolute, not a fraction.
+MIN_STRONG_SURFACE_PIXELS = 512
+
+# Intensity above which a pixel counts as *strongly* painted. Matches the
+# `pixels_dominant` measure in compute_coverage_stats, so the save rule and the
+# reported coverage stats agree about what "painted" means.
+STRONG_SURFACE_INTENSITY = 128
 
 
 def snap_to_tile_multiple(face_count: int) -> int:

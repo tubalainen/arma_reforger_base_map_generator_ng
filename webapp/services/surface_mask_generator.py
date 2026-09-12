@@ -32,6 +32,8 @@ from config.enfusion import (
     BLOCK_VERTEX_SIZE,
     MAX_SURFACES_PER_BLOCK,
     BLOCK_SURFACE_THRESHOLD,
+    MIN_STRONG_SURFACE_PIXELS,
+    STRONG_SURFACE_INTENSITY,
     SURFACE_MATERIAL_MAP,
     SURFACE_IMPORT_ORDER,
 )
@@ -909,6 +911,22 @@ def generate_surface_masks(
     # empty PNGs (e.g. surface_water_edge.png at 0.0% coverage with only
     # faint outlines). Require >0.1% of pixels to have meaningful intensity
     # (>=64/255 ≈ 25%) before considering the mask worth saving.
+    #
+    # Issue #217: that area test alone discards **linear** surfaces. Roads are
+    # thin — a 6 m road is 3 px wide at 2 m/px — so even one crossing the whole
+    # map covers a tiny fraction of its area, and the bar scales with map size
+    # while a road's width does not. On the reported 4096² map the threshold was
+    # 16777 px and the asphalt mask had 3911, so the main north-south road
+    # shipped with splines but no surface to paint. The same map kept
+    # `water_edge`, which is strongly painted *nowhere* (0 px above 128) but
+    # hugs enough shoreline to clear an area bar — the rule dropped a surface
+    # that wins and kept one that never does.
+    #
+    # So a mask also ships when it is strongly painted on a meaningful number of
+    # pixels, using the same `> 128` measure `compute_coverage_stats` reports as
+    # `pixels_dominant`. Faint-outline masks are still excluded, because that is
+    # what the intensity test is for — `rock` on that map had 4427 non-zero
+    # pixels and none above 128, and is still skipped.
     total_pixels = h * w
     min_meaningful_pixels = max(1, total_pixels // 1000)  # 0.1% of pixels
     meaningful_intensity_threshold = 64  # 25% of 255
@@ -924,18 +942,25 @@ def generate_surface_masks(
             )
             continue
         meaningful_pixels = int((array >= meaningful_intensity_threshold).sum())
-        if meaningful_pixels >= min_meaningful_pixels:
+        strong_pixels = int((array > STRONG_SURFACE_INTENSITY).sum())
+        covers_enough_area = meaningful_pixels >= min_meaningful_pixels
+        strongly_painted = strong_pixels >= MIN_STRONG_SURFACE_PIXELS
+        if covers_enough_area or strongly_painted:
             _save_mask(name, array)
+            why = "area" if covers_enough_area else "strongly painted (linear)"
             logger.info(
                 f"Wrote surface_{name}.png — {array.shape[1]}x{array.shape[0]} px, "
                 f"{meaningful_pixels} painted px "
-                f"({meaningful_pixels / total_pixels * 100:.1f}% coverage)"
+                f"({meaningful_pixels / total_pixels * 100:.1f}% coverage), "
+                f"{strong_pixels} px above {STRONG_SURFACE_INTENSITY} — kept on {why}"
             )
         else:
             skipped_surfaces.append(name)
             logger.info(
                 f"Skipping surface_{name}.png — only {meaningful_pixels} "
-                f"meaningful pixels (<{min_meaningful_pixels} threshold)"
+                f"meaningful pixels (<{min_meaningful_pixels} threshold) and "
+                f"{strong_pixels} px above {STRONG_SURFACE_INTENSITY} "
+                f"(<{MIN_STRONG_SURFACE_PIXELS})"
             )
 
     if skipped_surfaces:
