@@ -31,7 +31,18 @@ from services.utils.parallel import (
     parallel_zoom,
 )
 from config.enfusion import snap_to_tile_multiple, pick_clean_height_scale
-from config.lakes import LAKE_MAX_DEPTH_M, LAKE_SHORE_SLOPE_M_PER_M
+from config.lakes import (
+    LAKE_MAX_DEPTH_M,
+    LAKE_SHORE_SLOPE_M_PER_M,
+    SEA_DROPOFF_SLOPE_M_PER_M,
+    SEA_FULL_DEPTH_DISTANCE_M,
+    SEA_MAX_DEPTH_M,
+    SEA_MIN_AREA_FRACTION,
+    SEA_MIN_DEPTH_M,
+    SEA_MUST_TOUCH_MAP_EDGE,
+    SEA_SHELF_DEPTH_M,
+    SEA_SHELF_WIDTH_M,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -474,6 +485,118 @@ def _synthesize_sea_mask(
     return sea.astype(np.uint8)
 
 
+def qualifying_sea_regions(
+    sea_mask: np.ndarray,
+    min_area_fraction: float = SEA_MIN_AREA_FRACTION,
+    must_touch_edge: bool = SEA_MUST_TOUCH_MAP_EDGE,
+) -> np.ndarray:
+    """Keep only the parts of ``sea_mask`` that are genuinely open sea.
+
+    Issue #193 asks for ocean bathymetry "only where there clearly is a larger
+    body of water on the map. For all inland maps that do not have a shoreline
+    (i.e. not an island) this should not apply."
+
+    Two independent guards, both of which must hold:
+
+    * **Area** — the region covers at least ``min_area_fraction`` of the map.
+    * **Touches the map edge** — a sea continues past the selection. A water
+      body that fits entirely inside the map is a lake however large it is, and
+      carving a 100 m trench into a Swedish inland lake would be far worse than
+      leaving it to the lake path.
+
+    Returns a uint8 mask of the surviving regions; all-zero when none qualify,
+    which is the inland case and leaves the sea path a no-op.
+    """
+    mask = sea_mask.astype(bool)
+    if not mask.any():
+        return np.zeros(mask.shape, dtype=np.uint8)
+
+    labels, n = ndimage.label(mask)
+    if n == 0:
+        return np.zeros(mask.shape, dtype=np.uint8)
+
+    total_px = mask.size
+    keep = np.zeros(n + 1, dtype=bool)
+    edge_ids = set()
+    if must_touch_edge:
+        for strip in (labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]):
+            edge_ids.update(int(v) for v in np.unique(strip) if v)
+
+    sizes = ndimage.sum(mask, labels, index=range(1, n + 1))
+    for idx in range(1, n + 1):
+        area_ok = (sizes[idx - 1] / total_px) >= min_area_fraction
+        edge_ok = (not must_touch_edge) or (idx in edge_ids)
+        keep[idx] = bool(area_ok and edge_ok)
+
+    return keep[labels].astype(np.uint8)
+
+
+def carve_sea_bathymetry(
+    elevation: np.ndarray,
+    sea_mask: np.ndarray,
+    pixel_size_m: float,
+    sea_surface_m: float = 0.0,
+) -> np.ndarray:
+    """Carve a shelf-then-dropoff sea floor under ``sea_mask`` (issue #193).
+
+    A sea is not a big lake. ``flatten_water_in_heightmap`` gives a lake one
+    linear ramp from the shore, which on a coast produces a uniformly shallow
+    dish. A real coast has a shelf you can wade and swim off, then a drop to
+    depth the player never reaches:
+
+    ```
+    depth(d) = SEA_SHELF_DEPTH_M * d / SEA_SHELF_WIDTH_M            d <= shelf
+               SEA_SHELF_DEPTH_M + (d - shelf) * dropoff_slope      d >  shelf
+    ```
+
+    capped per region at a ceiling interpolated between ``SEA_MIN_DEPTH_M`` and
+    ``SEA_MAX_DEPTH_M`` by how far offshore that region actually reaches — the
+    "dynamically to 30-100 metres" in the issue. A narrow strait does not get an
+    abyss; open ocean is not capped at wading depth.
+
+    The water *surface* is set to ``sea_surface_m`` (absolute metres, 0.0 = mean
+    sea level) rather than to the lowest surrounding land, so the floor is
+    genuinely below sea level and the engine's ocean plane at Y=0 sits on it.
+
+    Returns a new array; ``elevation`` is not modified.
+    """
+    mask = sea_mask.astype(bool)
+    if not mask.any():
+        return elevation
+
+    result = elevation.copy().astype(np.float32)
+
+    # Distance from the nearest non-sea pixel, growing offshore. Pad with the
+    # edge value so the map border is not treated as a shore: the sea continues
+    # past the selection, and without this every coastal map would shoal back
+    # to 0 m along all four sides (the #202 lesson, same shape).
+    pad = 2
+    padded = np.pad(mask, pad, mode="edge")
+    dist_px = ndimage.distance_transform_edt(padded)[pad:-pad, pad:-pad]
+    dist_m = dist_px * float(pixel_size_m)
+
+    labels, n = ndimage.label(mask)
+    depth = np.zeros_like(result, dtype=np.float32)
+
+    shelf_w = max(float(SEA_SHELF_WIDTH_M), 1e-6)
+    for idx in range(1, n + 1):
+        region = labels == idx
+        if not region.any():
+            continue
+        reach_m = float(dist_m[region].max())
+        # Ceiling scales with how far offshore this region reaches.
+        t = min(reach_m / max(float(SEA_FULL_DEPTH_DISTANCE_M), 1e-6), 1.0)
+        ceiling = SEA_MIN_DEPTH_M + t * (SEA_MAX_DEPTH_M - SEA_MIN_DEPTH_M)
+
+        d = dist_m[region]
+        shelf = np.minimum(d, shelf_w) / shelf_w * SEA_SHELF_DEPTH_M
+        beyond = np.maximum(d - shelf_w, 0.0) * SEA_DROPOFF_SLOPE_M_PER_M
+        depth[region] = np.minimum(shelf + beyond, ceiling)
+
+    result[mask] = float(sea_surface_m) - depth[mask]
+    return result
+
+
 def flatten_water_in_heightmap(
     elevation: np.ndarray,
     water_mask: np.ndarray,
@@ -792,6 +915,9 @@ def generate_heightmap(
 
     # Union of every water mask, kept for the land-datum shift in step 5b
     # (issue #165) so "lowest land" ignores carved lake and sea beds.
+    # Issue #193: set when a qualifying open sea was carved, which changes
+    # which elevation becomes world Y=0 (see compute_land_datum below).
+    is_coastal_map = False
     # Kept as bool, not the rasterizers' uint8 — see compute_land_datum (#183).
     water_mask_union: np.ndarray | None = None
 
@@ -825,6 +951,9 @@ def generate_heightmap(
             sea_mask = _synthesize_sea_mask(
                 water_features, elevation, bbox_tuple, target_resolution_m,
             )
+            # Issue #193: a sea gets a shelf-then-dropoff profile, not the
+            # lake ramp, and only where it is genuinely open sea.
+            sea_mask = qualifying_sea_regions(sea_mask)
 
             # Carve each type with its own depth ceiling. Order matters only
             # where masks overlap (a river crossing a lake gets overwritten
@@ -834,10 +963,33 @@ def generate_heightmap(
             # a lake only reaches max_depth if it is max_depth/slope metres from
             # shore to centre. Lakes were carved at 0.3 m/m before #160, which
             # left typical inland lakes far shallower than their 8 m ceiling.
+            if sea_mask.sum():
+                sea_bool = sea_mask.astype(bool)
+                water_mask_union = (
+                    sea_bool if water_mask_union is None
+                    else (water_mask_union | sea_bool)
+                )
+                is_coastal_map = True
+                logger.info(
+                    f"Carving sea bathymetry: {int(sea_mask.sum())} px "
+                    f"({sea_mask.mean()*100:.1f}% of the map), "
+                    f"{SEA_SHELF_DEPTH_M:.0f} m shelf over "
+                    f"{SEA_SHELF_WIDTH_M:.0f} m then dropping to "
+                    f"{SEA_MIN_DEPTH_M:.0f}-{SEA_MAX_DEPTH_M:.0f} m"
+                )
+                if job:
+                    job.add_log(
+                        f"Coastal map: carving sea bed under "
+                        f"{sea_mask.mean()*100:.0f}% of the terrain",
+                        "info",
+                    )
+                elevation = carve_sea_bathymetry(
+                    elevation, sea_mask, target_resolution_m,
+                )
+
             for mask, max_depth, slope, label in (
                 (river_mask, 2.0, 0.3, "river/stream"),
                 (wetland_mask, 1.0, 0.3, "wetland"),
-                (sea_mask, 30.0, 0.3, "sea"),
                 (
                     lake_mask,
                     LAKE_MAX_DEPTH_M,
@@ -880,7 +1032,23 @@ def generate_heightmap(
     # ground and one that floats hundreds of metres above it.
     absolute_min = float(np.min(elevation))
     absolute_max = float(np.max(elevation))
-    land_datum = compute_land_datum(elevation, water_mask_union)
+    if is_coastal_map:
+        # Issue #193. On a coastal map mean sea level *is* world Y=0: the
+        # engine's ocean plane is fixed there, so the water surface has to sit
+        # on it with the floor below and the land above. Using the lowest land
+        # instead (the #165 rule) shifts the whole terrain up by the height of
+        # the lowest beach and pushes the carved sea floor with it, which is
+        # what made the sea read as flat at Y=0.
+        #
+        # #165 still governs inland maps, where there is no ocean plane to
+        # meet and the lowest land must become Y=0 or the terrain floats.
+        land_datum = 0.0
+        logger.info(
+            "Coastal map: mean sea level (0 m) becomes world Y=0, so the "
+            "carved sea bed is negative and meets the engine ocean plane"
+        )
+    else:
+        land_datum = compute_land_datum(elevation, water_mask_union)
     if land_datum:
         elevation = elevation - land_datum
     logger.info(
@@ -901,6 +1069,10 @@ def generate_heightmap(
         job.progress = 56
     heightmap, height_info = generate_heightmap_from_array(elevation)
     height_info["land_datum_m"] = land_datum
+    # Issue #193: records which datum rule applied, so the generated metadata
+    # says whether this map was treated as coastal (sea level = Y=0) or inland
+    # (lowest land = Y=0). Verifiable without re-running the pipeline.
+    height_info["is_coastal_map"] = bool(is_coastal_map)
     height_info["absolute_min_elevation"] = absolute_min
     height_info["absolute_max_elevation"] = absolute_max
 
