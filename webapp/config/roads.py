@@ -84,11 +84,53 @@ PREFAB_SURFACE: dict[str, str] = {
     "RG_TrailGravel_01": "gravel",
 }
 
-# Per-prefab GUIDs sourced from the Atlas 2 SCR_SHPPrefabDataList block
-# (docs/Atlas2.pdf, p. 12 — the shapefile-import prefab table). These are
-# the GUIDs Workbench uses when resolving the prefab in roads.layer.
-# Used by the setup guide to emit fully-qualified `${guid}path.et` strings
-# the editor user can paste into the RoadGeneratorEntity Prefab field.
+# Per-prefab GUIDs for the Atlas 2 road generators.
+#
+# First transcribed from the Atlas 2 SCR_SHPPrefabDataList block
+# (docs/Atlas2.pdf, p. 12 — the shapefile-import prefab table). A PDF is
+# weaker provenance than docs/ENFUSION_CONTRACT.md §2 asks for ("if we can't
+# read a GUID off a real Workbench-saved layer, we don't ship it"), so every
+# entry was re-verified 2026-09-12 (issue #200) against `.layer` files in
+# public mod repositories — files Workbench itself wrote:
+#
+#   gh api search/code -f q='"Generators/Roads/Asphalt" extension:layer'
+#   # then fetch each hit and grep {GUID}PrefabLibrary/Generators/Roads/…
+#
+# All 11 matched the Atlas 2 values exactly — no corrections were needed, and
+# the Asphalt/ Cobblestone/ Dirt/ subdirectory split below is confirmed too.
+# Independent repo count per entry:
+#
+#   RG_Road_Asphalt_E_01              2   DeadZoneReforger, HutanSimpan-1stMIR
+#   RG_Road_Asphalt_E_01_DashedLine   2   HutanSimpan-1stMIR, Utflandia
+#   RG_Road_Asphalt_E_01_Narrow       2   HutanSimpan-1stMIR, GITFur
+#   RG_Road_Asphalt_E_02              3   Overthrow, GITFur, Utflandia
+#   RG_Road_Asphalt_E_03              3   Bad-Orb-5km, khol-khol, Utflandia
+#   RG_Road_Cobblestone_01            1   Overthrow
+#   RG_Road_Dirt_01                   1   GITFur
+#   RG_Road_Dirt_02                   1   GITFur
+#   RG_Road_Forest_01                 1   khol-khol
+#   RG_TrailDirt_01                   1   GITFur
+#   RG_TrailGravel_01                 1   GITFur
+#
+# Two cautions when re-running that harvest:
+#
+#   * The corpus contains third-party generators under the same directory —
+#     e.g. {DA5FEFD58D8E8702}…/Asphalt/RoadTakistan_Side.et from
+#     gc-reforger-missions. Only count hits whose basename is in
+#     KNOWN_ROAD_PREFABS, or you will catalogue a modded GUID as vanilla.
+#   * Road generators genuinely live under `PrefabLibrary/`, unlike the
+#     structure prefabs in config/buildings.py. The PrefabLibrary-rejection
+#     guard added for #198 is deliberately scoped to the buildings catalogue;
+#     do not generalise it here.
+#
+# Unlike the building prefabs, these GUIDs are never emitted as an entity
+# reference: roads.layer writes a bare `SplineShapeEntity <Name> { … }` by
+# design (v1.1.0 nested a prefab child here and Workbench stalled at 4% on
+# world load — reverted in v1.2.3). They reach the user only through the
+# trailing `//` comment on each spline and the SETUP_GUIDE, to paste into the
+# RoadGeneratorEntity *Prefab* field. A wrong value here is a paste that
+# fails visibly, not a silently broken world — which is why this table never
+# carried #198's severity.
 PREFAB_GUIDS: dict[str, str] = {
     "RG_Road_Asphalt_E_01":            "02AF8C5A31EC3A53",
     "RG_Road_Asphalt_E_01_DashedLine": "5E336AEB0923963F",

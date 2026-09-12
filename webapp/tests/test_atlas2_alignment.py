@@ -118,6 +118,91 @@ class TestAtlas2RoadCatalog:
         from config.roads import fully_qualified_road_prefab
         assert fully_qualified_road_prefab("RG_Road_Asphalt_8m") is None
 
+    # --- PREFAB_GUIDS integrity (issue #200) -------------------------------
+    # This table had no guard at all until #200 — no format check, no
+    # addon-GUID check, no coverage check against KNOWN_ROAD_PREFABS. Its
+    # values are layer-confirmed (see the provenance comment in
+    # config/roads.py), so these tests protect the table from drift rather
+    # than prove it correct.
+
+    def test_road_prefab_guids_are_16_hex_uppercase(self):
+        import re
+
+        from config.roads import PREFAB_GUIDS
+
+        for name, guid in PREFAB_GUIDS.items():
+            assert re.fullmatch(r"[0-9A-F]{16}", guid), (
+                f"{name} has malformed GUID {guid!r} — Enfusion resource "
+                f"GUIDs are exactly 16 uppercase hex digits"
+            )
+
+    def test_no_road_prefab_uses_the_addon_guid(self):
+        """Issues #111 / #198: the addon-level GUID is not a prefab GUID.
+        These strings are pasted into the RoadGeneratorEntity Prefab field,
+        so the addon GUID here would resolve to nothing for the user."""
+        from config.enfusion import ARMA_REFORGER_GUID
+        from config.roads import PREFAB_GUIDS
+
+        for name, guid in PREFAB_GUIDS.items():
+            assert guid != ARMA_REFORGER_GUID, (
+                f"{name} uses the addon GUID as a prefab GUID"
+            )
+
+    def test_road_prefab_guids_are_unique_per_prefab(self):
+        """Two prefabs sharing a GUID means one was copy-pasted — the
+        original #111 mistake in miniature."""
+        from config.roads import PREFAB_GUIDS
+
+        seen: dict[str, str] = {}
+        for name, guid in PREFAB_GUIDS.items():
+            assert guid not in seen, (
+                f"{name} and {seen[guid]} share GUID {guid}"
+            )
+            seen[guid] = name
+
+    def test_every_known_road_prefab_has_a_guid(self):
+        """A name in KNOWN_ROAD_PREFABS without a GUID makes
+        fully_qualified_road_prefab() return None, which silently drops the
+        `fq:` hint from that road's comment and the SETUP_GUIDE table."""
+        from config.roads import KNOWN_ROAD_PREFABS, PREFAB_GUIDS
+
+        missing = sorted(KNOWN_ROAD_PREFABS - set(PREFAB_GUIDS))
+        assert not missing, (
+            f"these KNOWN_ROAD_PREFABS have no GUID: {missing}. Harvest it "
+            f"off a Workbench-saved .layer — see the provenance comment on "
+            f"PREFAB_GUIDS in config/roads.py."
+        )
+
+    def test_no_guid_entry_for_an_unknown_prefab(self):
+        """The reverse drift: a GUID for a name no longer in the catalogue is
+        dead weight that looks authoritative."""
+        from config.roads import KNOWN_ROAD_PREFABS, PREFAB_GUIDS
+
+        orphans = sorted(set(PREFAB_GUIDS) - KNOWN_ROAD_PREFABS)
+        assert not orphans, (
+            f"PREFAB_GUIDS has entries not in KNOWN_ROAD_PREFABS: {orphans}"
+        )
+
+    def test_every_known_road_prefab_resolves_to_a_vanilla_generator_path(self):
+        """Every catalogued name must produce a PrefabLibrary generator path.
+        `PrefabLibrary/` is correct *here* — road generators live there —
+        unlike the structure prefabs in config/buildings.py, whose catalogue
+        rejects that tree (#198)."""
+        from config.roads import (
+            KNOWN_ROAD_PREFABS,
+            fully_qualified_road_prefab,
+        )
+
+        for name in sorted(KNOWN_ROAD_PREFABS):
+            fq = fully_qualified_road_prefab(name)
+            assert fq is not None, f"{name} has no fully-qualified form"
+            assert fq.startswith("{"), fq
+            assert "}PrefabLibrary/Generators/Roads/" in fq, fq
+            assert fq.endswith(f"/{name}.et"), (
+                f"{name} resolved to {fq}, which does not end in the "
+                f"prefab's own filename"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Bootstrap entities (issue #81)
