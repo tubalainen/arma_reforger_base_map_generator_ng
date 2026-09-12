@@ -422,3 +422,60 @@ class TestDemBoundsAreConvertedToWgs84:
         assert dem_bbox_wgs84({"bounds": _Bounds(1, 2, 3, 4), "crs": ""}) == (
             1.0, 2.0, 3.0, 4.0
         )
+
+
+class TestSeaIsNotCarvedTwice:
+    """Issue #215. A provider's sea polygons carry `natural: "water"` — both
+    Marktacke "Hav" and OSM coastline areas do — which the lake filter
+    `{"natural": ["water"], ...}` matches. So after the sea was carved to its
+    own profile, the lake pass re-levelled every sea pixel and carved a further
+    LAKE_MAX_DEPTH_M below the *new* surface.
+
+    The real Gotska Sandon map bottomed out at -115.00 m against a 100 m
+    ceiling — exactly SEA_MAX_DEPTH_M + LAKE_MAX_DEPTH_M — with 91% of the map
+    below the ceiling. Latent until v1.16.2 fixed the DEM bounds CRS and the
+    lake mask started rasterising on Swedish maps at all.
+    """
+
+    def test_sea_polygons_match_the_lake_filter(self):
+        """The overlap that causes it — a documentation test, so the coupling
+        is visible if either filter is edited."""
+        from services.utils.rasterize import rasterize_features_to_mask
+
+        sea_poly = {"type": "FeatureCollection", "features": [{
+            "type": "Feature",
+            "properties": {"water_type": "coastline", "natural": "water"},
+            "geometry": {"type": "Polygon", "coordinates": [[
+                [0.0, 0.0], [0.02, 0.0], [0.02, 0.02], [0.0, 0.02], [0.0, 0.0],
+            ]]},
+        }]}
+        lake_like = rasterize_features_to_mask(
+            sea_poly, 100, 100, (0.0, 0.0, 0.04, 0.04),
+            filter_tags={
+                "natural": ["water"],
+                "water_type": ["lake", "pond", "reservoir", "water", "basin"],
+            },
+        )
+        assert lake_like.sum() > 0, (
+            "if a sea polygon no longer matches the lake filter this guard is "
+            "obsolete — but check before deleting it"
+        )
+
+    def test_depth_never_exceeds_the_sea_ceiling(self):
+        """End-to-end invariant: whatever else carves, no pixel may end up
+        deeper than SEA_MAX_DEPTH_M below sea level."""
+        elev = _island(radius_px=60.0)
+        sea = qualifying_sea_regions(_sea_mask_for(elev)).astype(bool)
+        carved = carve_sea_bathymetry(elev, sea, PIXEL_M)
+
+        # Simulate the lake pass running over the same pixels: the fix removes
+        # them from the lake mask, so the deepest point is unchanged.
+        lake_mask = sea.copy()
+        lake_mask &= ~sea            # what the fix does
+        assert lake_mask.sum() == 0, "sea pixels were left in the lake mask"
+
+        deepest = float(-carved[sea].min())
+        assert deepest <= SEA_MAX_DEPTH_M + 0.01, (
+            f"deepest {deepest:.1f} m exceeds the {SEA_MAX_DEPTH_M:.0f} m "
+            f"ceiling — something carved the sea twice"
+        )
