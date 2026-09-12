@@ -128,6 +128,9 @@ Docker will automatically pull the latest image from `ghcr.io/tubalainen/arma_re
    - The terrain grid is **derived from the shape you drew** — cell size is fixed at 2 m
      (the Arma Reforger standard) and each axis snaps independently to a whole number of
      128-face tiles, up to 16384 faces (32.768 km) **per axis**. There is nothing to pick.
+   - The terrain is measured in your country's own map projection, so it comes out slightly
+     larger than the box you drew (typically 50-100 m per side) and always contains it. That
+     surplus is margin, not stretch — one metre on the ground is one metre in game.
 3. **Click Generate** and watch the 13-step pipeline progress in real-time
 4. **Download the ZIP** when complete
 

@@ -306,6 +306,42 @@ async def serve_style_css():
 # ===========================================================================
 
 
+def _derive_terrain_preview(polygon, crs) -> dict:
+    """Authoritative terrain grid for a drawn polygon.
+
+    Same code the pipeline uses, so the number in the sidebar is the number in
+    the ZIP.
+    """
+    from config.terrain import DEFAULT_GRID_CELL_SIZE, TERRAIN_TILE_FACES
+    from services.coordinate_transformer import CoordinateTransformer
+    from services.map_generator import derive_terrain_grid_projected
+
+    lngs = [c[0] for c in polygon]
+    lats = [c[1] for c in polygon]
+    bbox = {
+        "west": min(lngs), "east": max(lngs),
+        "south": min(lats), "north": max(lats),
+    }
+    transformer = CoordinateTransformer(bbox=bbox, crs=crs or "EPSG:4326")
+    faces_x, faces_z = derive_terrain_grid_projected(
+        transformer, DEFAULT_GRID_CELL_SIZE
+    )
+    return {
+        "faces_x": faces_x,
+        "faces_z": faces_z,
+        "tiles_x": faces_x // TERRAIN_TILE_FACES,
+        "tiles_z": faces_z // TERRAIN_TILE_FACES,
+        "size_x_m": faces_x * DEFAULT_GRID_CELL_SIZE,
+        "size_z_m": faces_z * DEFAULT_GRID_CELL_SIZE,
+        "heightmap_px_x": faces_x + 1,
+        "heightmap_px_z": faces_z + 1,
+        "cell_size_m": DEFAULT_GRID_CELL_SIZE,
+        "crs": crs,
+        "projected_width_m": round(transformer.projected_width, 1),
+        "projected_depth_m": round(transformer.projected_depth, 1),
+    }
+
+
 @app.post("/api/detect-countries")
 async def detect_countries(request_body: DetectCountriesRequest):
     """
@@ -318,6 +354,19 @@ async def detect_countries(request_body: DetectCountriesRequest):
         # Validate polygon
         validate_polygon(request_body.polygon)
         result = await _detect(request_body.polygon)
+
+        # The terrain grid is derived from the drawn area's extent in the
+        # detected CRS's metres, which the browser cannot compute (issue #203).
+        # Return it here so the sidebar shows the grid that will actually be
+        # generated instead of a spherical estimate of it — the browser and the
+        # pipeline must never disagree about the terrain size (issue #197).
+        try:
+            result["terrain"] = _derive_terrain_preview(
+                request_body.polygon, result.get("crs")
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Terrain preview unavailable: {exc}")
+
         return result
     except HTTPException:
         raise

@@ -486,11 +486,14 @@ function updateSelectionDisplay(coords) {
 }
 
 function onPolygonSelected(coords) {
+    // The shape changed, so the server's grid is stale until detection returns.
+    authoritativeTerrain = null;
     updateSelectionDisplay(coords);
     detectCountries(coords);
 }
 
 function onPolygonCleared() {
+    authoritativeTerrain = null;
     document.getElementById('selection-info').classList.add('d-none');
     document.getElementById('no-selection').classList.remove('d-none');
     document.getElementById('btn-generate').disabled = true;
@@ -509,6 +512,12 @@ function clearSelection() {
     closeResults();
 }
 
+// Terrain grid as computed by the server, in the detected CRS's metres. The
+// browser cannot work this out: it needs the projected extent of the drawn
+// area, which depends on the country's CRS (issue #203). Until it arrives the
+// readout shows the local estimate, which is close but not authoritative.
+let authoritativeTerrain = null;
+
 function updateTerrainSizeDisplay() {
     const el = document.getElementById('terrain-size-display');
     if (!currentPolygonCoords) {
@@ -524,7 +533,14 @@ function updateTerrainSizeDisplay() {
     const bounds = L.latLngBounds(
         L.latLng(south, west), L.latLng(north, east));
 
-    const t = deriveTerrain(bounds, selectionIsSquare(currentPolygon));
+    const local = deriveTerrain(bounds, selectionIsSquare(currentPolygon));
+    // Prefer the server's answer; it is the one the pipeline will use.
+    const a = authoritativeTerrain;
+    const t = a
+        ? { x: { N: a.faces_x, tiles: a.tiles_x, m: a.size_x_m, heightmapPx: a.heightmap_px_x },
+            z: { N: a.faces_z, tiles: a.tiles_z, m: a.size_z_m, heightmapPx: a.heightmap_px_z },
+            square: a.faces_x === a.faces_z }
+        : local;
     const kmX = (t.x.m / 1000).toFixed(2);
     const kmZ = (t.z.m / 1000).toFixed(2);
     // Cost tracks total area, not the longest axis — a long thin rectangle is
@@ -559,6 +575,12 @@ async function detectCountries(coords) {
             body: JSON.stringify({ polygon: coords }),
         });
         const data = await resp.json();
+
+        // The server's terrain grid supersedes the local estimate.
+        if (data.terrain) {
+            authoritativeTerrain = data.terrain;
+            updateTerrainSizeDisplay();
+        }
 
         if (data.countries && data.countries.length > 0) {
             document.getElementById('info-countries').textContent =

@@ -32,6 +32,10 @@ The terrain grid is derived from the shape you drew — cell size is fixed at 2 
 independently to a whole number of 128-face tiles, up to 16384 faces (32.768 km) **per axis**.
 There is nothing to pick.
 
+The terrain is measured in your country's own map projection, so it comes out a little larger than
+the box you drew (typically 50-100 m per side) and always contains it. That surplus is margin, not
+stretch: one metre on the ground is one metre in game on both axes.
+
 Square is the default and what most maps want. Reach for the rectangle when the region itself is
 oblong: Enfusion supports non-square terrain (the New Terrain dialog takes a grid size per axis,
 with no ratio restriction), and squaring off a 20.5 x 12.5 km region pulls in 63% more terrain —

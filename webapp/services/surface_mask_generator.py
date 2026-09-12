@@ -395,6 +395,7 @@ def generate_surface_masks(
     country_code: str = "UNKNOWN",
     heightmap_dimensions: Optional[tuple[int, int]] = None,
     job=None,
+    centre_lat: Optional[float] = None,
 ) -> dict:
     """
     Generate all surface masks for Enfusion.
@@ -418,7 +419,14 @@ def generate_surface_masks(
     Args:
         elevation: DEM numpy array.
         osm_data: Dict with roads, water, forests, buildings, land_use.
-        bounds: (west, south, east, north) in WGS84 degrees.
+        bounds: (min_x, min_y, max_x, max_y) of the raster, in the same CRS as
+            the feature coordinates in ``osm_data``. Since #203 the pipeline
+            passes the terrain rectangle in its projected CRS (with features
+            projected to match) so the masks land on exactly the same ground as
+            the heightmap; WGS84 degrees still work for callers without a CRS.
+        centre_lat: Real centre latitude, for rules that need one (the
+            treeline). Derived from ``bounds`` when absent, which is only valid
+            if ``bounds`` is in degrees.
         cell_size_m: Grid cell size in metres.
         output_dir: Output directory for mask PNGs.
         country_code: ISO country code for country-specific rules.
@@ -502,7 +510,10 @@ def generate_surface_masks(
     slope = generate_slope_mask(elevation, cell_size_m)
 
     # Get treeline for this country (latitude-interpolated if possible)
-    treeline = _get_treeline_elevation(country_code, bounds)
+    treeline = _get_treeline_elevation(
+        country_code,
+        bounds if centre_lat is None else (bounds[0], centre_lat, bounds[2], centre_lat),
+    )
     logger.info(f"Using treeline elevation: {treeline}m for country {country_code}")
     if job:
         job.add_log(f"Using treeline elevation: {treeline}m for {country_code}")
