@@ -94,6 +94,80 @@ def _default_read_workers() -> int:
 MAX_NODATA_FRACTION = 0.005
 
 
+# Page size for the STAC search, and the hard ceiling on how many pages we
+# will walk. The catalogue holds every epoch ever flown, so an unbounded walk
+# would pull hundreds of items for a large map.
+STAC_SEARCH_PAGE_SIZE = 50
+STAC_SEARCH_MAX_PAGES = 8
+
+# Resolution of the coverage grid used to pick tiles. 700x700 over a ~6 km box
+# is ~9 m per cell — far finer than a tile (2.5 km), so a tile can never be
+# judged redundant because the grid was too coarse to see its contribution.
+COVERAGE_GRID = 700
+
+
+def _search_page(client, url, body):
+    """One STAC search POST. Returns (features, next_body_or_None)."""
+    return client.post(url, json=body, headers=_SEARCH_HEADERS)
+
+
+def _next_search_body(response_json):
+    """Extract the POST body of the STAC ``next`` link, if the page has one.
+
+    STAC API paginates with a ``rel: "next"`` link that carries the body for
+    the follow-up POST. Lantmäteriet's catalogue does supply it; without
+    following it the search silently returns only the newest page.
+    """
+    for link in response_json.get("links", []) or []:
+        if link.get("rel") == "next" and link.get("body"):
+            return link["body"]
+    return None
+
+
+def select_covering_items(features: list, bbox, grid: int = COVERAGE_GRID):
+    """Pick the fewest newest-first items that cover ``bbox``.
+
+    The catalogue is sorted newest-first, so walking it in order and keeping
+    only items that contribute *new* ground gives the most recent imagery
+    available at every point, with no redundant downloads.
+
+    This exists because taking a fixed number of newest items does not cover
+    the map. Tiles are ordered by acquisition time, not position: on the
+    Hammarö map the first 50 of 151 items left the whole south-east corner
+    unrequested, so the mosaic shipped 6.8% solid black with *zero* download
+    failures (issue found 2026-09-12). Coverage is a property of which ground
+    the tiles occupy — it cannot be bought with a bigger fixed limit.
+
+    Returns ``(kept, covered_fraction)``.
+    """
+    import numpy as np
+
+    w, s, e, n = bbox
+    if e <= w or n <= s:
+        return list(features), 0.0
+
+    xs = np.linspace(w, e, grid)
+    ys = np.linspace(s, n, grid)
+    X, Y = np.meshgrid(xs, ys)
+    covered = np.zeros(X.shape, dtype=bool)
+
+    kept = []
+    for feat in features:
+        fb = feat.get("bbox")
+        if not fb or len(fb) < 4:
+            # No footprint to reason about — keep it rather than risk a hole.
+            kept.append(feat)
+            continue
+        hit = (X >= fb[0]) & (X <= fb[2]) & (Y >= fb[1]) & (Y <= fb[3])
+        if (hit & ~covered).any():
+            kept.append(feat)
+            covered |= hit
+        if covered.all():
+            break
+
+    return kept, float(covered.mean())
+
+
 def nodata_fraction(merged) -> float:
     """Fraction of an ``(bands, H, W)`` uint8 mosaic that is pure nodata."""
     import numpy as np
@@ -812,16 +886,25 @@ def _cog_merge_rgb(
     # what the "every service failure is non-fatal, return None" rule wants.
     void = nodata_fraction(merged)
     if void > MAX_NODATA_FRACTION:
+        # Name the actual cause. Quoting the failure count alone sent the
+        # first investigation after download errors when the real problem
+        # was that the catalogue had no imagery for part of the area.
+        cause = (
+            f"{permanent_failures} tile(s) failed to download"
+            if permanent_failures
+            else "no tile failed to download — the catalogue has no imagery "
+                 "covering part of this area"
+        )
         logger.error(
             f"STAC Bild: merged orthophoto is {void:.1%} nodata "
-            f"(limit {MAX_NODATA_FRACTION:.1%}, {permanent_failures} tile(s) "
-            f"permanently failed) — falling back to a lower-resolution source "
-            f"rather than shipping an image with holes in it"
+            f"(limit {MAX_NODATA_FRACTION:.1%}; {cause}) — falling back to a "
+            f"lower-resolution source rather than shipping an image with "
+            f"holes in it"
         )
         if job:
             job.add_log(
-                f"Lantmäteriet orthophoto came back {void:.1%} empty — "
-                f"falling back to another imagery source",
+                f"Lantmäteriet orthophoto covers only {1 - void:.1%} of this "
+                f"area — falling back to another imagery source",
                 "warning",
             )
         return None, None
@@ -865,22 +948,37 @@ async def fetch_stac_orthophoto(
     query = {
         "bbox": [w, s, e, n],
         "sortby": [{"field": "properties.datetime", "direction": "desc"}],  # newest imagery first
-        "limit": 50,
+        "limit": STAC_SEARCH_PAGE_SIZE,
     }
 
     # ------------------------------------------------------------------ #
-    # 1. Search for tiles covering our bbox (open endpoint, no auth)
+    # 1. Search for tiles covering our bbox (open endpoint, no auth).
+    #
+    # Follow the STAC `next` links instead of taking the first page. The
+    # catalogue is sorted newest-first by acquisition *time*, not position,
+    # so one page does not cover the map: on the Hammarö map page 1 held 50
+    # of 151 items and left the south-east corner unrequested entirely.
+    # Paging is cheap — these are open metadata requests, and the coverage
+    # pass below then downloads *fewer* COGs than the old single page did.
     # ------------------------------------------------------------------ #
     try:
         if job:
             job.add_log("Searching Lantmäteriet STAC Bild for recent orthophotos...")
 
+        features = []
+        body = query
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                search_url, json=query, headers=_SEARCH_HEADERS
-            )
-            resp.raise_for_status()
-            features = resp.json().get("features", [])
+            for page in range(STAC_SEARCH_MAX_PAGES):
+                resp = await client.post(
+                    search_url, json=body, headers=_SEARCH_HEADERS
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+                page_feats = payload.get("features", [])
+                features.extend(page_feats)
+                body = _next_search_body(payload)
+                if not body or not page_feats:
+                    break
 
     except Exception as exc:
         logger.warning(f"STAC Bild search failed: {exc}")
@@ -893,7 +991,22 @@ async def fetch_stac_orthophoto(
         )
         return None
 
-    logger.info(f"STAC Bild: search returned {len(features)} item(s)")
+    found = len(features)
+
+    # Keep only the items that contribute ground nobody newer already covers.
+    features, covered = select_covering_items(features, (w, s, e, n))
+    logger.info(
+        f"STAC Bild: search returned {found} item(s) across "
+        f"{(found + STAC_SEARCH_PAGE_SIZE - 1) // STAC_SEARCH_PAGE_SIZE} page(s); "
+        f"{len(features)} needed to cover the area ({covered:.1%} covered)"
+    )
+    if covered < 0.999:
+        # Not fatal on its own — the nodata gate after the merge decides.
+        # Say it here too, because this is where the *reason* is known.
+        logger.warning(
+            f"STAC Bild: the catalogue only covers {covered:.1%} of this area "
+            f"({found} item(s) available) — the orthophoto will have gaps"
+        )
 
     # Items are already sorted newest-first. Find the most recent year
     # present in the results so we can report it in the log.
