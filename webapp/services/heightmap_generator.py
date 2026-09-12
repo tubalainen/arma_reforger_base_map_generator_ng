@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -440,6 +441,144 @@ def _rasterize_river_mask(
         buffer_px_fn=_half_width_px,
         filter_fn=_is_river,
     )
+
+
+def terrain_raster_bounds(metadata: dict, transformer=None):
+    """Bounds to rasterise features against, matching the elevation array.
+
+    With a transformer the array is the terrain rectangle in the projected CRS,
+    so features must be projected too (``project_features_to_terrain``) and the
+    bounds are that rectangle. Without one, fall back to the DEM's own WGS84
+    bounds — the pre-#203 behaviour, still used by callers that have no CRS.
+    """
+    if transformer is not None and metadata.get("warped_to_terrain"):
+        return metadata["bounds"]
+    return dem_bbox_wgs84(metadata)
+
+
+def project_features_to_terrain(features: dict, transformer):
+    """Re-project a GeoJSON FeatureCollection into the terrain's CRS.
+
+    The rasterisers map a coordinate to a pixel with
+    ``(x - min_x) / range * width`` — arithmetic that does not care whether the
+    numbers are degrees or metres, only that they share the raster's CRS. So
+    the cheapest correct way to rasterise into a projected raster is to project
+    the features once and hand the rasteriser projected bounds.
+    """
+    if transformer is None or not features:
+        return features
+
+    to_crs = getattr(transformer, "_transformer_to_local", None)
+    if to_crs is None:
+        return features
+
+    import copy
+
+    out = copy.deepcopy(features)
+
+    def _conv(coords):
+        if (
+            isinstance(coords, (list, tuple))
+            and len(coords) >= 2
+            and isinstance(coords[0], (int, float))
+        ):
+            x, y = to_crs.transform(float(coords[0]), float(coords[1]))
+            return [x, y]
+        return [_conv(c) for c in coords]
+
+    for feat in out.get("features", []):
+        geom = feat.get("geometry") or {}
+        if geom.get("coordinates") is not None:
+            geom["coordinates"] = _conv(geom["coordinates"])
+    return out
+
+
+def warp_dem_to_terrain(
+    elevation, metadata: dict, transformer, target_size: tuple[int, int],
+):
+    """Resample the DEM **into the terrain rectangle**, not just to its size.
+
+    The old path was ``parallel_zoom`` — a plain array resize. That makes the
+    heightmap cover whatever ground the DEM happened to cover, which is not the
+    terrain rectangle: the DEM is fetched over the drawn WGS84 box, while roads,
+    forests, water and the satellite all resolve against the projected terrain
+    rectangle. The two agreed only because every other layer was scaled to fit
+    (issue #203). Warping instead makes the heightmap the same rectangle as
+    everything else, so the layers line up by construction rather than by
+    coincidence.
+
+    Returns ``(elevation, metadata)`` with the terrain's bounds and CRS.
+    """
+    import numpy as np
+    from rasterio.crs import CRS
+    from rasterio.transform import from_bounds
+    from rasterio.warp import Resampling, reproject
+
+    size_x, size_z = target_size
+    src_crs = str(metadata.get("crs") or "").strip() or "EPSG:4326"
+    src_bounds = metadata.get("bounds")
+    if src_bounds is None:
+        raise ValueError("DEM metadata has no bounds; cannot warp to terrain")
+
+    min_x, min_y, max_x, max_y = transformer.terrain_bounds_projected
+    dst_crs = transformer.crs or "EPSG:4326"
+
+    src_transform = metadata.get("transform") or from_bounds(
+        src_bounds[0], src_bounds[1], src_bounds[2], src_bounds[3],
+        elevation.shape[1], elevation.shape[0],
+    )
+    dst_transform = from_bounds(min_x, min_y, max_x, max_y, size_x, size_z)
+
+    src = np.ascontiguousarray(elevation, dtype="float32")
+    dst = np.empty((size_z, size_x), dtype="float32")
+
+    reproject(
+        source=src,
+        destination=dst,
+        src_transform=src_transform,
+        src_crs=CRS.from_string(src_crs),
+        dst_transform=dst_transform,
+        dst_crs=CRS.from_string(dst_crs),
+        resampling=Resampling.cubic,
+        num_threads=min(8, os.cpu_count() or 2),
+    )
+
+    # The terrain can extend past the DEM (snap-up margin, or a DEM that only
+    # just covers the drawn box). reproject leaves those cells at 0, which
+    # would read as sea level; fill them from the nearest real value instead.
+    filled = _fill_edge_nodata(dst)
+
+    metadata = dict(metadata)
+    metadata["crs"] = dst_crs
+    metadata["bounds"] = (min_x, min_y, max_x, max_y)
+    metadata["transform"] = dst_transform
+    metadata["width"] = size_x
+    metadata["height"] = size_z
+    metadata["warped_to_terrain"] = True
+    logger.info(
+        f"Warped DEM {src.shape[1]}x{src.shape[0]} ({src_crs}) -> "
+        f"{size_x}x{size_z} over the terrain rectangle ({dst_crs})"
+    )
+    return filled, metadata
+
+
+def _fill_edge_nodata(arr):
+    """Replace exact-zero cells left by a warp with the nearest real value."""
+    import numpy as np
+
+    holes = arr == 0.0
+    if not holes.any() or holes.all():
+        return arr
+    try:
+        from scipy.ndimage import distance_transform_edt
+
+        idx = distance_transform_edt(
+            holes, return_distances=False, return_indices=True
+        )
+        return arr[tuple(idx)]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Edge nodata fill failed ({exc}); leaving zeros")
+        return arr
 
 
 def dem_bbox_wgs84(metadata: dict) -> tuple[float, float, float, float] | None:
@@ -930,6 +1069,7 @@ def generate_heightmap(
     target_resolution_m: float = 2.0,
     output_dir: Optional[Path] = None,
     job = None,
+    transformer=None,
 ) -> dict:
     """
     Main heightmap generation pipeline.
@@ -1004,7 +1144,19 @@ def generate_heightmap(
     if job:
         job.add_log(f"Resampling elevation data to {size_x}x{size_z} pixels...")
         job.progress = 45
-    elevation, metadata = resample_dem(elevation, metadata, target_resolution_m, target_size)
+    if transformer is not None:
+        elevation, metadata = warp_dem_to_terrain(
+            elevation, metadata, transformer, target_size,
+        )
+        # The raster is now the terrain rectangle in a projected CRS, so the
+        # features have to be in that CRS too before they can be rasterised
+        # onto it.
+        road_features = project_features_to_terrain(road_features, transformer)
+        water_features = project_features_to_terrain(water_features, transformer)
+    else:
+        elevation, metadata = resample_dem(
+            elevation, metadata, target_resolution_m, target_size,
+        )
 
     # 3. Flatten roads
     if road_features and road_features.get("features"):
@@ -1012,7 +1164,7 @@ def generate_heightmap(
         if job:
             job.add_log(f"Flattening terrain along {len(road_features['features'])} road segments...")
             job.progress = 50
-        bbox_tuple = dem_bbox_wgs84(metadata)
+        bbox_tuple = terrain_raster_bounds(metadata, transformer)
         if bbox_tuple:
             road_mask = rasterize_features_to_mask(
                 road_features,
@@ -1040,7 +1192,7 @@ def generate_heightmap(
         if job:
             job.add_log(f"Leveling {len(water_features['features'])} water bodies...")
             job.progress = 53
-        bbox_tuple = dem_bbox_wgs84(metadata)
+        bbox_tuple = terrain_raster_bounds(metadata, transformer)
         if bbox_tuple:
             arr_h, arr_w = elevation.shape
 

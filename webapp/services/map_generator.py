@@ -462,6 +462,7 @@ def step_generate_heightmap(
     target_resolution: float,
     output_dir: Path,
     job: Optional[MapGenerationJob] = None,
+    transformer=None,
 ) -> dict:
     """Step 4: Generate heightmap with road flattening and water leveling.
 
@@ -479,6 +480,7 @@ def step_generate_heightmap(
         dem_bytes=dem_bytes,
         road_features=osm_data.get("roads"),
         water_features=osm_data.get("water"),
+        transformer=transformer,
         target_size=target_size,
         target_resolution_m=target_resolution,
         output_dir=output_dir,
@@ -495,14 +497,31 @@ def step_generate_surface_masks(
     primary_country: str,
     heightmap_dimensions: Optional[tuple[int, int]] = None,
     job: Optional[MapGenerationJob] = None,
+    transformer=None,
 ) -> dict:
     """Step 5: Generate surface masks using the elevation array from step 4."""
+    from services.heightmap_generator import project_features_to_terrain
     from services.surface_mask_generator import generate_surface_masks
+
+    # Masks must land on the same ground as the heightmap, which since #203 is
+    # the terrain rectangle in the projected CRS — so project the features and
+    # rasterise against that rectangle rather than the drawn lat/lon box.
+    centre_lat = (bbox["south"] + bbox["north"]) / 2.0
+    if transformer is not None and getattr(transformer, "_use_pyproj", False):
+        bounds = transformer.terrain_bounds_projected
+        osm_data = {
+            k: (project_features_to_terrain(v, transformer)
+                if isinstance(v, dict) and v.get("features") is not None else v)
+            for k, v in (osm_data or {}).items()
+        }
+    else:
+        bounds = (bbox["west"], bbox["south"], bbox["east"], bbox["north"])
 
     return generate_surface_masks(
         elevation=elevation_array,
         osm_data=osm_data,
-        bounds=(bbox["west"], bbox["south"], bbox["east"], bbox["north"]),
+        bounds=bounds,
+        centre_lat=centre_lat,
         cell_size_m=target_resolution,
         output_dir=output_dir,
         country_code=primary_country,
@@ -837,6 +856,25 @@ def _write_zip_archive(
     return raw_bytes
 
 
+def derive_terrain_grid_projected(
+    transformer, cell_size: float,
+) -> tuple[int, int]:
+    """Derive the terrain grid from the transformer's **projected** extent.
+
+    The terrain lives in a metric CRS, so its size has to come from metres in
+    that CRS — not from the spherical ``111320 x cos(lat)`` estimate of the
+    drawn lat/lon box, which is a different rectangle (issue #203). Rounds up,
+    so the terrain always contains the drawn area; the surplus becomes margin,
+    not a scale factor.
+    """
+    from config.enfusion import snap_terrain_faces
+
+    return (
+        snap_terrain_faces(transformer.projected_width / cell_size),
+        snap_terrain_faces(transformer.projected_depth / cell_size),
+    )
+
+
 def derive_terrain_grid(
     width_m: float, height_m: float, cell_size: float,
 ) -> tuple[int, int]:
@@ -929,9 +967,29 @@ async def run_generation(job: MapGenerationJob):
         cell_size = DEFAULT_GRID_CELL_SIZE
         width_m, height_m = estimate_bbox_dimensions_m(bbox)
 
-        faces_x, faces_z = derive_terrain_grid(width_m, height_m, cell_size)
+        # The transformer owns the terrain rectangle, so it has to exist before
+        # the grid is sized — the grid is that rectangle divided by the cell
+        # size. Built without a terrain size, then told once we know it.
+        from services.coordinate_transformer import CoordinateTransformer
+
+        transformer = CoordinateTransformer(
+            bbox=bbox, crs=country_info["crs"],
+        )
+        faces_x, faces_z = derive_terrain_grid_projected(transformer, cell_size)
+        transformer.set_terrain_size((faces_x * cell_size, faces_z * cell_size))
+        terrain_bounds = transformer.terrain_bounds_projected
+
         target_size_x = faces_x + 1
         target_size_z = faces_z + 1
+
+        logger.info(
+            f"[{job.job_id}] Terrain rectangle ({country_info['crs']}): "
+            f"{transformer.projected_width:.0f}x{transformer.projected_depth:.0f} m "
+            f"drawn -> {faces_x * cell_size}x{faces_z * cell_size} m terrain "
+            f"(margin {(faces_x * cell_size - transformer.projected_width) / 2:.0f}/"
+            f"{(faces_z * cell_size - transformer.projected_depth) / 2:.0f} m per side); "
+            f"spherical estimate was {width_m:.0f}x{height_m:.0f} m"
+        )
 
         target_size = (target_size_x, target_size_z)
         logger.info(
@@ -1040,6 +1098,7 @@ async def run_generation(job: MapGenerationJob):
                 target_resolution=target_resolution,
                 output_dir=output_dir,
                 job=job,
+                transformer=transformer,
             )
         except ElevationTruncatedError as e:
             # The national WCS source returned truncated data.
@@ -1087,6 +1146,7 @@ async def run_generation(job: MapGenerationJob):
                     target_resolution=target_resolution,
                     output_dir=output_dir,
                     job=job,
+                    transformer=transformer,
                 )
             except ElevationTruncatedError as e2:
                 # Fallback also looks truncated — most likely a coastal/ocean
@@ -1149,6 +1209,7 @@ async def run_generation(job: MapGenerationJob):
             primary_country=primary_country,
             heightmap_dimensions=mask_dims,
             job=job,
+            transformer=transformer,
         )
 
         job.progress = 75
@@ -1171,17 +1232,9 @@ async def run_generation(job: MapGenerationJob):
         # the WGS84 envelope of the projected terrain rectangle and fetch a region
         # that fully covers it. Without this, the WGS84-axis-aligned fetch bbox
         # leaves two corners of the projected destination uncovered (see #58).
-        from services.coordinate_transformer import CoordinateTransformer
-
-        terrain_size_m = (
-            float(heightmap_result["terrain_size_m"].split("x")[0]),
-            float(heightmap_result["terrain_size_m"].split("x")[1]),
-        )
-        transformer = CoordinateTransformer(
-            bbox=bbox,
-            crs=country_info["crs"],
-            terrain_size_m=terrain_size_m,
-        )
+        # `transformer` was built before the grid was sized (step 2) — it is
+        # what defined the terrain rectangle, so do not rebuild it here.
+        terrain_size_m = transformer.terrain_size_m
 
         # Render the satellite texture at higher resolution than the heightmap.
         # The diffuse texture imported via Terrain Tool > Import Satellite Map

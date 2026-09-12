@@ -75,6 +75,75 @@ class CoordinateTransformer:
         self._use_pyproj = False
 
         self._setup_projection()
+        self._compute_terrain_origin()
+
+    def _compute_terrain_origin(self):
+        """Place the terrain rectangle over the projected area.
+
+        The terrain is ``terrain_size_m`` metres of the projected CRS, centred
+        on the projected extent of what the user drew. Local coordinates are a
+        pure translation from projected metres — **no per-axis scale** — so one
+        metre on the ground is one metre in game on both axes, always.
+
+        The pre-v1.18.0 code scaled each axis independently to force the
+        projected extent into the terrain box (``target_w / projected_width``).
+        That is an anisotropic squeeze: on the Hammarö map it was x0.97387 in X
+        against x1.01954 in Z, a 4.69% difference, so a circle on the ground
+        became a 4.7% ellipse in game and a 1 km measurement was ~25 m wrong
+        one way and ~20 m the other (issue #203).
+
+        Deriving the grid from the projected extent does **not** fix that on its
+        own: each axis still snaps to a 128-face tile, which puts its scale back
+        up to 128 m / extent away from 1.0, and the two axes round independently
+        — worst case ~4.3% on a 6 km map, and it only measured 0.14% on Hammarö
+        by luck. Removing the scale is what makes it structurally zero.
+
+        Snapping is absorbed as *margin* instead: the terrain is a little larger
+        than the drawn area (``snap_terrain_faces`` rounds up so it always
+        contains it), centred, so the surplus is split between opposite edges.
+        """
+        if self.terrain_size_m is None:
+            # No terrain box yet — local coords are offsets from the SW corner
+            # of the projected extent.
+            self._origin = (
+                self._sw_projected if self._use_pyproj else (0.0, 0.0)
+            )
+            return
+
+        target_w, target_d = self.terrain_size_m
+        if self._use_pyproj:
+            centre_x = (self._sw_projected[0] + self._ne_projected[0]) / 2.0
+            centre_y = (self._sw_projected[1] + self._ne_projected[1]) / 2.0
+        else:
+            centre_x = self._projected_width / 2.0
+            centre_y = self._projected_depth / 2.0
+
+        self._origin = (centre_x - target_w / 2.0, centre_y - target_d / 2.0)
+
+    def set_terrain_size(self, terrain_size_m: tuple[float, float]) -> None:
+        """Attach the terrain box once its size is known.
+
+        The grid size is derived from ``projected_width``/``projected_depth``,
+        so the transformer has to exist before the terrain size does.
+        """
+        self.terrain_size_m = terrain_size_m
+        self._compute_terrain_origin()
+
+    @property
+    def terrain_bounds_projected(self) -> tuple[float, float, float, float]:
+        """The terrain rectangle as ``(min_x, min_y, max_x, max_y)`` in the CRS.
+
+        This is *the* terrain footprint. Everything that has to line up in the
+        finished map — the heightmap, the surface masks, the satellite warp and
+        every spline — resolves against this one rectangle. Before #203 each of
+        those derived its own footprint and they agreed only because everything
+        was stretched to fit.
+        """
+        ox, oz = self._origin
+        if self.terrain_size_m is None:
+            return (ox, oz, ox + self._projected_width, oz + self._projected_depth)
+        w, d = self.terrain_size_m
+        return (ox, oz, ox + w, oz + d)
 
     def _setup_projection(self):
         """Set up pyproj transformers if available and CRS is not WGS84."""
@@ -93,9 +162,21 @@ class CoordinateTransformer:
                 self.crs, "EPSG:4326", always_xy=True
             )
 
-            # Project bbox corners
-            sw_x, sw_y = self._transformer_to_local.transform(self.west, self.south)
-            ne_x, ne_y = self._transformer_to_local.transform(self.east, self.north)
+            # Project the whole perimeter, not just two corners.
+            #
+            # A WGS84 lat/lon box is a *sheared quadrilateral* in a projected
+            # CRS, not a rectangle. Taking NE-minus-SW as the extent (the
+            # pre-v1.18.0 behaviour) therefore describes a box that two of the
+            # four corners fall outside: on the Hammarö map the NW corner
+            # landed at local z=6401 m in a terrain only 6277 m deep, so 247 m
+            # of the area the user drew was never in the terrain at all
+            # (issue #203). The edges bow as well as the corners, so sample
+            # along them rather than transforming four points.
+            lons, lats = self._bbox_perimeter_samples()
+            xs, ys = self._transformer_to_local.transform(lons, lats)
+
+            sw_x, sw_y = float(np.min(xs)), float(np.min(ys))
+            ne_x, ne_y = float(np.max(xs)), float(np.max(ys))
 
             self._sw_projected = (sw_x, sw_y)
             self._ne_projected = (ne_x, ne_y)
@@ -115,6 +196,22 @@ class CoordinateTransformer:
         except Exception as e:
             logger.warning(f"Failed to initialize pyproj with CRS {self.crs}: {e}")
             self._setup_equirectangular()
+
+    def _bbox_perimeter_samples(self, samples_per_edge: int = 64):
+        """Lon/lat arrays tracing the WGS84 bbox perimeter."""
+        lon = np.linspace(self.west, self.east, samples_per_edge)
+        lat = np.linspace(self.south, self.north, samples_per_edge)
+        lons = np.concatenate([
+            lon, lon,
+            np.full(samples_per_edge, self.west),
+            np.full(samples_per_edge, self.east),
+        ])
+        lats = np.concatenate([
+            np.full(samples_per_edge, self.south),
+            np.full(samples_per_edge, self.north),
+            lat, lat,
+        ])
+        return lons, lats
 
     def _setup_equirectangular(self):
         """Set up equirectangular approximation for coordinate transformation."""
@@ -203,21 +300,12 @@ class CoordinateTransformer:
         """
         if self._use_pyproj:
             px, py = self._transformer_to_local.transform(lon, lat)
-            local_x = px - self._sw_projected[0]
-            local_z = py - self._sw_projected[1]
         else:
-            local_x = (lon - self.west) * self._m_per_deg_lon
-            local_z = (lat - self.south) * self._m_per_deg_lat
+            px = (lon - self.west) * self._m_per_deg_lon
+            py = (lat - self.south) * self._m_per_deg_lat
 
-        # If terrain_size_m is specified, scale to fit
-        if self.terrain_size_m is not None:
-            target_w, target_d = self.terrain_size_m
-            if self._projected_width > 0:
-                local_x = local_x * (target_w / self._projected_width)
-            if self._projected_depth > 0:
-                local_z = local_z * (target_d / self._projected_depth)
-
-        return local_x, local_z
+        # Pure translation. No per-axis scale — see _compute_terrain_origin().
+        return px - self._origin[0], py - self._origin[1]
 
     def local_to_wgs84(self, local_x: float, local_z: float) -> tuple[float, float]:
         """
@@ -230,21 +318,14 @@ class CoordinateTransformer:
         Returns:
             (longitude, latitude) in degrees.
         """
-        # Undo terrain scaling if applied
-        if self.terrain_size_m is not None:
-            target_w, target_d = self.terrain_size_m
-            if target_w > 0:
-                local_x = local_x * (self._projected_width / target_w)
-            if target_d > 0:
-                local_z = local_z * (self._projected_depth / target_d)
+        px = local_x + self._origin[0]
+        py = local_z + self._origin[1]
 
         if self._use_pyproj:
-            px = local_x + self._sw_projected[0]
-            py = local_z + self._sw_projected[1]
             lon, lat = self._transformer_to_wgs84.transform(px, py)
         else:
-            lon = self.west + local_x / self._m_per_deg_lon
-            lat = self.south + local_z / self._m_per_deg_lat
+            lon = self.west + px / self._m_per_deg_lon
+            lat = self.south + py / self._m_per_deg_lat
 
         return lon, lat
 

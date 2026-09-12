@@ -23,7 +23,7 @@ from config.terrain import (
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.17.3"
+APP_VERSION = "1.18.0"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
@@ -475,6 +475,28 @@ def snap_to_tile_multiple(face_count: float) -> int:
         A valid terrain grid size — a multiple of 128.
     """
     tiles = max(1, math.floor(face_count / TERRAIN_TILE_FACES + 0.5))
+    snapped = tiles * TERRAIN_TILE_FACES
+    return max(TERRAIN_TILE_FACES, min(snapped, MAX_TERRAIN_GRID_SIZE))
+
+
+def snap_terrain_faces(face_count: float) -> int:
+    """Snap a terrain grid size **upwards** to a valid Enfusion value.
+
+    Like :func:`snap_to_tile_multiple`, but always rounds up. Used when the
+    grid is derived from the terrain's true projected extent (issue #203): the
+    terrain has to *contain* the area the user drew, and the surplus is
+    absorbed as margin around it rather than by scaling the content. Rounding
+    to nearest would shrink the terrain below the drawn area up to half the
+    time and clip the edges off.
+
+    Args:
+        face_count: Desired number of terrain faces per axis. May be
+            fractional.
+
+    Returns:
+        A valid terrain grid size — a multiple of ``TERRAIN_TILE_FACES``.
+    """
+    tiles = max(1, math.ceil(face_count / TERRAIN_TILE_FACES - 1e-9))
     snapped = tiles * TERRAIN_TILE_FACES
     return max(TERRAIN_TILE_FACES, min(snapped, MAX_TERRAIN_GRID_SIZE))
 
