@@ -24,6 +24,7 @@ if str(WEBAPP_DIR) not in sys.path:
 from services.surface_mask_generator import (  # noqa: E402
     check_block_saturation,
     generate_surface_masks,
+    soft_edge_mask,
 )
 
 
@@ -456,4 +457,150 @@ class TestBlockSaturationUsesFaceCellSize:
         ]
         assert (0, 0) in offending, (
             f"Expected the (0,0) block to be flagged; got {offending}"
+        )
+
+
+class TestSoftEdgeMaskDoesNotFeatherAtTheMapBorder:
+    """Issue #202: a forest that runs off the side of the map continues off the
+    side of the map — it does not stop there.
+
+    `soft_edge_mask` fed the raw mask to `parallel_edt`, whose `edt` fast path
+    treats the array border as background. Every mask was therefore feathered
+    inward from all four map edges over exactly `transition_px` pixels. On the
+    reported 2 m/px map with the 20 m forest transition that was a ~20 m ring of
+    wrong surface around the whole terrain: pine ramped to 0 at the edge, and
+    grass (`1 - sum(others)`) rose to fill the gap, which is the bright border
+    the reporter saw on surface_preview.png.
+
+    The artifact was invisible to this suite because `edt` is not in
+    requirements.txt and is usually not installed on the test host, where the
+    scipy fallback has the correct semantics. These tests therefore assert the
+    *behaviour* rather than any particular backend.
+    """
+
+    def test_region_touching_every_edge_is_not_feathered(self):
+        mask = np.ones((80, 80), dtype=bool)
+        mask[30:50, 30:50] = False  # a hole, so the all-True shortcut is skipped
+
+        soft = soft_edge_mask(mask, transition_px=10)
+
+        for name, line in (
+            ("top", soft[0]), ("bottom", soft[-1]),
+            ("left", soft[:, 0]), ("right", soft[:, -1]),
+        ):
+            assert line.min() == pytest.approx(1.0), (
+                f"{name} edge was feathered (min={line.min():.3f}) — issue #202"
+            )
+
+    def test_the_exact_reported_ramp_is_gone(self):
+        """The reporter's file ramped as (d+1)/transition_px going inward from
+        every edge: 0.1, 0.2, 0.3 … at transition_px=10. Assert that specific
+        signature is absent."""
+        mask = np.ones((80, 80), dtype=bool)
+        mask[35:45, 35:45] = False
+
+        soft = soft_edge_mask(mask, transition_px=10)
+
+        observed = [float(soft[d, 5]) for d in range(10)]
+        artifact = [(d + 1) / 10 for d in range(10)]
+        assert observed != pytest.approx(artifact, abs=0.02), (
+            "mask still ramps inward from the map edge — issue #202 regression"
+        )
+        assert all(v == pytest.approx(1.0) for v in observed)
+
+    def test_genuine_interior_boundaries_still_feather(self):
+        """The fix must not disable feathering — only stop the map border from
+        acting as a feature boundary."""
+        mask = np.zeros((200, 200), dtype=bool)
+        mask[:, :100] = True  # runs off top, left and bottom; real edge at x=100
+
+        soft = soft_edge_mask(mask, transition_px=10)
+
+        assert soft[100, 80] == pytest.approx(1.0)   # deep inside
+        assert soft[100, 105] == pytest.approx(0.0)  # outside
+        # linear ramp across the genuine boundary
+        assert 0.0 < soft[100, 95] < 1.0
+        assert soft[100, 92] > soft[100, 95] > soft[100, 98]
+        # …while the map edges stay untouched
+        assert soft[0, :90].min() == pytest.approx(1.0)
+        assert soft[:, 0].min() == pytest.approx(1.0)
+
+    def test_all_inside_and_all_outside_shortcuts_unchanged(self):
+        assert soft_edge_mask(np.ones((20, 20), bool), 5).min() == pytest.approx(1.0)
+        assert soft_edge_mask(np.zeros((20, 20), bool), 5).max() == pytest.approx(0.0)
+        # transition_px <= 0 passes the mask through
+        m = np.array([[True, False], [False, True]])
+        assert soft_edge_mask(m, 0).tolist() == [[1.0, 0.0], [0.0, 1.0]]
+
+    def test_immune_to_a_black_border_edt_backend(self, monkeypatch):
+        """The decisive test, and the one that would have caught #202 here.
+
+        The bug only manifests with the `edt` package, which is absent on the
+        usual test host — so every other test in this class passes with or
+        without the fix. This one substitutes an EDT with `edt`'s
+        black_border=True semantics (outside the array counts as background)
+        and asserts `soft_edge_mask` is unaffected by it, which is exactly what
+        the padding buys us.
+        """
+        from scipy.ndimage import distance_transform_edt
+
+        import services.surface_mask_generator as smg
+
+        def black_border_edt(mask):
+            padded = np.pad(np.asarray(mask, dtype=bool), 1, constant_values=False)
+            return distance_transform_edt(padded)[1:-1, 1:-1]
+
+        monkeypatch.setattr(smg, "parallel_edt", black_border_edt)
+
+        mask = np.ones((80, 80), dtype=bool)
+        mask[35:45, 35:45] = False
+        soft = smg.soft_edge_mask(mask, transition_px=10)
+
+        for name, line in (
+            ("top", soft[0]), ("bottom", soft[-1]),
+            ("left", soft[:, 0]), ("right", soft[:, -1]),
+        ):
+            assert line.min() == pytest.approx(1.0), (
+                f"{name} edge feathered under a black-border EDT backend "
+                f"(min={line.min():.3f}) — issue #202"
+            )
+
+    def test_output_shape_matches_input(self):
+        """The fix pads before the transform and crops after — the returned
+        array must still be the mask's own shape."""
+        mask = np.ones((37, 53), dtype=bool)
+        mask[10:20, 10:20] = False
+        assert soft_edge_mask(mask, transition_px=6).shape == (37, 53)
+
+
+class TestParallelEdtBorderSemantics:
+    """`parallel_edt` had two implementations that disagreed: the `edt` package
+    treats the array border as background, scipy does not. `edt` is not pinned
+    in requirements.txt, so which behaviour you got depended on what happened to
+    be installed in the image — the silent divergence behind #202.
+    """
+
+    def test_border_is_not_treated_as_background(self):
+        from services.utils.parallel import parallel_edt
+
+        mask = np.ones((101, 101), dtype=bool)
+        mask[50, 50] = False  # the only background pixel
+
+        dist = parallel_edt(mask)
+
+        # Distance must be measured to that hole, not to the array border.
+        assert dist[0, 50] == pytest.approx(50.0, abs=0.5), (
+            f"border treated as background (got {dist[0, 50]:.1f}, want ~50)"
+        )
+        assert dist[50, 45] == pytest.approx(5.0, abs=0.5)
+
+    def test_matches_scipy_reference(self):
+        from scipy.ndimage import distance_transform_edt
+
+        from services.utils.parallel import parallel_edt
+
+        rng = np.random.default_rng(0)
+        mask = rng.random((60, 70)) > 0.15
+        np.testing.assert_allclose(
+            parallel_edt(mask), distance_transform_edt(mask), atol=1e-4
         )

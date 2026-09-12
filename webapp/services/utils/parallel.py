@@ -224,6 +224,15 @@ def parallel_edt(
     a native multi-threaded EDT implementation. Falls back to scipy's
     single-threaded distance_transform_edt.
 
+    **Border semantics: the array border is NOT background.** Distance is
+    measured only to background pixels that are actually in the array, which is
+    what scipy's `distance_transform_edt` does. `black_border=False` is passed
+    explicitly because the two implementations otherwise disagree, and `edt` is
+    not pinned in requirements.txt — so whether a mask came out feathered at the
+    map edge depended on which library happened to be installed in the image.
+    That divergence produced the border artifact in issue #202 and was invisible
+    on any host without `edt`, including the one the tests usually run on.
+
     Args:
         binary_mask: Boolean or uint8 array (non-zero = inside).
         workers: Number of threads for the `edt` package.
@@ -236,14 +245,27 @@ def parallel_edt(
 
     try:
         import edt as edt_pkg
-        # The edt package accepts bool/uint8 and returns float32 by default
-        result = edt_pkg.edt(
-            binary_mask.astype(np.uint8, copy=False),
-            parallel=workers,
-        )
-        return result
     except ImportError:
         # Fallback to scipy single-threaded EDT
+        from scipy.ndimage import distance_transform_edt
+        return distance_transform_edt(binary_mask)
+
+    # The edt package accepts bool/uint8 and returns float32 by default
+    try:
+        return edt_pkg.edt(
+            binary_mask.astype(np.uint8, copy=False),
+            parallel=workers,
+            black_border=False,
+        )
+    except TypeError:
+        # Older `edt` builds without the keyword. Its default is the wrong
+        # semantics for us, so use scipy rather than silently reintroducing
+        # the #202 edge feathering.
+        logger.warning(
+            "edt package does not accept black_border=; falling back to "
+            "scipy.distance_transform_edt to keep border semantics correct "
+            "(issue #202)."
+        )
         from scipy.ndimage import distance_transform_edt
         return distance_transform_edt(binary_mask)
 
