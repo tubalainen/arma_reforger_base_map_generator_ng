@@ -180,10 +180,19 @@ def geotiff_to_array(geotiff_bytes: bytes) -> tuple[np.ndarray, dict]:
     # Coastal/ocean selections are exempt: COP30 and similar global DEMs store
     # ocean pixels at exactly 0.0 m (sea level), not as nodata, so a coastal
     # area with 60-70% ocean coverage will legitimately hit the 50% threshold.
-    # We distinguish truncation from ocean by requiring that the non-near-zero
-    # (land) pixels are both numerous (≥10% of total) and show realistic
-    # elevation variation (std > 0.5 m).  Truncated responses have almost no
-    # valid data and/or zero variance; genuine coastal data has both.
+    # We distinguish truncation from ocean by the *quality* of the land pixels,
+    # not how many there are: realistic elevation variation (std > 0.5 m) and a
+    # summit a couple of metres above sea level. Truncated responses have
+    # almost no valid data and/or zero variance.
+    #
+    # The land-fraction floor used to be 10%, which rejected small islands
+    # outright: a 3.6 km selection around Isla Grosa (ES) is 97.4% ocean and
+    # 2.6% island, and generation aborted with "select an area with sufficient
+    # land coverage". That was defensible when island maps were not really
+    # supported; v1.16.0 ships sea bathymetry specifically for them, so an
+    # island has to be a legal selection. The floor is now 0.5% — enough to
+    # still catch a response with essentially no data — and the variation and
+    # summit checks do the real discrimination.
     total_pixels = elevation.size
     near_zero_count = np.sum(np.abs(elevation) < 0.01)
     near_zero_pct = near_zero_count / total_pixels * 100
@@ -191,18 +200,22 @@ def geotiff_to_array(geotiff_bytes: bytes) -> tuple[np.ndarray, dict]:
         non_zero = elevation[np.abs(elevation) >= 0.01]
         non_zero_pct = non_zero.size / total_pixels * 100
         land_std = float(np.std(non_zero)) if non_zero.size > 0 else 0.0
-        if non_zero_pct >= 10 and land_std > 0.5:
-            # Enough land pixels with realistic variation → coastal/ocean area.
+        land_max = float(np.max(non_zero)) if non_zero.size > 0 else 0.0
+        if non_zero_pct >= 0.5 and land_std > 0.5 and land_max > 2.0:
+            # Land pixels look like real terrain → coastal/island area.
             logger.warning(
                 f"DEM has {near_zero_pct:.1f}% near-zero pixels, but "
-                f"{non_zero_pct:.1f}% are valid land data (std={land_std:.1f}m). "
-                f"Treating as coastal/ocean area, not truncated."
+                f"{non_zero_pct:.1f}% are valid land data (std={land_std:.1f}m, "
+                f"max={land_max:.1f}m). Treating as coastal/island area, not "
+                f"truncated."
             )
         else:
             msg = (
-                f"DEM appears truncated: {near_zero_pct:.1f}% of pixels are near-zero "
-                f"({near_zero_count}/{total_pixels}). The elevation API silently "
-                f"returned incomplete data."
+                f"DEM appears truncated: {near_zero_pct:.1f}% of pixels are "
+                f"near-zero ({near_zero_count}/{total_pixels}), and the "
+                f"remaining {non_zero_pct:.2f}% do not look like land "
+                f"(std={land_std:.2f} m, max={land_max:.1f} m). The elevation "
+                f"API silently returned incomplete data."
             )
             logger.error(msg)
             raise ElevationTruncatedError(msg)
@@ -440,19 +453,58 @@ def _synthesize_sea_mask(
     """
     Build a sea polygon mask from OSM `natural=coastline` LineStrings + DEM.
 
-    OSM ships the coast as a LineString (with the sea conventionally on the
-    right), not as a polygon — there is no offshore feature we can rasterize
-    directly. We synthesize one by flood-filling low-elevation pixels from
-    bbox-edge seed pixels that are near the coastline. Returns an empty mask
-    for inland maps (no `coastline` features) or maps with no low-elevation
-    pixels at the bbox edge near a coast.
+    The coast arrives in two different shapes depending on the provider, and
+    both have to work:
+
+    * **OSM** ships it as a `natural=coastline` **LineString** (sea on the
+      right), with no offshore feature to rasterize. We synthesize one by
+      flood-filling low-elevation pixels from bbox-edge seeds near the line.
+    * **Lantmäteriet Marktäcke** ships the sea itself as a **Polygon**
+      (objekttyp 2631 → `water_type: "coastline"`). That is already the
+      offshore area, so it is rasterized directly.
+
+    Handling only the LineString form is why the sea was never detected on any
+    Swedish map: an island in the Gulf of Bothnia came through with a single
+    Polygon coastline feature, `rasterize_lines_per_feature_width` skipped it
+    for not being a line, and the mask came back empty — so no bathymetry was
+    carved and the map was treated as inland (issue #193 follow-up).
+
+    Returns an empty mask for genuinely inland maps (no `coastline` features at
+    all), which leaves the sea path a no-op.
     """
-    from services.utils.rasterize import rasterize_lines_per_feature_width
+    from services.utils.rasterize import (
+        rasterize_features_to_mask,
+        rasterize_lines_per_feature_width,
+    )
 
     height, width = elevation.shape
 
     def _is_coastline(feature: dict) -> bool:
         return (feature.get("properties", {}) or {}).get("water_type") == "coastline"
+
+    # Polygon form: this *is* the sea, no synthesis needed.
+    #
+    # Restricted to Polygon/MultiPolygon on purpose. rasterize_features_to_mask
+    # also strokes LineStrings, so filtering on the tag alone would draw the OSM
+    # coastline *line* into the mask as a 1 px stripe — which lands on the
+    # landward side of the coast as well and leaks sea into the highlands.
+    polygon_only = {
+        "type": "FeatureCollection",
+        "features": [
+            f for f in (water_features or {}).get("features", [])
+            if _is_coastline(f)
+            and (f.get("geometry") or {}).get("type")
+            in ("Polygon", "MultiPolygon")
+        ],
+    }
+    sea_polygons = (
+        rasterize_features_to_mask(
+            polygon_only, width, height, bbox_wgs84,
+            filter_tags={"water_type": ["coastline"]},
+        ).astype(bool)
+        if polygon_only["features"]
+        else np.zeros((height, width), dtype=bool)
+    )
 
     coast = rasterize_lines_per_feature_width(
         water_features,
@@ -463,7 +515,9 @@ def _synthesize_sea_mask(
         filter_fn=_is_coastline,
     )
     if coast.sum() == 0:
-        return np.zeros((height, width), dtype=np.uint8)
+        # No line to flood-fill from; the polygon form is all we have (and on a
+        # Marktäcke map it is all we need).
+        return sea_polygons.astype(np.uint8)
 
     low = elevation <= sea_level_threshold
     edge = np.zeros_like(low, dtype=bool)
@@ -479,10 +533,10 @@ def _synthesize_sea_mask(
     if not seed.any():
         seed = low & edge
         if not seed.any():
-            return np.zeros((height, width), dtype=np.uint8)
+            return sea_polygons.astype(np.uint8)
 
     sea = ndimage.binary_propagation(seed, mask=low)
-    return sea.astype(np.uint8)
+    return (sea | sea_polygons).astype(np.uint8)
 
 
 def qualifying_sea_regions(
