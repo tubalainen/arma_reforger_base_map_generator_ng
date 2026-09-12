@@ -219,26 +219,52 @@ class TestBootstrapEntities:
         )
 
     def test_no_legacy_addon_guid_prefix_in_layers(self):
-        """Regression for issue #111: no generated layer file should embed
-        the addon-level ARMA_REFORGER_GUID as a per-prefab inheritance GUID.
+        """Regression for issues #111 and #198: no generated layer file should
+        embed the addon-level ARMA_REFORGER_GUID as a per-prefab reference.
 
         Pre-1.5 builds used ``{58D0FB3206B6F859}Prefabs/...`` everywhere,
         which made Workbench fail to resolve every world prefab and left
         the terrain entity in a broken state that crashed NVTT on first
         paint stroke.
+
+        This test originally covered only the default and managers layers.
+        The buildings layer kept emitting ``${58D0FB3206B6F859}<path>`` for
+        four years of releases and nothing caught it — every building of
+        every generated map was silently dropped (issue #198). The guard now
+        walks **every** ``_generate_*_layer`` method on the generator, so a
+        new layer is covered the day it is written rather than the day
+        someone remembers to add it here.
+
+        Both spellings are checked: ``{GUID}path`` (the #111 inheritance
+        form) and ``${GUID}path`` (the #198 shorthand).
         """
+        import inspect
+
         from services.enfusion_project_generator import EnfusionProjectGenerator
 
         gen = EnfusionProjectGenerator(
             map_name="TestMap", metadata=_metadata_for_4km(),
         )
-        for layer in (
-            gen._generate_default_layer(),
-            gen._generate_managers_layer(),
-        ):
-            assert "{58D0FB3206B6F859}Prefabs/" not in layer, (
-                "issue #111 regression: addon GUID used as prefab GUID"
-            )
+
+        layer_methods = [
+            name for name, _ in inspect.getmembers(gen, inspect.ismethod)
+            if name.startswith("_generate_") and name.endswith("_layer")
+        ]
+        # Guard the guard: if the naming convention changes, this test must
+        # not silently start checking nothing.
+        assert len(layer_methods) >= 5, (
+            f"expected to find the layer generators, got {layer_methods}"
+        )
+
+        for name in layer_methods:
+            layer = getattr(gen, name)()
+            for bad in ("{58D0FB3206B6F859}Prefabs/",
+                        "${58D0FB3206B6F859}Prefabs/"):
+                assert bad not in layer, (
+                    f"{name}() emits the addon GUID as a prefab reference "
+                    f"({bad!r}) — issues #111 / #198. Workbench resolves no "
+                    f"entity for it and logs nothing."
+                )
 
     def test_default_layer_omits_inline_terrain_grid_properties(self):
         """Pre-1.5 wrote TerrainGridSizeX/Z, GridCellSize, HeightScale,

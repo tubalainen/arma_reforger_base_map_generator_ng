@@ -22,6 +22,7 @@ from typing import Optional
 
 import math
 
+from config.buildings import building_prefab_reference
 from config.enfusion import (
     APP_VERSION,
     ARMA_REFORGER_GUID,
@@ -506,6 +507,7 @@ class EnfusionProjectGenerator:
         instance_name: str | None = None,
         coords: tuple[float, float, float] = (0.0, 0.0, 0.0),
         inline_comment: str | None = None,
+        extra_lines: list[str] | None = None,
     ) -> str:
         """Render a single ``ClassName [Name] : "{GUID}path" { coords … }`` block.
 
@@ -518,6 +520,13 @@ class EnfusionProjectGenerator:
         Either ``key`` (looked up in WORLD_PREFAB_*) or the four explicit
         ``cls / guid / path / instance_name`` arguments must be supplied.
         Explicit args take precedence over key-lookup defaults.
+
+        ``extra_lines`` appends already-indented property lines after
+        ``coords`` — currently only the buildings layer's ``angles 0 <yaw> 0``,
+        which is verified against shipped community building layers. It is
+        **not** an escape hatch for unverified properties: every line passed
+        here needs a reference line behind it, same as ``coords`` (contract
+        §3 — inline properties on a prefab instance caused #111).
         """
         if key is not None:
             cls = cls or WORLD_PREFAB_CLASS[key]
@@ -533,10 +542,12 @@ class EnfusionProjectGenerator:
         head += f' : "{{{guid}}}{path}"'
         suffix = f" // {inline_comment}" if inline_comment else ""
         cx, cy, cz = coords
+        body = [f" coords {cx:.3f} {cy:.3f} {cz:.3f}"]
+        body.extend(extra_lines or [])
         return (
             f"{head} {{{suffix}\n"
-            f" coords {cx:.3f} {cy:.3f} {cz:.3f}\n"
-            f"}}\n"
+            + "\n".join(body)
+            + "\n}\n"
         )
 
     def _render_world_env_block(self) -> str:
@@ -1097,9 +1108,17 @@ class EnfusionProjectGenerator:
         ``config.buildings.KNOWN_BUILDING_PREFABS`` has a verified Enfusion
         prefab path for the building's category:
 
-        * **Validated prefab** → emit a positioned prefab instance using the
-          ``${guid}path/to/prefab.et { coords X Y Z }`` syntax (the same
-          pattern the managers / roads layers use successfully).
+        * **Validated prefab** → emit a positioned prefab instance in the
+          same ``<Class> : "{guid}path/to/prefab.et" { coords X Y Z }`` form
+          the managers layer uses, via ``_render_prefab_instance``.
+
+          Until v1.15.3 this emitted ``${<addon GUID>}<path>`` instead. That
+          form does not resolve in a ``.layer`` — Workbench loads the world,
+          creates no entity, and logs nothing — so every building of every
+          generated map was silently dropped (issue #198; a 7.9 km test lost
+          all 5,991). The GUID must be the ``.et`` file's own resource GUID
+          and an entity class is required; see ``config.buildings``
+          ``BUILDING_PREFAB_GUIDS`` for the values and their provenance.
         * **No validated prefab** (the default until the user confirms paths
           for a stock Reforger install) → emit a closed-spline footprint
           marker on the building's exterior ring. The user sees the actual
@@ -1112,8 +1131,11 @@ class EnfusionProjectGenerator:
         """
         header = (
             "// Buildings layer — one positioned prefab instance per OSM building.\n"
-            "// Each entity references a verified Building_*.et from\n"
-            "//   config/buildings.py::KNOWN_BUILDING_PREFABS\n"
+            "// Each entity is a `<Class> : \"{GUID}<path>.et\"` prefab\n"
+            "// instance built from config/buildings.py:\n"
+            "//   KNOWN_BUILDING_PREFABS (category -> path)\n"
+            "//   BUILDING_PREFAB_GUIDS  (path -> per-file resource GUID)\n"
+            "//   BUILDING_PREFAB_CLASS  (path -> entity class)\n"
             "// and is rotated by `angles 0 <yaw> 0` to align the building's\n"
             "// longest wall with the OSM footprint orientation. Buildings\n"
             "// with an uncatalogued category are logged and skipped (the\n"
@@ -1184,28 +1206,35 @@ class EnfusionProjectGenerator:
                 x_local=origin["x"],
                 z_local=origin["z"],
             )
+            # `_render_prefab_instance` adds the `// ` itself.
             comment = (
-                f' // {entity_name} | {building_name} ({building_type})'
+                f'{entity_name} | {building_name} ({building_type})'
                 if building_name
-                else f' // {entity_name} | {building_type}'
+                else f'{entity_name} | {building_type}'
             )
 
-            if prefab_path:
-                prefab_ref = f"${{{ARMA_REFORGER_GUID}}}{prefab_path}"
+            prefab_ref = building_prefab_reference(prefab_path)
+            if prefab_ref:
+                entity_class, prefab_guid = prefab_ref
                 rotation_deg = float(building.get("rotation_deg", 0.0) or 0.0)
-                body_lines = [
-                    f' coords {origin["x"]:.3f} {origin["y"]:.3f} {origin["z"]:.3f}',
-                ]
                 # `angles 0 <yaw> 0` form verified against shipped community
                 # building layers (DarcMods town01.layer, Overthrow, Coalition).
                 # Skip the line for cardinal-aligned buildings to match the
                 # convention in those files — keeps the output diff-friendly.
-                if abs(rotation_deg) > 0.05:
-                    body_lines.append(f' angles 0 {rotation_deg:.2f} 0')
+                extra_lines = (
+                    [f' angles 0 {rotation_deg:.2f} 0']
+                    if abs(rotation_deg) > 0.05
+                    else None
+                )
                 entities.append(
-                    f'{prefab_ref} {{{comment}\n'
-                    + '\n'.join(body_lines)
-                    + '\n}'
+                    self._render_prefab_instance(
+                        cls=entity_class,
+                        guid=prefab_guid,
+                        path=prefab_path,
+                        coords=(origin["x"], origin["y"], origin["z"]),
+                        inline_comment=comment,
+                        extra_lines=extra_lines,
+                    ).rstrip("\n")
                 )
                 prefab_count += 1
             else:
@@ -1218,9 +1247,13 @@ class EnfusionProjectGenerator:
                 # in v1.2.3) so we never re-arm that footgun.
                 logger.warning(
                     f"Building category {building.get('prefab_category')!r} "
-                    f"has no entry in KNOWN_BUILDING_PREFABS — skipping "
-                    f"osm_id={building.get('osm_id')}. Add the category to "
-                    f"config/buildings.py to fix."
+                    f"(path {prefab_path!r}) has no verified prefab reference "
+                    f"— skipping osm_id={building.get('osm_id')}. Add the "
+                    f"category to KNOWN_BUILDING_PREFABS and its real "
+                    f"resource GUID to BUILDING_PREFAB_GUIDS in "
+                    f"config/buildings.py to fix. Emitting it with the addon "
+                    f"GUID instead is issue #198 — Workbench drops such an "
+                    f"entity silently."
                 )
                 marker_count += 1
                 continue
@@ -2052,10 +2085,26 @@ class EnfusionProjectGenerator:
 
         child_block = ""
         if child_prefab:
-            child_block = (
-                f' ${{{ARMA_REFORGER_GUID}}}{child_prefab} {{\n'
-                f'  coords 0 0 0\n'
-                f' }}\n'
+            # issue #198: this used to emit
+            # ``${<addon GUID>}<path> { coords 0 0 0 }``. That reference
+            # does not resolve in a .layer — Workbench creates no entity
+            # and logs nothing — which is exactly how every building in
+            # every generated map was lost. KNOWN_FOREST_PREFABS and
+            # KNOWN_LAKE_PREFABS are both empty today, so no release has
+            # ever reached this branch; it is kept as a loud failure so
+            # that populating either catalogue cannot silently re-ship
+            # the same defect. To enable it, give the catalogue real
+            # per-file resource GUIDs + entity classes the way
+            # config/buildings.py::BUILDING_PREFAB_GUIDS does, then
+            # render the child through _render_prefab_instance.
+            logger.error(
+                "Child prefab %r requested for a closed spline, but "
+                "generator child prefabs have no verified resource GUID "
+                "yet — omitting the child block rather than emitting an "
+                "unresolvable addon-GUID reference (issue #198). The "
+                "spline footprint is still written; wire the generator "
+                "onto it in World Editor.",
+                child_prefab,
             )
 
         # Pick a descriptive entity name when the caller has supplied a

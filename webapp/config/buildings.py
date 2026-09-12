@@ -79,12 +79,17 @@ KNOWN_BUILDING_PREFABS: dict[str, str] = {
     ),
 
     # Religious ---------------------------------------------------------------
-    # Atlas 2 doesn't list this path, but the destruction variants
-    # ``Church_01_ruin.et`` appear under this base in multiple mods,
-    # which means the base resource ``Church_01.et`` is present in the
-    # addon at this path.
+    # v1.15.4 (issue #198): the previous path
+    # ``Cultural/Churches/Church_01/Church_01.et`` was *inferred* from the
+    # existence of ``Church_01_ruin.et`` and does not exist — the GitHub
+    # layer corpus has no reference to it anywhere. The real resources under
+    # ``Churches/`` are ``Church_01/Church_01_white.et``,
+    # ``Church_01/Church_01_red.et``, ``ChurchSmall_E_01.et`` and
+    # ``ChurchSmall_E_01_weathered.et``. ChurchSmall_E_01 is the one with two
+    # independent references (HubSesk/QuickTvT_Podval, Sm1g00l/Predador-Core)
+    # and reads as a generic village church, so it is the catalogued default.
     "Building_Church": (
-        "Prefabs/Structures/Cultural/Churches/Church_01/Church_01.et"
+        "Prefabs/Structures/Cultural/Churches/ChurchSmall_E_01.et"
     ),
 
     # Commercial --------------------------------------------------------------
@@ -125,6 +130,122 @@ KNOWN_BUILDING_PREFABS: dict[str, str] = {
         "House_Village_E_1I01/House_Village_E_1I01.et"
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Per-resource GUID + entity class (issue #198)
+# ---------------------------------------------------------------------------
+# Until v1.15.3 the buildings layer emitted ``${<addon GUID>}<path>.et`` for
+# every building. That form does not resolve in a ``.layer``: Workbench loads
+# the world, creates no entity, and logs nothing at all — so every building in
+# every generated map was silently dropped (a 7.9 km test lost all 5,991).
+# It is the same defect as issue #111, which section 2 of
+# docs/ENFUSION_CONTRACT.md already forbids; buildings were simply never
+# migrated to the ``WORLD_PREFAB_*`` pattern when #111 was fixed.
+#
+# Two things were wrong: the GUID must be the ``.et`` file's **own** resource
+# GUID (they differ per file, even between variants of one building), and an
+# entity class is required left of the ``:``. The reporter on #198 tested five
+# spellings with the addon GUID — including one with the correct class — and
+# all five failed, which puts the GUID as the primary fault.
+#
+# Keyed by **path**, not category: the GUID and class are properties of the
+# resource, so the two categories that share House_Village_E_1I01
+# (Building_House and Building_Generic) need only one entry, and the tables
+# cannot disagree with each other about one file.
+#
+# Provenance (contract §2: "if we can't read a GUID off a real
+# Workbench-saved layer, we don't ship it"). Every GUID below was read off
+# ``<Class> : "{GUID}<exact path>"`` lines in .layer files in public mod
+# repositories — files Workbench itself wrote. Harvested 2026-09-12 via
+# ``gh api search/code`` over ``extension:layer``, counting only references
+# whose path matches ours **exactly**: the parallel ``PrefabLibrary/...``
+# resources carry different GUIDs for the same building (House_Village_E_1I01
+# is EDBC0E94793BA9F1 under ``Prefabs/Structures/`` but BB32FDB0A276A95D
+# under ``PrefabLibrary/``), and mixing the two would reproduce #111.
+#
+#   path                      GUID              independent repos
+#   House_Village_E_1I01      EDBC0E94793BA9F1  3 + reporter's Workbench 1.8.0.13
+#   House_Town_E_2I01         38A5F3E4578087AB  3
+#   Villa_E_2I01              5CADC96916FF1CC4  3
+#   Office_E_01               51F233A0BA73532A  3
+#   HouseAddon_Garage_E_01    448D2BD96AA205E4  3
+#   ShopModern_E_01           CFE8511B2B7E8AAA  2
+#   Shed_01                   F08D8E78433D713A  2
+#   ChurchSmall_E_01          0FD764569422DBA7  2
+#   Barn_E_03_closed          C363B659675041BA  1  <-- see caveat below
+#
+# Caveat: Barn_E_03_closed is single-source (JoshuaHeathcote1987/GB-Map) —
+# 11 candidate layer files referenced the name, only that one at our exact
+# path. The sibling ``Barn_E_03_open.et`` (66F1A0049CC2F5BD, a different
+# repo) confirms the directory is real. Shipping it is still strictly better
+# than the addon GUID, which is known-broken, but it is the first entry to
+# re-check if a reporter says barns specifically fail to appear.
+BUILDING_PREFAB_GUIDS: dict[str, str] = {
+    "Prefabs/Structures/Houses/Village/"
+    "House_Village_E_1I01/House_Village_E_1I01.et": "EDBC0E94793BA9F1",
+    "Prefabs/Structures/Houses/Town/"
+    "House_Town_E_2I01/House_Town_E_2I01.et": "38A5F3E4578087AB",
+    "Prefabs/Structures/Houses/Villa/"
+    "Villa_E_2I01/Villa_E_2I01.et": "5CADC96916FF1CC4",
+    "Prefabs/Structures/Cultural/Churches/"
+    "ChurchSmall_E_01.et": "0FD764569422DBA7",
+    "Prefabs/Structures/Commercial/Shops/"
+    "ShopModern_E_01.et": "CFE8511B2B7E8AAA",
+    "Prefabs/Structures/Industrial/Houses/"
+    "Office_E_01/Office_E_01.et": "51F233A0BA73532A",
+    "Prefabs/Structures/Houses/Village/"
+    "HouseAddon_Garage_E_01/HouseAddon_Garage_E_01.et": "448D2BD96AA205E4",
+    "Prefabs/Structures/Agriculture/Barn/"
+    "Barn_E_03/Barn_E_03_closed.et": "C363B659675041BA",
+    "Prefabs/Structures/Houses/Shed/"
+    "Shed_01/Shed_01.et": "F08D8E78433D713A",
+}
+
+# Entity class to emit left of the inheritance `:`. Unlike the world prefabs
+# — where the class varies per prefab and is not derivable from the path —
+# every stock *building* in the harvested corpus instantiates as
+# ``SCR_DestructibleBuildingEntity``, across all nine of our paths and all
+# 14 source repositories. The table is still explicit per path rather than a
+# single constant, because the contract's rule is that the class is read off
+# a reference, not assumed; a future non-destructible prefab (a static ruin,
+# say, which the corpus shows as ``StaticModelEntity``) would need its own
+# entry here rather than a special case in the emitter.
+BUILDING_PREFAB_CLASS: dict[str, str] = {
+    path: "SCR_DestructibleBuildingEntity" for path in BUILDING_PREFAB_GUIDS
+}
+
+# Fail at import time if the three tables ever disagree. KNOWN_BUILDING_PREFABS
+# is the catalogue the extractor reads; a path in it with no GUID would emit an
+# unresolvable entity, which is the #198 bug class all over again and is
+# silent in Workbench. Cheap to check, impossible to forget.
+_missing_guids = sorted(
+    set(KNOWN_BUILDING_PREFABS.values()) - set(BUILDING_PREFAB_GUIDS)
+)
+if _missing_guids:  # pragma: no cover - import-time invariant
+    raise RuntimeError(
+        "config.buildings: these KNOWN_BUILDING_PREFABS paths have no entry "
+        f"in BUILDING_PREFAB_GUIDS: {_missing_guids}. Capture the real "
+        "resource GUID (right-click -> Copy Resource GUID in the Resource "
+        "Browser, or read it off a Workbench-saved .layer) before shipping "
+        "the path -- see docs/ENFUSION_CONTRACT.md section 2."
+    )
+del _missing_guids
+
+
+def building_prefab_reference(path: str | None) -> tuple[str, str] | None:
+    """Return ``(entity_class, guid)`` for a catalogued building prefab path.
+
+    ``None`` when the path has no verified GUID, which the buildings-layer
+    emitter treats as "skip this building and log it" — never as "emit it
+    with the addon GUID", the #198 defect.
+    """
+    if not path:
+        return None
+    guid = BUILDING_PREFAB_GUIDS.get(path)
+    if not guid:
+        return None
+    return BUILDING_PREFAB_CLASS.get(path, "SCR_DestructibleBuildingEntity"), guid
 
 
 def validate_building_prefab(category: str | None) -> str | None:
