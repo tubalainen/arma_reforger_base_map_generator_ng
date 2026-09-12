@@ -1097,6 +1097,20 @@ def generate_heightmap(
                     elevation, sea_mask, target_resolution_m,
                 )
 
+            # Issue #215: the sea has already been carved to its own profile
+            # above, and must not be carved a second time by the lake pass.
+            # A provider's sea polygons carry `natural: "water"` (Marktacke
+            # "Hav" and OSM `natural=coastline` areas both do), which the lake
+            # filter matches, so every sea pixel was re-levelled and dropped a
+            # further LAKE_MAX_DEPTH_M below the sea floor: the Gotska Sandon
+            # map bottomed out at -115 m against a 100 m ceiling, with 91% of
+            # the map below it. Latent until v1.16.2 fixed the DEM bounds CRS
+            # and the lake mask started rasterising on Swedish maps at all.
+            if sea_mask.sum():
+                keep = ~sea_mask.astype(bool)
+                for _m in (river_mask, wetland_mask, lake_mask):
+                    _m &= keep
+
             for mask, max_depth, slope, label in (
                 (river_mask, 2.0, 0.3, "river/stream"),
                 (wetland_mask, 1.0, 0.3, "wetland"),
