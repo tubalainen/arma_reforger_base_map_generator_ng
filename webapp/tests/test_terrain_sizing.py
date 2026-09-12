@@ -7,6 +7,8 @@ is 6400). These tests pin snap_to_tile_multiple() and the size constants it
 depends on.
 """
 
+import math
+
 from config.enfusion import snap_to_tile_multiple, pick_clean_height_scale
 from config.terrain import (
     TERRAIN_TILE_FACES, MAX_TERRAIN_GRID_SIZE, MAX_MAP_EXTENT_M,
@@ -86,3 +88,64 @@ class TestTerrainConstants:
 
     def test_max_map_extent_matches_grid_and_cell(self):
         assert MAX_MAP_EXTENT_M == MAX_TERRAIN_GRID_SIZE * DEFAULT_GRID_CELL_SIZE
+
+
+class TestSnapRoundingMatchesTheBrowser:
+    """The browser snaps the drawn box to what it computes, so if the two
+    disagree the user sees one terrain on the map and gets another in the ZIP,
+    silently. Reported by OrcVole on issue #197.
+
+    Two separate causes, both fixed in v1.17.1:
+      * Python's round() is banker's (2.5 -> 2) while Math.round() is half-up
+        (2.5 -> 3), so every ODD half-tile diverged.
+      * map_generator rounded metres -> faces before snapping faces -> tiles,
+        a double rounding the browser's single step does not do.
+    """
+
+    def test_exact_half_tiles_round_up(self):
+        from config.enfusion import snap_to_tile_multiple
+
+        # 2.5 tiles must go to 3, not down to 2 (banker's rounding).
+        assert snap_to_tile_multiple(128 * 2.5) == 128 * 3
+        assert snap_to_tile_multiple(128 * 4.5) == 128 * 5
+        # 3.5 -> 4 agreed even before the fix; pin it so a "fix" can't flip it.
+        assert snap_to_tile_multiple(128 * 3.5) == 128 * 4
+
+    def test_a_640m_axis_does_not_shrink_to_512m(self):
+        """The exact case from the issue: 640 m is 2.5 tiles at 2 m cells."""
+        faces = snap_to_tile_multiple(640 / DEFAULT_GRID_CELL_SIZE)
+        assert faces * DEFAULT_GRID_CELL_SIZE == 768
+
+    def test_fractional_face_counts_are_not_pre_rounded(self):
+        """383 m is 191.5 faces. Pre-rounding gives 192 = exactly 1.5 tiles,
+        which then rounds up to 2; the single step gives 1.496 -> 1."""
+        from config.enfusion import snap_to_tile_multiple
+
+        assert snap_to_tile_multiple(383 / 2) == 128
+
+    def test_agrees_with_the_browser_across_the_whole_range(self):
+        """Sweep every metre from 100 m to 40 km against a direct port of
+        deriveAxis(). Any divergence is a terrain the user did not draw."""
+        from config.enfusion import (
+            snap_to_tile_multiple,
+            TERRAIN_TILE_FACES,
+            MAX_TERRAIN_GRID_SIZE,
+        )
+        from config.terrain import DEFAULT_GRID_CELL_SIZE
+
+        def derive_axis_js(metres: float) -> int:
+            # Math.round() semantics: halves away from zero, positive here.
+            raw = metres / DEFAULT_GRID_CELL_SIZE / TERRAIN_TILE_FACES
+            tiles = min(
+                MAX_TERRAIN_GRID_SIZE // TERRAIN_TILE_FACES,
+                max(1, math.floor(raw + 0.5)),
+            )
+            return tiles * TERRAIN_TILE_FACES
+
+        bad = [
+            m
+            for m in range(100, 40_001)
+            if snap_to_tile_multiple(m / DEFAULT_GRID_CELL_SIZE)
+            != derive_axis_js(m)
+        ]
+        assert not bad, f"{len(bad)} sizes disagree with the browser, e.g. {bad[:5]}"
