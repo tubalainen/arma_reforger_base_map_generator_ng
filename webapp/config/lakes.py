@@ -65,13 +65,21 @@ SEA_MAX_DEPTH_M = 100.0
 # Below it the ceiling is interpolated from SEA_MIN_DEPTH_M.
 SEA_FULL_DEPTH_DISTANCE_M = 1500.0
 
-# "Only where there clearly is a larger body of water." Two independent
-# guards, both of which must hold, so an inland map never gets an ocean floor
-# carved into a big lake:
-#   * the region must cover at least this fraction of the map, and
-#   * it must touch the map edge (a sea continues past the selection; a lake
-#     that fits entirely inside the map is a lake, however large).
-SEA_MIN_AREA_FRACTION = 0.02
+# "Only where there clearly is a larger body of water."
+#
+# **Touching the map edge is the real discriminator**, not how much water there
+# is. A sea continues past the selection; a lake that fits entirely inside the
+# map is a lake however large. That test works identically for an island (sea
+# on all sides) and for a shoreline map (sea on one side) — both are equally
+# valid selections, and a coverage fraction does not distinguish them.
+#
+# The area floor is only a guard against a stray mis-tagged sliver, so it is
+# deliberately small. It was 2% until a coastline map made the point that a
+# mostly-inland selection with a strip of coast in one corner is legitimate and
+# would have been rejected. The semantic signal is already strong before we get
+# here: _synthesize_sea_mask only returns pixels derived from features the
+# provider tagged as coastline (OSM natural=coastline, Marktacke "Hav").
+SEA_MIN_AREA_FRACTION = 0.002
 SEA_MUST_TOUCH_MAP_EDGE = True
 
 # water_type → Enfusion LG_*.et path. Empty by default.

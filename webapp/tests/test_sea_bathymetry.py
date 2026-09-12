@@ -36,6 +36,7 @@ from config.lakes import (  # noqa: E402
 )
 from services.heightmap_generator import (  # noqa: E402
     ElevationTruncatedError,
+    dem_bbox_wgs84,
     _synthesize_sea_mask,
     carve_sea_bathymetry,
     geotiff_to_array,
@@ -84,6 +85,23 @@ class TestQualifyingSeaRegions:
         _, lake = _inland_lake(radius_px=60.0)
         assert lake.mean() > 0.02, "fixture should clear the area threshold"
         assert qualifying_sea_regions(lake).sum() == 0
+
+    def test_shoreline_map_qualifies_not_just_islands(self):
+        """A mainland coast with sea on ONE side is as valid as an island.
+        Touching the map edge is the discriminator, not the coverage fraction —
+        a mostly-inland selection with a strip of coast must still get a sea
+        bed."""
+        mask = np.zeros((N, N), dtype=np.uint8)
+        mask[:, : int(N * 0.08)] = 1          # 8% of the map, along one edge
+        kept = qualifying_sea_regions(mask)
+        assert kept.sum() == mask.sum(), "a one-sided shoreline was rejected"
+
+    def test_narrow_coastal_strip_in_one_corner_qualifies(self):
+        """The case that motivated dropping the area floor from 2% to 0.2%."""
+        mask = np.zeros((N, N), dtype=np.uint8)
+        mask[: int(N * 0.03), : int(N * 0.20)] = 1   # 0.6% of the map
+        assert 0.002 < mask.mean() < 0.02, "fixture must sit under the old 2% floor"
+        assert qualifying_sea_regions(mask).sum() > 0
 
     def test_tiny_edge_puddle_is_rejected(self):
         """Touches the edge but is far too small to be open sea."""
@@ -340,3 +358,67 @@ class TestSmallIslandIsNotATruncatedDem:
 
         with pytest.raises(ElevationTruncatedError):
             geotiff_to_array(self._geotiff(arr))
+
+
+class _Bounds:
+    def __init__(self, left, bottom, right, top):
+        self.left, self.bottom, self.right, self.top = left, bottom, right, top
+
+
+class TestDemBoundsAreConvertedToWgs84:
+    """Every rasterizer maps a coordinate with `(lng - west) / lng_range`, i.e.
+    it assumes degrees. The DEM's bounds are in the DEM's own CRS, and only
+    some providers hand us WGS84.
+
+    Lantmäteriet STAC Höjd delivers **EPSG:5845** (SWEREF99 TM + RH2000) and the
+    merge keeps it, so bounds arrive as metres — ~742354, 6470557 for Gotska
+    Sandön. Feeding those in as degrees put every water and road feature far
+    outside the raster, where the clamp folded them into the corner. The real
+    run logged `Carving bathymetry for lake/pond/reservoir mask: 1 px` and no
+    sea line at all, so an island 90% covered by sea was written as inland —
+    and road flattening had silently done nothing on every Swedish map.
+    """
+
+    def test_projected_bounds_are_converted(self):
+        pytest.importorskip("rasterio")
+        # Gotska Sandön's real EPSG:5845 extent.
+        out = dem_bbox_wgs84({
+            "bounds": _Bounds(742354, 6470557, 754356, 6484154),
+            "crs": "EPSG:5845",
+        })
+        assert out is not None
+        west, south, east, north = out
+        # The generation log requested 19.137,58.309 -> 19.357,58.424.
+        assert west == pytest.approx(19.137, abs=0.01)
+        assert east == pytest.approx(19.357, abs=0.01)
+        assert south == pytest.approx(58.309, abs=0.02)
+        assert north == pytest.approx(58.424, abs=0.02)
+
+    def test_projected_bounds_are_not_left_as_degrees(self):
+        """The specific failure: metres used as longitude."""
+        pytest.importorskip("rasterio")
+        out = dem_bbox_wgs84({
+            "bounds": _Bounds(742354, 6470557, 754356, 6484154),
+            "crs": "EPSG:5845",
+        })
+        assert all(abs(v) <= 180 for v in out), (
+            f"bounds {out} are still projected metres — features would be "
+            f"clamped into the corner of the raster"
+        )
+
+    def test_wgs84_bounds_pass_through_unchanged(self):
+        """COP30 already delivers EPSG:4326; conversion must be a no-op."""
+        box = _Bounds(-0.789, 37.679, -0.748, 37.711)
+        assert dem_bbox_wgs84({"bounds": box, "crs": "EPSG:4326"}) == (
+            -0.789, 37.679, -0.748, 37.711
+        )
+
+    def test_missing_bounds_returns_none(self):
+        assert dem_bbox_wgs84({}) is None
+        assert dem_bbox_wgs84({"crs": "EPSG:4326"}) is None
+
+    def test_missing_crs_falls_back_to_unchanged(self):
+        """Better to behave as before than to crash; a warning is logged."""
+        assert dem_bbox_wgs84({"bounds": _Bounds(1, 2, 3, 4), "crs": ""}) == (
+            1.0, 2.0, 3.0, 4.0
+        )
