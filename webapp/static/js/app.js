@@ -784,6 +784,9 @@ function updateProgress(job) {
                 case 'feature_extraction':
                     consoleMessage = `✓ Extracted features: ${step.summary.lakes || 0} lakes, ${step.summary.rivers || 0} rivers, ${step.summary.forest_areas || 0} forests, ${step.summary.buildings || 0} buildings`;
                     break;
+                case 'satellite_imagery':
+                    consoleMessage = `✓ Downloaded satellite imagery from ${step.source} (${step.dimensions})`;
+                    break;
                 case 'coordinate_transform':
                     consoleMessage = `✓ Coordinate transformer set up (${step.method || 'auto'}, CRS: ${step.crs || 'N/A'})`;
                     break;
@@ -834,6 +837,9 @@ function updateProgress(job) {
             case 'feature_extraction':
                 detail = `Features: ${step.summary.lakes || 0} lakes, ${step.summary.rivers || 0} rivers, ${step.summary.forest_areas || 0} forests, ${step.summary.buildings || 0} buildings`;
                 break;
+            case 'satellite_imagery':
+                detail = `Satellite: ${step.source} (${step.dimensions})`;
+                break;
             case 'coordinate_transform':
                 detail = `Coordinates: ${step.method || 'auto'} (${step.crs || 'N/A'})`;
                 break;
@@ -845,6 +851,17 @@ function updateProgress(job) {
                 break;
             case 'export_organized':
                 detail = `Export organized & ZIP created`;
+                break;
+            default:
+                // Issue #205: a step the backend emits but this switch doesn't
+                // know rendered as an empty string, so the user saw a green
+                // tick with no label. `satellite_imagery` did exactly that from
+                // the day it was added. Fall back to the step name rather than
+                // showing a blank row, so the next unhandled step is obvious
+                // instead of invisible.
+                detail = String(step.step || 'step')
+                    .replace(/_/g, ' ')
+                    .replace(/^./, c => c.toUpperCase());
                 break;
         }
 
