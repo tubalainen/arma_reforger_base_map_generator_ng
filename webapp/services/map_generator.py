@@ -690,6 +690,7 @@ def build_metadata(
             # Absolute altitude of world Y=0, plus the true real-world span,
             # so the guide can still tell the user where on Earth this sits.
             "land_datum_m": heightmap_result.get("land_datum_m", 0.0),
+            "is_coastal_map": heightmap_result.get("is_coastal_map", False),
             "absolute_min_elevation_m": heightmap_result.get(
                 "absolute_min_elevation", heightmap_result["min_elevation"]
             ),
