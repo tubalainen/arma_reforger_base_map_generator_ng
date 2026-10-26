@@ -1,17 +1,17 @@
 FROM python:3.11-slim-bookworm AS builder
 
-# Install build dependencies.
+# No build dependencies, and no apt layer at all.
 #
-# No GDAL headers here. Nothing in requirements.txt binds to libgdal any more:
-# rasterio and pyproj carry their own GDAL and PROJ inside their wheels, and the
-# code never imports osgeo or shells out to the gdal CLI. These headers existed
-# only to compile the GDAL Python bindings, which are gone.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgeos-dev \
-    libproj-dev \
-    libspatialindex-dev \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+# Every line in requirements.txt resolves to a manylinux wheel for this image's
+# platform, so nothing is compiled here: the GIS wheels (rasterio, pyproj,
+# shapely) vendor their own GDAL, PROJ and GEOS, and the GDAL Python bindings
+# that once needed libgdal-dev are gone. If a dependency is ever added that has
+# no wheel, pip will fail loudly here rather than silently build something, and
+# the headers it needs belong in this stage only.
+#
+# The build is verified: docker-publish.yml loads the image on every pull
+# request and exercises a real reprojection, a real geometry op and the health
+# endpoint, which is what proves the vendored libraries are self-contained.
 
 WORKDIR /app
 
@@ -26,6 +26,15 @@ FROM python:3.11-slim-bookworm
 
 # Install runtime dependencies only.
 #
+# No GIS libraries here. rasterio, pyproj and shapely each vendor their own
+# copy of GDAL, PROJ and GEOS inside their wheels, so the Debian libgdal32 /
+# libproj25 / libgeos-c1v5 packages were never loaded, and libspatialindex6 was
+# for rtree, which this project does not use (shapely 2's STRtree is built in).
+# gdal-bin went with them: nothing shells out to the GDAL CLI.
+#
+# curl is load-bearing: entrypoint.sh fetches the Leaflet icons with it and the
+# HEALTHCHECK calls it.
+#
 # osmium-tool and pbzip2 are for the Overpass sidecar's init step, not the web
 # app. The importer needs bzip2 XML and the mirrors publish PBF, so something
 # has to convert; doing it in this image rather than in the Overpass one is
@@ -33,11 +42,6 @@ FROM python:3.11-slim-bookworm
 # implementation, so converting there burns an hour on a single thread while
 # the rest of the machine idles.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gdal-bin \
-    libgdal32 \
-    libgeos-c1v5 \
-    libproj25 \
-    libspatialindex6 \
     curl \
     osmium-tool \
     pbzip2 \
