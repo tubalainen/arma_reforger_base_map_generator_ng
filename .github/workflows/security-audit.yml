@@ -77,6 +77,12 @@ jobs:
 
   container-image:
     name: Container CVEs
+    # Not on pull requests. This job scans the *published* image, which a pull
+    # request has not changed, so on a PR it would report the state of main's
+    # last build and fail for something the PR cannot fix. docker-publish.yml
+    # already builds the image on every PR, which is what catches a broken
+    # build; this catches a vulnerable published one.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
