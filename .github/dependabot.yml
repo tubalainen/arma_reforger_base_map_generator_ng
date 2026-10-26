@@ -17,11 +17,6 @@ updates:
     labels: [dependencies]
     commit-message:
       prefix: deps
-    ignore:
-      # GDAL must match the system libgdal that the Dockerfile installs from
-      # Debian Bookworm (3.6.2). Bumping the wheel without the base image is a
-      # broken build, so this one moves by hand.
-      - dependency-name: GDAL
 
   - package-ecosystem: github-actions
     directory: /

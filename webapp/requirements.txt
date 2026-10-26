@@ -18,10 +18,6 @@ shapely==2.0.6
 pyproj==3.7.0
 geojson==3.2.0
 
-# GDAL - must match system libgdal version from Debian repos.
-# The Dockerfile installs libgdal-dev from Debian Bookworm (3.6.2)
-GDAL==3.6.2
-
 # Testing
 pytest==9.1.1
 pytest-asyncio==1.4.1

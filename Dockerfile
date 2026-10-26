@@ -1,18 +1,17 @@
 FROM python:3.11-slim-bookworm AS builder
 
-# Install build dependencies
+# Install build dependencies.
+#
+# No GDAL headers here. Nothing in requirements.txt binds to libgdal any more:
+# rasterio and pyproj carry their own GDAL and PROJ inside their wheels, and the
+# code never imports osgeo or shells out to the gdal CLI. These headers existed
+# only to compile the GDAL Python bindings, which are gone.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gdal-bin \
-    libgdal-dev \
     libgeos-dev \
     libproj-dev \
     libspatialindex-dev \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
-
-ENV GDAL_CONFIG=/usr/bin/gdal-config
-ENV CPLUS_INCLUDE_PATH=/usr/include/gdal
-ENV C_INCLUDE_PATH=/usr/include/gdal
 
 WORKDIR /app
 
