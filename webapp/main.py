@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional
@@ -63,10 +64,28 @@ configure_gdal_threading()
 # FastAPI app
 # ===========================================================================
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """
+    Application startup tasks.
+
+    Clears any hanging sessions from previous runs to ensure a clean state.
+    """
+    from services.session_service import clear_all_sessions
+
+    logger.info(f"==================================================")
+    logger.info(f"  Arma Reforger Base Map Generator NG  v{APP_VERSION}")
+    logger.info(f"==================================================")
+    cleared_count = clear_all_sessions()
+    logger.info(f"Startup cleanup: cleared {cleared_count} hanging sessions")
+    yield
+
+
 app = FastAPI(
     title="Arma Reforger Base Map Generator",
     description="Generate base maps for Arma Reforger from real-world open GIS data",
     version=APP_VERSION,
+    lifespan=lifespan,
 )
 
 # ===========================================================================
@@ -96,27 +115,6 @@ app.add_middleware(RateLimitMiddleware)
 
 # Session management (innermost - runs first on request)
 app.add_middleware(SessionMiddleware)
-
-# ===========================================================================
-# Startup event handlers
-# ===========================================================================
-
-
-@app.on_event("startup")
-async def startup_event():
-    """
-    Application startup tasks.
-
-    Clears any hanging sessions from previous runs to ensure a clean state.
-    """
-    from services.session_service import clear_all_sessions
-
-    logger.info(f"==================================================")
-    logger.info(f"  Arma Reforger Base Map Generator NG  v{APP_VERSION}")
-    logger.info(f"==================================================")
-    cleared_count = clear_all_sessions()
-    logger.info(f"Startup cleanup: cleared {cleared_count} hanging sessions")
-
 
 # ===========================================================================
 # Cleanup scheduler
