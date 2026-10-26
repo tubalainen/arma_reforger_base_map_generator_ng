@@ -25,3 +25,15 @@ GDAL==3.6.2
 # Testing
 pytest==9.1.1
 pytest-asyncio==1.4.1
+
+# Transitive dependencies, pinned on purpose
+# ---------------------------------------------------------------------------
+# Nothing here is imported directly. They are pinned because the security
+# audit resolves this file to the *minimum* version each dependency's metadata
+# allows, and those floors still carry advisories even though pip installs
+# something newer. Pinning them makes the scan describe what actually ships
+# and makes the build reproducible.
+anyio==4.15.1          # via starlette, httpx
+certifi==2026.10.23    # via httpx
+idna==3.20             # via httpx, anyio
+pygments==2.21.0       # via pytest
