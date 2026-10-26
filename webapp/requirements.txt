@@ -14,7 +14,7 @@ edt==2.4.1  # Multi-threaded Euclidean distance transform
 
 # GIS libraries
 rasterio==1.4.3
-shapely==2.0.6
+shapely==2.2.0
 pyproj==3.7.0
 geojson==3.2.0
 
