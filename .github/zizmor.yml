@@ -1,0 +1,24 @@
+# Policy for the workflow audit in .github/workflows/security-audit.yml.
+rules:
+  unpinned-uses:
+    config:
+      # zizmor's default is a blanket hash-pin policy. A tag pin is good enough
+      # for the publishers we already hand a token to, and it is what keeps
+      # Dependabot able to read and bump these refs; anything outside that set
+      # has to be pinned to a commit.
+      policies:
+        'actions/*': ref-pin
+        'github/*': ref-pin
+        'docker/*': ref-pin
+        'anthropics/*': ref-pin
+        'aquasecurity/*': ref-pin
+        'google/*': ref-pin
+        '*': hash-pin
+
+  dangerous-triggers:
+    ignore:
+      # claude.yml exists to answer @claude mentions, so issue_comment is the
+      # trigger it needs. It is gated on `github.actor == 'tubalainen'` and the
+      # job holds read scopes only, so a comment from anyone else cannot reach
+      # it or write anything.
+      - claude.yml:3

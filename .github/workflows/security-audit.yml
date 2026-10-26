@@ -1,0 +1,262 @@
+name: Security Audit
+
+# Daily sweep for known vulnerabilities and stale components:
+#   * Python CVEs       - the pinned requirements, via pip-audit (PyPI advisories)
+#   * Container CVEs    - the image users actually pull from GHCR, via Trivy.
+#                         This covers the Debian base layer, the apt packages and
+#                         every installed Python package, transitive ones included.
+#   * Workflow security - zizmor, plus a major-version check on every pinned action.
+#
+# A fix only reaches users through the published image, so the image - not the
+# working tree - is what gets scanned for the dependency tree.
+
+on:
+  schedule:
+    # 05:17 UTC daily. Off the hour, because scheduled runs on the hour queue
+    # behind everyone else's and can be delayed by tens of minutes.
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'webapp/requirements.txt'
+      - 'Dockerfile'
+      - '.github/workflows/**'
+      - '.github/scripts/**'
+      - '.github/dependabot.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-dependencies:
+    name: Python CVEs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Audit webapp/requirements.txt against the OSV database
+        # osv-scanner parses requirements.txt and resolves the tree from the
+        # registry metadata, so it reports transitive packages too. pip-audit
+        # would be the obvious choice, but even with --no-deps it dry-run-installs
+        # the file, and GDAL ships no wheel - resolving it needs libgdal-dev on
+        # the runner and fails.
+        uses: google/osv-scanner-action/osv-scanner-action@v2.7.0
+        with:
+          scan-args: |-
+            --lockfile=requirements.txt:webapp/requirements.txt
+            --format=markdown
+            --output-file=python-cves.md
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo '## Python dependency CVEs'
+            echo
+            if [ -s python-cves.md ]; then
+              cat python-cves.md
+            else
+              echo 'No known vulnerabilities in the pinned requirements.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-cves
+          path: python-cves.md
+          if-no-files-found: ignore
+
+  container-image:
+    name: Container CVEs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan the published image (SARIF)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:latest
+          format: sarif
+          output: trivy.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '0'
+
+      - name: Upload SARIF to code scanning
+        # Advisory: a repository with code scanning disabled rejects the upload,
+        # and that must not fail the audit.
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy.sarif
+          category: trivy-image
+
+      - name: Scan the published image (report, fails on findings)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository }}:latest
+          format: table
+          output: container-cves.txt
+          severity: CRITICAL,HIGH
+          # Unfixed OS CVEs are noise here: Debian has no patched package to
+          # move to, so there is nothing to do until it ships one.
+          ignore-unfixed: true
+          exit-code: '1'
+          skip-setup-trivy: true
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo '## Container image CVEs'
+            echo
+            echo "Image: ghcr.io/${{ github.repository }}:latest - HIGH and CRITICAL, fixed only."
+            echo
+            if [ -s container-cves.txt ]; then
+              echo '```'
+              cat container-cves.txt
+              echo '```'
+            else
+              echo 'No fixable HIGH or CRITICAL vulnerabilities.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: container-cves
+          path: container-cves.txt
+          if-no-files-found: ignore
+
+  actions-audit:
+    name: Workflow and action audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Install zizmor
+        run: pip install --disable-pip-version-check zizmor==1.31.1
+
+      - name: Audit workflows with zizmor (SARIF)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: zizmor --format sarif --min-severity medium . > zizmor.sarif || true
+
+      - name: Upload SARIF to code scanning
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor
+
+      - name: Audit workflows with zizmor (report)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          code=0
+          zizmor --format plain --min-severity medium . > zizmor.txt 2>&1 || code=$?
+          {
+            echo '## Workflow security (zizmor)'
+            echo
+            echo '```'
+            cat zizmor.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat zizmor.txt
+          exit "$code"
+
+      - name: Check pinned action versions
+        # Advisory only. Dependabot opens the bump PRs; a red daily run for an
+        # action that is merely a major behind would train us to ignore this
+        # workflow, so stale pins are warnings and CVEs are failures.
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/check-action-versions.sh
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: workflow-audit
+          path: |
+            zizmor.txt
+            action-versions.md
+          if-no-files-found: ignore
+
+  report:
+    name: Report
+    needs: [python-dependencies, container-image, actions-audit]
+    # Only the scheduled run files an issue; a pull request already shows its
+    # own red checks.
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download reports
+        uses: actions/download-artifact@v8
+        with:
+          path: reports
+          merge-multiple: true
+
+      - name: Open or update the tracking issue
+        if: contains(needs.*.result, 'failure')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PY_RESULT: ${{ needs.python-dependencies.result }}
+          IMG_RESULT: ${{ needs.container-image.result }}
+          ACT_RESULT: ${{ needs.actions-audit.result }}
+        run: bash .github/scripts/report-security-findings.sh
+
+      - name: Close the tracking issue when everything is clean
+        if: ${{ !contains(needs.*.result, 'failure') }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          number=$(gh issue list --repo "$REPO" --state open --label security \
+            --search 'Daily security audit in:title' --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$REPO" \
+              --body 'The daily security audit is clean again. Closing.'
+            gh issue close "$number" --repo "$REPO"
+          fi
