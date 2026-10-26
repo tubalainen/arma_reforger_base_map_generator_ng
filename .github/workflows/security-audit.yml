@@ -42,17 +42,17 @@ jobs:
           persist-credentials: false
 
       - name: Audit webapp/requirements.txt against the OSV database
-        # osv-scanner parses requirements.txt lexically. pip-audit would be the
-        # obvious choice, but even with --no-deps it dry-run-resolves the file,
-        # and GDAL ships no wheel - resolving it needs libgdal-dev on the runner
-        # and fails. Transitive packages are covered by the container scan,
-        # which reads what is really installed in the published image.
+        # osv-scanner parses requirements.txt and resolves the tree from the
+        # registry metadata, so it reports transitive packages too. pip-audit
+        # would be the obvious choice, but even with --no-deps it dry-run-installs
+        # the file, and GDAL ships no wheel - resolving it needs libgdal-dev on
+        # the runner and fails.
         uses: google/osv-scanner-action/osv-scanner-action@v2.7.0
         with:
           scan-args: |-
             --lockfile=requirements.txt:webapp/requirements.txt
             --format=markdown
-            --output=python-cves.md
+            --output-file=python-cves.md
 
       - name: Summarise
         if: always()
