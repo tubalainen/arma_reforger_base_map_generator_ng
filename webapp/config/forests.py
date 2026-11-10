@@ -18,15 +18,18 @@ from __future__ import annotations
 # names two specific Forest Generator prefabs by example:
 #   FG_Forest_Spruce1.et   (ID 1 in the SCR_SHPPrefabDataList)
 #   FG_Forest_Pine1.et     (ID 2)
-# Note the trailing `1` with no underscore separator. The doc doesn't pin
-# the directory path; search the Resource Browser for "FG_Forest" to find
-# the actual location in your Reforger install. The catalogue below ships
-# empty so we never fabricate a path that fails to resolve in Workbench.
+# Note the trailing `1` with no underscore separator. Both are at
+# `Prefabs/WEGenerators/Forest/` in the 1.9.0.37 resource database, next to
+# ~100 other FG_Forest_* generators (FG_Forest_Birch, FG_Forest_Hornbeam,
+# FG_Forest_MixedBirchPine, …). The catalogue below ships empty because a
+# path is not enough: emitting a generator needs that file's own resource
+# GUID, which `python -m tests.vanilla_resources` can read from an install.
 #
-# Example (confirm against your install before committing):
-#   "coniferous": "<dir>/FG_Forest_Pine1.et",
-#   "deciduous":  "<dir>/FG_Forest_Deciduous1.et",
-#   "mixed":      "<dir>/FG_Forest_Spruce1.et",
+# Example (there is no FG_Forest_Deciduous1 — an earlier version of this
+# comment suggested one):
+#   "coniferous": "Prefabs/WEGenerators/Forest/FG_Forest_Pine1.et",
+#   "deciduous":  "Prefabs/WEGenerators/Forest/FG_Forest_Birch.et",
+#   "mixed":      "Prefabs/WEGenerators/Forest/FG_Forest_MixedBirchPine.et",
 KNOWN_FOREST_PREFABS: dict[str, str] = {}
 
 

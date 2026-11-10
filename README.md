@@ -10,8 +10,10 @@ structured Enfusion project with a `SETUP_GUIDE.md` written for your specific ma
 
 <img width="1920" height="1152" alt="The generator's map view" src="https://github.com/user-attachments/assets/31b9a3de-3581-47aa-b060-ee56fbcf73f6" />
 
-> Tested with **Arma Reforger Tools 1.8.0.10**. The generated project layout, heightmap `.asc`,
-> surface masks and `.layer`/`.ent`/`.gproj` files also load in 1.7 with no format changes.
+> Checked against **Arma Reforger 1.9.0.37**: every prefab and material the generated project
+> references is verified against that build's resource database. The project layout, heightmap
+> `.asc`, surface masks and `.layer`/`.ent`/`.gproj` format are unchanged since 1.7, so a map
+> generated before 1.9 still loads.
 
 ## Quick start
 

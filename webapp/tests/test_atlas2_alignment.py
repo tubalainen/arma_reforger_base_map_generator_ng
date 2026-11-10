@@ -96,21 +96,21 @@ class TestAtlas2RoadCatalog:
         from config.roads import fully_qualified_road_prefab
         # Asphalt prefab → Asphalt/ subdirectory + verified GUID.
         assert fully_qualified_road_prefab("RG_Road_Asphalt_E_03") == (
-            "{8B67F44381CD2216}PrefabLibrary/Generators/Roads/Asphalt/"
+            "{8B67F44381CD2216}PrefabLibrary/DefaultLibrary/Generators/Roads/Asphalt/"
             "RG_Road_Asphalt_E_03.et"
         )
         # Cobblestone prefab → Cobblestone/ subdirectory.
         assert fully_qualified_road_prefab("RG_Road_Cobblestone_01") == (
-            "{ABC15429070F8391}PrefabLibrary/Generators/Roads/Cobblestone/"
+            "{ABC15429070F8391}PrefabLibrary/DefaultLibrary/Generators/Roads/Cobblestone/"
             "RG_Road_Cobblestone_01.et"
         )
         # Forest/trail prefabs live under Dirt/ per Atlas 2 SCR_SHPPrefabDataList.
         assert fully_qualified_road_prefab("RG_Road_Forest_01") == (
-            "{6C770E9E60A49C05}PrefabLibrary/Generators/Roads/Dirt/"
+            "{6C770E9E60A49C05}PrefabLibrary/DefaultLibrary/Generators/Roads/Dirt/"
             "RG_Road_Forest_01.et"
         )
         assert fully_qualified_road_prefab("RG_TrailGravel_01") == (
-            "{98DF2267CDD17758}PrefabLibrary/Generators/Roads/Dirt/"
+            "{98DF2267CDD17758}PrefabLibrary/DefaultLibrary/Generators/Roads/Dirt/"
             "RG_TrailGravel_01.et"
         )
 
@@ -197,7 +197,7 @@ class TestAtlas2RoadCatalog:
             fq = fully_qualified_road_prefab(name)
             assert fq is not None, f"{name} has no fully-qualified form"
             assert fq.startswith("{"), fq
-            assert "}PrefabLibrary/Generators/Roads/" in fq, fq
+            assert "}PrefabLibrary/DefaultLibrary/Generators/Roads/" in fq, fq
             assert fq.endswith(f"/{name}.et"), (
                 f"{name} resolved to {fq}, which does not end in the "
                 f"prefab's own filename"

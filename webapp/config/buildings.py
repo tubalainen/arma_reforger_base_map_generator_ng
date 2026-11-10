@@ -88,15 +88,22 @@ KNOWN_BUILDING_PREFABS: dict[str, str] = {
     # ``ChurchSmall_E_01_weathered.et``. ChurchSmall_E_01 is the one with two
     # independent references (HubSesk/QuickTvT_Podval, Sm1g00l/Predador-Core)
     # and reads as a generic village church, so it is the catalogued default.
+    #
+    # v1.18.5: the file sits in a same-named subfolder in the 1.9.0.37
+    # resource database. Layers saved before 2026 reference it one level up;
+    # the GUID is the same either way.
     "Building_Church": (
-        "Prefabs/Structures/Cultural/Churches/ChurchSmall_E_01.et"
+        "Prefabs/Structures/Cultural/Churches/"
+        "ChurchSmall_E_01/ChurchSmall_E_01.et"
     ),
 
     # Commercial --------------------------------------------------------------
     # Modern shop building — single-storey concrete commercial unit. Used by
     # Overthrow's Test Island for generic shops.
+    # v1.18.5: moved into a same-named subfolder, same GUID (see the church).
     "Building_Commercial": (
-        "Prefabs/Structures/Commercial/Shops/ShopModern_E_01.et"
+        "Prefabs/Structures/Commercial/Shops/"
+        "ShopModern_E_01/ShopModern_E_01.et"
     ),
 
     # Industrial / warehouse --------------------------------------------------
@@ -189,9 +196,9 @@ BUILDING_PREFAB_GUIDS: dict[str, str] = {
     "Prefabs/Structures/Houses/Villa/"
     "Villa_E_2I01/Villa_E_2I01.et": "5CADC96916FF1CC4",
     "Prefabs/Structures/Cultural/Churches/"
-    "ChurchSmall_E_01.et": "0FD764569422DBA7",
+    "ChurchSmall_E_01/ChurchSmall_E_01.et": "0FD764569422DBA7",
     "Prefabs/Structures/Commercial/Shops/"
-    "ShopModern_E_01.et": "CFE8511B2B7E8AAA",
+    "ShopModern_E_01/ShopModern_E_01.et": "CFE8511B2B7E8AAA",
     "Prefabs/Structures/Industrial/Houses/"
     "Office_E_01/Office_E_01.et": "51F233A0BA73532A",
     "Prefabs/Structures/Houses/Village/"

@@ -360,6 +360,7 @@ Import order is in `surface_assignments.json` (`surface_import_order`). Per Atla
 - **Sky / atmosphere** comes from the `GenericWorldEntity world {{ … }}` block written at the top of `default.layer` (v1.5.7+). Ocean materials are intentionally not shipped — drag one in if your map has coastline (Atlas 2 p.5).
 - **Do not run *World Editor Plugins → World Setup → Entities Setup* on this project** (new in Reforger 1.8). That plugin populates a *fresh* terrain with the basic world entities from `Configs/Workbench/WorldEditor/WorldSetupPlugin/1_BaseWorldSetup.conf`. This project already ships those entities in `default.layer` and `managers.layer`, so running it would duplicate them.
 - **Normal map now feeds Far Hide (1.8)** — its alpha channel carries the grass coverage mask, so a stale normal map breaks long-range concealment as well as lighting. Regenerate via *Terrain Tool → Generate normal map* after any change to terrain height.
+- **Arma Reforger 1.9 changes nothing in this project's format** — a map generated before 1.9 loads as it is. Two things are new for terrain makers. World Editor plugins that sculpt or paint through script may have stopped working, because 1.9 removed `WorldEditorAPI.ModifyHeightMap` and `ModifyLayers`; the built-in imports this guide uses are unaffected. And the reworked vehicle simulation takes grip, dust and mud from the surface under each wheel, so the road surface masks now change how a road drives, not only how it looks — do not skip painting them.
 
 If anything in this section is unclear, the step-by-step phases below have the longer form with screenshots references. Otherwise, you're done with this section — open the project and go."""
 
@@ -421,7 +422,10 @@ If anything in this section is unclear, the step-by-step phases below have the l
     def _prerequisites(self) -> str:
         return """## Prerequisites
 
-- **Arma Reforger Tools** installed via Steam (free DLC) — tested with **1.8.0.10**
+- **Arma Reforger Tools** installed via Steam (free DLC). Every prefab and
+  material this project references is checked against **Arma Reforger
+  1.9.0.37**; the Workbench menu and dialog names quoted in this guide were
+  last confirmed on Tools 1.8.0.13
 - At least **8 GB RAM** recommended for terrain operations
 - **Do NOT** place the project folder inside a OneDrive directory — it will fail to load"""
 
@@ -820,21 +824,25 @@ coordinates and following terrain elevation.
 panel tells you what each road is at a glance:
 
 ```
-SplineShapeEntity Road_E4_Asphalt   {{ // E4 | prefab: RG_Road_Asphalt_E_03 | paints: asphalt | fq: {{8B67F44381CD2216}}PrefabLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_03.et
-SplineShapeEntity Road_Storgatan_Asphalt {{ // Storgatan | prefab: RG_Road_Asphalt_E_01_DashedLine | paints: asphalt | fq: {{5E336AEB0923963F}}PrefabLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_01_DashedLine.et
-SplineShapeEntity Road_Asphalt_NE_001 {{ // prefab: RG_Road_Asphalt_E_01_Narrow | paints: asphalt | fq: {{31086BE1AF790FC5}}PrefabLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_01_Narrow.et
+SplineShapeEntity Road_E4_Asphalt   {{ // E4 | prefab: RG_Road_Asphalt_E_03 | paints: asphalt | fq: {{8B67F44381CD2216}}PrefabLibrary/DefaultLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_03.et
+SplineShapeEntity Road_Storgatan_Asphalt {{ // Storgatan | prefab: RG_Road_Asphalt_E_01_DashedLine | paints: asphalt | fq: {{5E336AEB0923963F}}PrefabLibrary/DefaultLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_01_DashedLine.et
+SplineShapeEntity Road_Asphalt_NE_001 {{ // prefab: RG_Road_Asphalt_E_01_Narrow | paints: asphalt | fq: {{31086BE1AF790FC5}}PrefabLibrary/DefaultLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_01_Narrow.et
 ```
 
 The `fq:` token in each comment is the fully-qualified `{{guid}}path.et`
 string you can paste directly into the **RoadGeneratorEntity > Prefab**
-field, taking the GUID from Atlas 2's `SCR_SHPPrefabDataList` (the
-canonical source — see [`docs/Atlas2.pdf`](../docs/Atlas2.pdf) p. 12).
+field. The prefab names are the ones Atlas 2 lists in its
+`SCR_SHPPrefabDataList` ([`docs/Atlas2.pdf`](../docs/Atlas2.pdf) p. 12);
+each GUID and path is checked against the game's own resource database
+(Arma Reforger 1.9.0.37).
 
 Prefab names are the **Atlas 2 canonical set** (`RG_Road_Asphalt_E_01..03`,
 `RG_Road_Asphalt_E_01_DashedLine`, `RG_Road_Asphalt_E_01_Narrow`,
 `RG_Road_Dirt_01`, `RG_Road_Dirt_02`, `RG_Road_Forest_01`,
 `RG_Road_Cobblestone_01`, `RG_TrailDirt_01`, `RG_TrailGravel_01`) —
-all under `PrefabLibrary/Generators/Roads/{{Asphalt|Cobblestone|Dirt}}/`.
+all under `PrefabLibrary/DefaultLibrary/Generators/Roads/{{Asphalt|Cobblestone|Dirt}}/`.
+(Guides and layers from before 2026 write this without `DefaultLibrary/`;
+Bohemia moved the files and kept the GUIDs, so both spellings resolve.)
 
 Splines are emitted **without** an attached `RoadGeneratorEntity` child —
 v1.1.0 attempted to auto-attach the generator but the resulting nested
@@ -853,9 +861,9 @@ that behaviour. Attach the generator manually as described below.
 
 1. Select the **SplineShapeEntity** in the hierarchy
 2. Right-click > **Add Child Entity** > **RoadGeneratorEntity**
-3. In the new child's properties, set the **Prefab** field to the value
-   shown in the spline's `// prefab: …` comment, fully qualified to
-   `Prefabs/WEGenerators/Roads/<prefab>.et`
+3. In the new child's properties, set the **Prefab** field to the `fq:`
+   value from the spline's `//` comment — the whole
+   `{{GUID}}PrefabLibrary/DefaultLibrary/Generators/Roads/…/<prefab>.et` string
 4. Optionally enable **Adjust Height Map** on the generator to carve the
    road into the terrain
 5. Repeat for each road spline. `Reference/roads_reference.csv` has the
@@ -868,10 +876,13 @@ that behaviour. Attach the generator manually as described below.
 - `Reference/roads_enfusion.geojson` — road data with local coordinates
 - `Reference/roads_splines.csv` — spline control points in local metres
 
-> **Note**: Road prefabs are located at `Prefabs/WEGenerators/Roads/` in
-> the ArmaReforger data. The suggested prefab is snapped to a known-good
-> name (asphalt, gravel, dirt at the widths shipped with stock Reforger),
-> so it should load without errors."""
+> **Note**: These road generators are in the World Editor prefab library,
+> under `PrefabLibrary/DefaultLibrary/Generators/Roads/` in the ArmaReforger
+> data. `Prefabs/WEGenerators/Roads/` holds generators with the same names
+> but **different GUIDs**, so paste the `fq:` value as written rather than
+> retyping the path. The suggested prefab is snapped to a known-good name
+> (asphalt, gravel, dirt at the widths shipped with stock Reforger), so it
+> should load without errors."""
 
     def _phase_vegetation_water(self) -> str:
         lakes = self.features.get("lakes", 0)
@@ -893,7 +904,7 @@ that behaviour. Attach the generator manually as described below.
 >
 > - Rivers: drag `R_RiverMedium_01.et` onto the river spline (Resource
 >   Browser → search "RiverMedium" or navigate
->   `ArmaReforger > Prefabs > World > Water > River`).
+>   `ArmaReforger > Prefabs > WEGenerators > Water > River`).
 > - Forests: `FG_Forest_Spruce1.et`, `FG_Forest_Pine1.et` (note the
 >   trailing `1`, no underscore separator).
 

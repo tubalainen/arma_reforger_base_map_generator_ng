@@ -86,9 +86,15 @@ SEA_MUST_TOUCH_MAP_EDGE = True
 # Keys match the water_type OSM property values used in the water layer.
 # Valid keys: "lake", "pond", "reservoir", "water"
 #
-# Example (confirm paths against your Reforger install before committing):
+# The 1.9.0.37 resource database has five lake generators in
+# `Prefabs/WEGenerators/Water/Lake/`: LG_Lake_01, LG_LakeDirty_01,
+# LG_LakeMountain_01, LG_CainLake_01 and LG_DirtyDrainage_01. There is no
+# LG_Lake_Small_01 — an earlier version of this comment suggested one.
+# As with forests, each entry also needs the file's own resource GUID.
+#
+# Example:
 #   "lake":      "Prefabs/WEGenerators/Water/Lake/LG_Lake_01.et",
-#   "pond":      "Prefabs/WEGenerators/Water/Lake/LG_Lake_Small_01.et",
+#   "pond":      "Prefabs/WEGenerators/Water/Lake/LG_LakeDirty_01.et",
 #   "reservoir": "Prefabs/WEGenerators/Water/Lake/LG_Lake_01.et",
 #   "water":     "Prefabs/WEGenerators/Water/Lake/LG_Lake_01.et",
 KNOWN_LAKE_PREFABS: dict[str, str] = {}

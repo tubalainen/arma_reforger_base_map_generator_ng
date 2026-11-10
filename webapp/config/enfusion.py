@@ -4,8 +4,12 @@ Enfusion Workbench project generation constants.
 Centralized configuration for generating Enfusion-compatible project files,
 world entities, surface material mappings, and prefab paths.
 
-All paths and GUIDs are verified against the official Bohemia Interactive
-Community Wiki (community.bistudio.com) as of 2025-02-09.
+Every resource path and GUID in this package is checked against the game's
+own resource database (``addons/data/resourceDatabase.rdb``), last captured
+from Arma Reforger 1.9.0.37 into ``tests/fixtures/vanilla_resources.json``.
+``tests/test_vanilla_resources.py`` fails if a value here drifts from that
+snapshot; ``python -m tests.vanilla_resources --write`` refreshes it from an
+installed game after an update.
 """
 
 import math
@@ -23,7 +27,7 @@ from config.terrain import (
 # enfusion_project_generator.py to stamp into every generated file header.
 # Bump here on every release; the README Docker tag pin should match.
 
-APP_VERSION = "1.18.4"
+APP_VERSION = "1.18.5"
 
 # ---------------------------------------------------------------------------
 # Base game dependency
@@ -209,10 +213,13 @@ WORLD_PREFABS = {
     "mp_destruction":   "Prefabs/MP/MPDestructionManager.et",
     "sound_world":      "Prefabs/Sounds/SoundWorld/SoundWorld_Base.et",
     # GameMaster sub-scene prefab — not in `_default.layer`, only referenced
-    # when/if we generate a gamemode sub-scene. Left at its previous path;
-    # not verified against the reference layer (the reference is a base
-    # scene, not a sub-scene).
-    "gamemode_editor":  "Prefabs/MP/Modes/GameMaster/GameMode_Editor_Full.et",
+    # when/if we generate a gamemode sub-scene, so it has no entry in
+    # WORLD_PREFAB_GUIDS / WORLD_PREFAB_CLASS. The path is checked against
+    # the resource database (v1.18.5): it lives under `Modes/Editor/`, not
+    # the `Modes/GameMaster/` this entry guessed until then. Its resource
+    # GUID is DA3986AF1B5032B7; the entity class is still unread, so capture
+    # that from a Workbench-saved layer before emitting it.
+    "gamemode_editor":  "Prefabs/MP/Modes/Editor/GameMode_Editor_Full.et",
 }
 
 # Per-prefab resource GUID. Workbench's resource DB requires the exact
@@ -333,13 +340,20 @@ def resolve_ambient_prefab(country_codes: list[str] | None) -> str:
 # Generator prefab base paths (verified from wiki Directory Structure)
 # ---------------------------------------------------------------------------
 
-# Atlas 2 (Jakerod) cross-reference (docs/Atlas2.pdf, p. 12 — the
-# SCR_SHPPrefabDataList block) documents the canonical paths:
-#   PrefabLibrary/Generators/Roads/<Asphalt|Cobblestone|Dirt>/<prefab>.et
-# The legacy `Prefabs/WEGenerators/Roads/` path used in v1.3.x and earlier
-# was a guess; Atlas 2's PDF (committed to the repo at docs/Atlas2.pdf)
-# is the source of truth.
-ROAD_PREFAB_BASE = "PrefabLibrary/Generators/Roads"
+# Road generators, as the World Editor's prefab library lists them:
+#   PrefabLibrary/DefaultLibrary/Generators/Roads/<Asphalt|Cobblestone|Dirt>/<prefab>.et
+#
+# Atlas 2 (docs/Atlas2.pdf, p. 12) and Workbench layers saved up to 2025
+# write this without the `DefaultLibrary/` segment. Bohemia has since split
+# the library per terrain (`DefaultLibrary/`, `CainLibrary/`, and
+# `RallyLibrary/` in the Rally DLC addon) and moved the files; the resource
+# GUIDs did not change, so an old path still resolves by GUID. v1.18.5
+# emits the current path, read from the 1.9.0.37 resource database.
+#
+# `Prefabs/WEGenerators/Roads/<sub>/` also exists and holds generators of the
+# same names with *different* GUIDs — the two trees are not interchangeable
+# in a `{GUID}path` reference.
+ROAD_PREFAB_BASE = "PrefabLibrary/DefaultLibrary/Generators/Roads"
 # Per-surface subdirectories — used when the SETUP_GUIDE quotes a
 # fully-qualified path for the editor user to drag.
 ROAD_PREFAB_SUBDIRS: dict[str, str] = {
@@ -348,10 +362,10 @@ ROAD_PREFAB_SUBDIRS: dict[str, str] = {
     "dirt": "Dirt",       # also hosts gravel trail prefabs
     "gravel": "Dirt",     # RG_TrailGravel_01 / RG_Road_Forest_01 live here
 }
-# Forest / Lake generator base paths remain unverified against Atlas 2
-# (the doc doesn't list them in a SCR_*PrefabDataList form). The
-# KNOWN_FOREST_PREFABS / KNOWN_LAKE_PREFABS catalogues ship empty so we
-# never fabricate unverified paths.
+# Forest / Lake generator directories. Both exist in the 1.9.0.37 resource
+# database (`FG_Forest_Pine1.et`, `LG_Lake_01.et`, …). The
+# KNOWN_FOREST_PREFABS / KNOWN_LAKE_PREFABS catalogues still ship empty:
+# a path is not enough, each entry needs its own resource GUID as well.
 FOREST_PREFAB_BASE = "Prefabs/WEGenerators/Forest"
 LAKE_PREFAB_BASE = "Prefabs/WEGenerators/Water/Lake"
 
