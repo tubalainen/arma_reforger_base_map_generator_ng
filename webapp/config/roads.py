@@ -1,5 +1,7 @@
 """Road classification tables for Enfusion (Atlas 2 alignment, v1.4.0)."""
 
+from config.enfusion import ROAD_PREFAB_BASE
+
 # Country-specific road surface inference rules
 ROAD_DEFAULT_SURFACE: dict[str, dict[str, str]] = {
     "NO": {
@@ -148,7 +150,7 @@ PREFAB_GUIDS: dict[str, str] = {
 
 def fully_qualified_road_prefab(prefab_name: str) -> str | None:
     """
-    Return the fully-qualified `{<guid>}PrefabLibrary/Generators/Roads/<sub>/<prefab>.et`
+    Return the fully-qualified `{<guid>}<ROAD_PREFAB_BASE>/<sub>/<prefab>.et`
     string for a known Atlas 2 road prefab, or None if the name isn't catalogued.
 
     Subdirectory mapping (from Atlas 2 SCR_SHPPrefabDataList):
@@ -168,7 +170,7 @@ def fully_qualified_road_prefab(prefab_name: str) -> str | None:
         subdir = "Cobblestone"
     else:
         subdir = "Dirt"
-    return f"{{{guid}}}PrefabLibrary/Generators/Roads/{subdir}/{prefab_name}.et"
+    return f"{{{guid}}}{ROAD_PREFAB_BASE}/{subdir}/{prefab_name}.et"
 
 # Single source of truth for OSM highway → Enfusion road mapping.
 # Each row picks the closest Atlas 2 prefab for the OSM tag's typical

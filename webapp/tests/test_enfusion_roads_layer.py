@@ -102,7 +102,7 @@ class TestRoadsLayerSplineOnly:
         assert "// E39" in out
         assert "prefab: RG_Road_Asphalt_E_01" in out
         assert "paints: asphalt" in out
-        assert "fq: {02AF8C5A31EC3A53}PrefabLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_01.et" in out
+        assert "fq: {02AF8C5A31EC3A53}PrefabLibrary/DefaultLibrary/Generators/Roads/Asphalt/RG_Road_Asphalt_E_01.et" in out
 
     def test_unknown_prefab_is_normalized_in_comment(self, make_generator):
         from config.roads import KNOWN_ROAD_PREFABS
