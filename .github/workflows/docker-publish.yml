@@ -40,20 +40,33 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # The last entry is a predictable local tag for the pull-request smoke
+          # test. It is never pushed, because push is false on pull requests.
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=pr-smoke,enable=${{ github.event_name == 'pull_request' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
+          # On a pull request nothing is pushed, so load the image into the
+          # runner's daemon instead and actually run it in the next step.
+          load: ${{ github.event_name == 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64
+
+      - name: Smoke-test the built image
+        # The image installs no system GDAL, PROJ or GEOS - the wheels vendor
+        # their own. A successful build does not prove those are complete, so
+        # run real work in the container: see .github/scripts/smoke-test-image.sh.
+        if: github.event_name == 'pull_request'
+        run: bash .github/scripts/smoke-test-image.sh "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:pr-smoke"
