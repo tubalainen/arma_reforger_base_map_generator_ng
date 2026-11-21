@@ -10,13 +10,16 @@ httpx==0.28.1
 numpy==2.2.1
 scipy==1.15.0
 Pillow==13.0.0
-edt==2.4.1  # Multi-threaded Euclidean distance transform
+edt==3.1.2  # Multi-threaded Euclidean distance transform
 
 # GIS libraries
 rasterio==1.4.3
-shapely==2.0.6
+shapely==2.2.0
 pyproj==3.7.0
-geojson==3.2.0
+# geojson was pinned here and never imported - the pipeline builds and
+# consumes GeoJSON as plain dicts through the json module. Removed rather
+# than bumped (Dependabot #225), the same way the dead GDAL pin went in
+# PR #236. Nothing in the tree requires it transitively either.
 
 # Testing
 pytest==9.1.1
