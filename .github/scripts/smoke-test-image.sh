@@ -13,6 +13,12 @@
 # That is not cosmetic: issue #202 was an edge artifact that appeared only when
 # `edt` was absent or too old, and it was invisible on hosts without it.
 #
+# It also asserts that the Python packaging tooling is gone. The production
+# stage deletes pip, setuptools, wheel and pkg_resources, because every open
+# security finding on this repository lived in them and nothing in the image
+# needs them. That deletion is only worth anything if it keeps happening, so
+# it is checked on the finished image rather than trusted to the Dockerfile.
+#
 # Usage: smoke-test-image.sh <image-ref>
 set -euo pipefail
 
@@ -89,6 +95,42 @@ d = edt.edt(np.ones((8, 8), dtype="uint8"), parallel=1, black_border=False)
 assert d.shape == (8, 8), d.shape
 print(f"edt with black_border=False ok: {edt.__version__ if hasattr(edt, '__version__') else 'installed'}")
 PY
+echo "::endgroup::"
+
+echo "::group::No Python packaging tooling in the runtime image"
+# The Dockerfile deletes pip, setuptools, wheel and pkg_resources from the
+# production stage: they are build-time tools, and every open security finding
+# on this repository came from them (CVE-2026-23949 and CVE-2026-24049 in
+# setuptools/_vendor, six more against pip 24.0 and setuptools 79.0.1).
+#
+# The Dockerfile asserts this at build time, which catches a base image that
+# hides the tooling somewhere else. This asserts it on the finished image,
+# which catches a later layer putting it back - and checks the console scripts
+# as well as the importable packages, since a stale /usr/local/bin/pip would
+# still be a working installer.
+docker run --rm --entrypoint python "$IMAGE" -c "
+import importlib.util, os
+
+left = [m for m in ('pip', 'setuptools', 'pkg_resources', 'wheel')
+        if importlib.util.find_spec(m) is not None]
+assert not left, 'packaging tooling importable in the image: %s' % left
+
+scripts = sorted(
+    f for f in os.listdir('/usr/local/bin')
+    if f.startswith(('pip', 'wheel', 'easy_install'))
+)
+assert not scripts, 'packaging console scripts left in the image: %s' % scripts
+
+print('pip, setuptools, wheel and pkg_resources are all absent')
+"
+# A dangling .pth would make every interpreter start print a traceback to
+# stderr while still exiting 0, so check the stream, not the exit code.
+noise="$(docker run --rm --entrypoint python "$IMAGE" -c 'pass' 2>&1)"
+if [ -n "$noise" ]; then
+  echo "interpreter start is not silent: $noise" >&2
+  exit 1
+fi
+echo "interpreter starts clean - no orphaned distutils-precedence.pth"
 echo "::endgroup::"
 
 echo "::group::Container starts and answers /api/health"

@@ -57,6 +57,42 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
+# Strip the Python packaging tooling out of the runtime image.
+#
+# pip, setuptools and setuptools' vendored copies of wheel and jaraco.context
+# come from the base image, and the COPY above carries the builder's versions
+# of them in as well. Nothing in this image needs any of it: every dependency
+# is already installed, the entrypoint shells out only to curl, and no shipped
+# package imports setuptools or pkg_resources at runtime (pytest's single
+# reference is guarded by `if "pkg_resources" in sys.modules`).
+#
+# What the tooling does carry is every open security finding on this
+# repository: CVE-2026-23949 and CVE-2026-24049 in setuptools/_vendor, which
+# fail the daily audit, plus six more against pip 24.0 and setuptools 79.0.1
+# in code scanning. Upgrading the tooling would only move the vendored
+# versions along and leave the same surface for the next advisory to re-flag;
+# removing a build-time dependency from a runtime image removes it for good.
+#
+# _distutils_hack and distutils-precedence.pth go too - they are setuptools'
+# import hook, and a .pth left pointing at a deleted package prints a
+# traceback on every interpreter start.
+#
+# The two checks are the guard. If a base image ever puts the tooling
+# somewhere this does not look, or a future dependency needs setuptools at
+# runtime, the build fails here instead of at the first request.
+RUN SITE_PACKAGES="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
+    && rm -rf \
+        "$SITE_PACKAGES"/pip "$SITE_PACKAGES"/pip-*.dist-info \
+        "$SITE_PACKAGES"/setuptools "$SITE_PACKAGES"/setuptools-*.dist-info \
+        "$SITE_PACKAGES"/pkg_resources \
+        "$SITE_PACKAGES"/wheel "$SITE_PACKAGES"/wheel-*.dist-info \
+        "$SITE_PACKAGES"/_distutils_hack \
+        "$SITE_PACKAGES"/distutils-precedence.pth \
+    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.* \
+             /usr/local/bin/wheel /usr/local/bin/wheel3 \
+    && python -c "import importlib.util as u; left = [m for m in ('pip', 'setuptools', 'pkg_resources', 'wheel') if u.find_spec(m) is not None]; assert not left, 'packaging tooling still importable: %s' % left" \
+    && python -c "import PIL, edt, fastapi, numpy, pyproj, rasterio, scipy, shapely, starlette, uvicorn; print('runtime stack imports with no packaging tooling present')"
+
 # Enable multi-threaded processing for CPU-bound operations:
 # - GDAL_NUM_THREADS: rasterio.warp.reproject uses GDAL's internal thread pool
 # - OMP_NUM_THREADS: OpenBLAS linear algebra (numpy matrix ops)
