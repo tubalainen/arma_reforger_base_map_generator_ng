@@ -13,7 +13,12 @@ import base64
 import logging
 from typing import Optional
 
-from config.lantmateriet import LANTMATERIET_CONFIG
+# Imported as a module, and the attribute read inside each function, on
+# purpose. `from ... import LANTMATERIET_CONFIG` binds the object that existed
+# when this module was first imported, so reassigning
+# `config.lantmateriet.LANTMATERIET_CONFIG` - which is the only way the config
+# is ever reloaded - would never reach the credential check here.
+from config import lantmateriet as lm_config
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +30,8 @@ def get_basic_auth_header() -> Optional[dict]:
     Returns:
         Dict with Authorization header, or None if credentials missing.
     """
-    if not LANTMATERIET_CONFIG.has_credentials():
+    config = lm_config.LANTMATERIET_CONFIG
+    if not config.has_credentials():
         logger.warning(
             "Lantmäteriet credentials not configured. "
             "Set LANTMATERIET_USERNAME and LANTMATERIET_PASSWORD in .env file. "
@@ -33,10 +39,7 @@ def get_basic_auth_header() -> Optional[dict]:
         )
         return None
 
-    credentials = (
-        f"{LANTMATERIET_CONFIG.username}:"
-        f"{LANTMATERIET_CONFIG.password}"
-    )
+    credentials = f"{config.username}:{config.password}"
     encoded = base64.b64encode(credentials.encode()).decode()
 
     return {"Authorization": f"Basic {encoded}"}

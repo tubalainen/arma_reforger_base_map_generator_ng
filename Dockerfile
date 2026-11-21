@@ -1,4 +1,25 @@
-FROM python:3.11-slim-bookworm AS builder
+# Python 3.13 on Debian 12 (bookworm).
+#
+# The interpreter version is bounded on both sides, by wheel availability
+# rather than by anything in the code. Every requirement has to resolve to a
+# manylinux wheel (see the builder stage below), and the only window where
+# they all do is 3.12-3.13.
+#
+# Below it: scipy and pyproj have stopped publishing cp311 wheels - scipy
+# 1.18.x and pyproj 3.8.x both declare Requires-Python >=3.12, which is what
+# left Dependabot #228 and #237 unmergeable on 3.11.
+#
+# Above it: numpy 2.2.1, rasterio 1.4.3 and scipy top out at cp313 and
+# publish nothing for cp314 or cp315, so a newer interpreter would force them
+# to compile in a stage that deliberately carries no compilers. Newer Python
+# is worse here, not better - that is why Dependabot #242 (3.15) was closed.
+# Check both ends before moving these lines.
+#
+# bookworm rather than trixie deliberately: one variable at a time. glibc
+# 2.36 satisfies Pillow 13's manylinux_2_28 wheels, Trivy reports the Debian
+# side of this image at 0, and the daily audit watches it.
+
+FROM python:3.13-slim-bookworm AS builder
 
 # No build dependencies, and no apt layer at all.
 #
@@ -22,7 +43,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ============================================
 # Production image
 # ============================================
-FROM python:3.11-slim-bookworm
+FROM python:3.13-slim-bookworm
 
 # Install runtime dependencies only.
 #
@@ -54,7 +75,7 @@ RUN groupadd -r appgroup && useradd -r -g appgroup -d /app -s /sbin/nologin appu
 WORKDIR /app
 
 # Copy Python packages from builder
-COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Strip the Python packaging tooling out of the runtime image.

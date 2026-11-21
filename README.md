@@ -127,7 +127,7 @@ gives you PNG, SVG, an animated WebM or a share card. Generated from
 
 ## Tech stack
 
-- **Backend** — Python 3.11, FastAPI, Uvicorn
+- **Backend** — Python 3.13, FastAPI, Uvicorn
 - **GIS** — GDAL, rasterio, shapely, pyproj, numpy, scipy, Pillow
 - **Frontend** — Leaflet.js, Leaflet.Draw, Bootstrap 5
 - **Container** — Docker, multi-stage build, non-root user

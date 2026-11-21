@@ -13,6 +13,12 @@
 # That is not cosmetic: issue #202 was an edge artifact that appeared only when
 # `edt` was absent or too old, and it was invisible on hosts without it.
 #
+# It then runs the full test suite inside the container. The dev host runs a
+# different Python and newer libraries than requirements.txt pins, so this is
+# the only place the suite ever meets the interpreter and the wheels that
+# actually ship - which is what makes an interpreter or base-image bump
+# verifiable rather than assumed.
+#
 # It also asserts that the Python packaging tooling is gone. The production
 # stage deletes pip, setuptools, wheel and pkg_resources, because every open
 # security finding on this repository lived in them and nothing in the image
@@ -95,6 +101,20 @@ d = edt.edt(np.ones((8, 8), dtype="uint8"), parallel=1, black_border=False)
 assert d.shape == (8, 8), d.shape
 print(f"edt with black_border=False ok: {edt.__version__ if hasattr(edt, '__version__') else 'installed'}")
 PY
+echo "::endgroup::"
+
+echo "::group::The test suite, on the interpreter and wheels that ship"
+# The suite is the only thing that exercises the pipeline rather than the
+# libraries, and the dev host runs a different stack entirely (a newer Python
+# with newer numpy, scipy, rasterio and Pillow than this file pins). So run it
+# here, against the exact interpreter and the exact wheels the image carries.
+# This is what makes a base-image or interpreter bump verifiable: a pin that
+# resolves and imports says nothing about scipy.ndimage or shapely behaving
+# the same way on a new interpreter.
+#
+# pytest and pytest-asyncio are in requirements.txt, so they are already in
+# the image; -p no:cacheprovider keeps it from writing into /app as appuser.
+docker run --rm --entrypoint python "$IMAGE" -m pytest -q -p no:cacheprovider
 echo "::endgroup::"
 
 echo "::group::No Python packaging tooling in the runtime image"
