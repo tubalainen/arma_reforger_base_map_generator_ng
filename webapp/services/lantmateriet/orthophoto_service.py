@@ -29,7 +29,12 @@ from typing import Optional
 
 import httpx
 
-from config.lantmateriet import LANTMATERIET_CONFIG
+# Imported as a module, with the attribute read at call time. A
+# `from ... import LANTMATERIET_CONFIG` binds the object that existed when this
+# module was first imported, so a reassignment of
+# `config.lantmateriet.LANTMATERIET_CONFIG` - the only way the config is ever
+# reloaded - would never be seen here. See config/lantmateriet.py.
+from config import lantmateriet as lm_config
 from services.lantmateriet.auth import get_authenticated_headers
 
 logger = logging.getLogger(__name__)
@@ -69,8 +74,8 @@ async def fetch_historical_orthophoto(
         return None
 
     # Lantmäteriet WMS max dimension is 4096 pixels
-    width = min(width, LANTMATERIET_CONFIG.max_tile_size)
-    height = min(height, LANTMATERIET_CONFIG.max_tile_size)
+    width = min(width, lm_config.LANTMATERIET_CONFIG.max_tile_size)
+    height = min(height, lm_config.LANTMATERIET_CONFIG.max_tile_size)
 
     w, s, e, n = bbox_wgs84
     params = {
@@ -94,7 +99,7 @@ async def fetch_historical_orthophoto(
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 resp = await client.get(
-                    LANTMATERIET_CONFIG.orthophoto_wms,
+                    lm_config.LANTMATERIET_CONFIG.orthophoto_wms,
                     params=params,
                     headers=headers,
                 )

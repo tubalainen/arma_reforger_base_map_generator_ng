@@ -31,6 +31,9 @@ from config.elevation import (
 )
 
 # Lantmäteriet (Sweden)
+# Re-exported for convenience, but `from config import LANTMATERIET_CONFIG`
+# takes the same stale snapshot described in config/lantmateriet.py. Service
+# code imports the module and reads the attribute instead.
 from config.lantmateriet import LantmaterietConfig, LANTMATERIET_CONFIG
 
 # Road classification

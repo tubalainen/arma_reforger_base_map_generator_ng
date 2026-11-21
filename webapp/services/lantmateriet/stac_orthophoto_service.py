@@ -55,7 +55,12 @@ from typing import Optional
 import httpx
 import numpy as np
 
-from config.lantmateriet import LANTMATERIET_CONFIG
+# Imported as a module, with the attribute read at call time. A
+# `from ... import LANTMATERIET_CONFIG` binds the object that existed when this
+# module was first imported, so a reassignment of
+# `config.lantmateriet.LANTMATERIET_CONFIG` - the only way the config is ever
+# reloaded - would never be seen here. See config/lantmateriet.py.
+from config import lantmateriet as lm_config
 
 logger = logging.getLogger(__name__)
 
@@ -388,7 +393,7 @@ def _gdal_vsicurl_env() -> dict:
     return {
         "GDAL_HTTP_AUTH": "BASIC",
         "GDAL_HTTP_USERPWD": (
-            f"{LANTMATERIET_CONFIG.username}:{LANTMATERIET_CONFIG.password}"
+            f"{lm_config.LANTMATERIET_CONFIG.username}:{lm_config.LANTMATERIET_CONFIG.password}"
         ),
         "GDAL_HTTP_TIMEOUT": "60",
         # Disable directory listing — we know exactly which files we want
@@ -937,14 +942,14 @@ async def fetch_stac_orthophoto(
     Returns:
         PNG image bytes, or None on failure.
     """
-    if not LANTMATERIET_CONFIG.has_credentials():
+    if not lm_config.LANTMATERIET_CONFIG.has_credentials():
         logger.info(
             "No Lantmäteriet credentials configured — skipping STAC Bild orthophoto"
         )
         return None
 
     w, s, e, n = bbox_wgs84
-    search_url = f"{LANTMATERIET_CONFIG.stac_bild_endpoint}search"
+    search_url = f"{lm_config.LANTMATERIET_CONFIG.stac_bild_endpoint}search"
     query = {
         "bbox": [w, s, e, n],
         "sortby": [{"field": "properties.datetime", "direction": "desc"}],  # newest imagery first
