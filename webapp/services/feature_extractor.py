@@ -34,7 +34,14 @@ def extract_water_features(water_data: dict, country_code: str = "UNKNOWN", job 
         Processed water feature data
     """
     if not water_data or not water_data.get("features"):
-        return {"lakes": [], "rivers": [], "coastlines": [], "wetlands": [], "stats": {}}
+        return {
+            "lakes": [], "rivers": [], "coastlines": [], "wetlands": [],
+            # Zero-filled, not empty: `stats` carries the same keys whether or
+            # not the drawn area has water, the way road_processor already
+            # does. An empty dict made `stats["lakes"]` a KeyError on any
+            # water-free map and left callers reaching for .get(..., 0).
+            "stats": {"lakes": 0, "rivers": 0, "coastlines": 0, "wetlands": 0},
+        }
 
     lakes = []
     rivers = []
@@ -167,7 +174,7 @@ def extract_forest_features(
         Processed forest data with type and density info
     """
     if not forest_data or not forest_data.get("features"):
-        return {"forests": [], "stats": {}}
+        return {"forests": [], "stats": {"total_areas": 0, "by_type": {}}}
 
     forests = []
 
@@ -312,7 +319,7 @@ def extract_building_features(
         Processed building data with prefab mapping
     """
     if not building_data or not building_data.get("features"):
-        return {"buildings": [], "stats": {}}
+        return {"buildings": [], "stats": {"total": 0, "by_type": {}}}
 
     buildings = []
 
