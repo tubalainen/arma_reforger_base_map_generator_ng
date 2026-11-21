@@ -60,5 +60,12 @@ def _load_config() -> LantmaterietConfig:
     )
 
 
-# Global instance (loaded from env at import time)
+# Global instance, loaded from env at import time.
+#
+# Read it as `lantmateriet.LANTMATERIET_CONFIG` through the module, never
+# `from config.lantmateriet import LANTMATERIET_CONFIG`. The second form binds
+# this object permanently in the importing module, so reassigning the name here
+# - which is the only reload path, and what the tests use to inject
+# credentials - would not reach that module. That cost two "environment noise"
+# test failures in v1.19.0; test_lantmateriet_config_binding.py now guards it.
 LANTMATERIET_CONFIG = _load_config()

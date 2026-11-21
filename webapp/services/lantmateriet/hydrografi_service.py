@@ -23,7 +23,12 @@ import asyncio
 import logging
 from typing import Optional
 
-from config.lantmateriet import LANTMATERIET_CONFIG
+# Imported as a module, with the attribute read at call time. A
+# `from ... import LANTMATERIET_CONFIG` binds the object that existed when this
+# module was first imported, so a reassignment of
+# `config.lantmateriet.LANTMATERIET_CONFIG` - the only way the config is ever
+# reloaded - would never be seen here. See config/lantmateriet.py.
+from config import lantmateriet as lm_config
 from services.lantmateriet.ogc_features_client import fetch_ogc_collection
 
 logger = logging.getLogger(__name__)
@@ -265,7 +270,7 @@ async def fetch_lantmateriet_water(
         GeoJSON FeatureCollection matching osm_service water schema,
         or None if all collections fail (triggers OSM fallback).
     """
-    base_url = LANTMATERIET_CONFIG.hydrografi_endpoint
+    base_url = lm_config.LANTMATERIET_CONFIG.hydrografi_endpoint
 
     if job:
         job.add_log("Fetching water features from Lantmäteriet Hydrografi...")

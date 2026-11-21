@@ -44,7 +44,12 @@ from typing import Optional
 import httpx
 import numpy as np
 
-from config.lantmateriet import LANTMATERIET_CONFIG
+# Imported as a module, with the attribute read at call time. A
+# `from ... import LANTMATERIET_CONFIG` binds the object that existed when this
+# module was first imported, so a reassignment of
+# `config.lantmateriet.LANTMATERIET_CONFIG` - the only way the config is ever
+# reloaded - would never be seen here. See config/lantmateriet.py.
+from config import lantmateriet as lm_config
 from services.lantmateriet.auth import get_basic_auth_header
 
 logger = logging.getLogger(__name__)
@@ -107,7 +112,7 @@ async def fetch_stac_elevation(
     Returns:
         GeoTIFF bytes covering the bbox, or None on failure.
     """
-    if not LANTMATERIET_CONFIG.has_credentials():
+    if not lm_config.LANTMATERIET_CONFIG.has_credentials():
         logger.error("Cannot fetch STAC elevation: no authentication credentials")
         return None
 
@@ -116,7 +121,7 @@ async def fetch_stac_elevation(
         logger.error("Cannot fetch STAC elevation: auth header generation failed")
         return None
 
-    search_url = f"{LANTMATERIET_CONFIG.stac_hojd_endpoint}search"
+    search_url = f"{lm_config.LANTMATERIET_CONFIG.stac_hojd_endpoint}search"
 
     # STAC search: bbox must be WGS84 per STAC specification.
     # Convert from native CRS (EPSG:3006) to EPSG:4326.
