@@ -1,4 +1,4 @@
-FROM python:3.11-slim-bookworm AS builder
+FROM python:3.15-slim-bookworm AS builder
 
 # No build dependencies, and no apt layer at all.
 #
@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ============================================
 # Production image
 # ============================================
-FROM python:3.11-slim-bookworm
+FROM python:3.15-slim-bookworm
 
 # Install runtime dependencies only.
 #
