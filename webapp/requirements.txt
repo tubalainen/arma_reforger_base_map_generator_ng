@@ -23,7 +23,7 @@ pyproj==3.8.0
 
 # Testing
 pytest==9.1.1
-pytest-asyncio==1.4.1
+pytest-asyncio==1.5.0
 
 # Transitive dependencies, pinned on purpose
 # ---------------------------------------------------------------------------
