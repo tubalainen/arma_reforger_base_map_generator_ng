@@ -22,7 +22,7 @@ pyproj==3.8.0
 # PR #236. Nothing in the tree requires it transitively either.
 
 # Testing
-pytest==9.1.1
+pytest==9.2.0
 pytest-asyncio==1.4.1
 
 # Transitive dependencies, pinned on purpose
