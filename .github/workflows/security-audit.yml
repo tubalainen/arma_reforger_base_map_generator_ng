@@ -47,7 +47,7 @@ jobs:
         # would be the obvious choice, but even with --no-deps it dry-run-installs
         # the file, and GDAL ships no wheel - resolving it needs libgdal-dev on
         # the runner and fails.
-        uses: google/osv-scanner-action/osv-scanner-action@v2.7.0
+        uses: google/osv-scanner-action/osv-scanner-action@v2.7.1
         with:
           scan-args: |-
             --lockfile=requirements.txt:webapp/requirements.txt
